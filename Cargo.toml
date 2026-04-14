@@ -1,0 +1,16 @@
+[package]
+name = "pithos"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+saphyr = "=0.0.6"
+thiserror = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
+
+[[bin]]
+name = "pithos"
+path = "src/main.rs"
