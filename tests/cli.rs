@@ -85,3 +85,53 @@ fn cli_exit_2_when_pithos_missing_with_minimal_example_hint() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[test]
+fn cli_exit_2_on_missing_toolchains() {
+    // Arrange
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), "{}\n").unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(&td)
+        .assert()
+        .code(2);
+
+    // Assert
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("missing required key"),
+        "stderr missing 'missing required key' phrase: {stderr}"
+    );
+    assert!(
+        stderr.contains("toolchains"),
+        "stderr missing 'toolchains' phrase: {stderr}"
+    );
+}
+
+#[test]
+fn cli_exit_2_on_unknown_top_level_key() {
+    // Arrange
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), "toolchains: {}\nbogus: 1\n").unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(&td)
+        .assert()
+        .code(2);
+
+    // Assert
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("bogus"),
+        "stderr missing offending key 'bogus': {stderr}"
+    );
+    assert!(
+        stderr.contains("toolchains"),
+        "stderr missing valid-key 'toolchains': {stderr}"
+    );
+}
