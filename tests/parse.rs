@@ -24,7 +24,10 @@ fn syntax_error_pins_line() {
     let ConfigError::Parse { line, msg, .. } = err else {
         panic!("got {err:?}")
     };
-    assert!(line >= 3, "expected error near line 3, got line {line}: {msg}");
+    assert!(
+        line >= 3,
+        "expected error near line 3, got line {line}: {msg}"
+    );
 }
 
 #[test]

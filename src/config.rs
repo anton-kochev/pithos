@@ -7,7 +7,11 @@ pub enum ConfigError {
 
     /// `line` and `col` are 1-based, as reported by `saphyr::Marker`.
     #[error(".pithos line {line}:{col}: {msg}")]
-    Parse { line: usize, col: usize, msg: String },
+    Parse {
+        line: usize,
+        col: usize,
+        msg: String,
+    },
 }
 
 /// An empty .pithos document (no content) is represented as Null;

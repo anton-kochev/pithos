@@ -55,3 +55,33 @@ fn cli_reads_from_cwd() {
     assert_eq!(good_code, Some(0), "valid config should exit 0");
     assert_eq!(bad_code, Some(2), "malformed config should exit 2");
 }
+
+#[test]
+fn cli_exit_2_when_pithos_missing_with_minimal_example_hint() {
+    // Arrange
+    let td = tempdir().unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(&td)
+        .assert()
+        .code(2);
+
+    // Assert
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(".pithos not found"),
+        "stderr missing '.pithos not found' phrase: {stderr}"
+    );
+    assert!(
+        stderr.contains("toolchains: {}"),
+        "stderr missing 'toolchains: {{}}' minimal example: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout should be empty, got: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -13,6 +14,13 @@ fn main() -> ExitCode {
     let path = cwd.join(".pithos");
     let bytes = match fs::read(&path) {
         Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            eprintln!(">> ERROR: .pithos not found");
+            eprintln!(">> Create a .pithos file at the project root. Minimal example:");
+            eprintln!(">>");
+            eprintln!(">>   toolchains: {{}}");
+            return ExitCode::from(2);
+        }
         Err(e) => {
             eprintln!(">> ERROR: {}: {e}", path.display());
             return ExitCode::from(1);
