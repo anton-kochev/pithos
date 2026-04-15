@@ -46,7 +46,7 @@ pub enum ConfigError {
     #[error(".pithos toolchains.{toolchain}: version `{value}` must match `N`, `N.N`, or `N.N.N` (digits only)")]
     InvalidVersion { toolchain: String, value: String },
 
-    #[error(".pithos toolchains.{toolchain}: version must be a quoted string")]
+    #[error(".pithos toolchains.{toolchain}: version must be a quoted string; wrap the value in quotes, e.g. `{toolchain}: \"1.85.0\"`")]
     NonStringVersion { toolchain: String },
 }
 

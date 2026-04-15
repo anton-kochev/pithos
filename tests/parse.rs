@@ -304,6 +304,181 @@ fn non_string_version_rejected() {
 }
 
 #[test]
+fn null_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust:\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    let ConfigError::NonStringVersion { toolchain } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(toolchain, "rust");
+}
+
+#[test]
+fn explicit_null_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: ~\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::NonStringVersion { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn unquoted_integer_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: 10\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    let ConfigError::NonStringVersion { toolchain } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(toolchain, "rust");
+}
+
+#[test]
+fn unquoted_negative_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: -1\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::NonStringVersion { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn unquoted_float_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  dotnet: 10.0\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    let ConfigError::NonStringVersion { toolchain } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(toolchain, "dotnet");
+}
+
+#[test]
+fn unquoted_scientific_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  dotnet: 1e5\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::NonStringVersion { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn unquoted_octal_like_version_rejected() {
+    // Arrange — oracle test: saphyr behavior dictates outcome
+    let bytes = b"toolchains:\n  dotnet: 010\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::NonStringVersion { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn explicit_true_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: true\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::NonStringVersion { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn explicit_false_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: false\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::NonStringVersion { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn multi_toolchain_names_offending_key() {
+    // Arrange — first toolchain valid, second has bad version
+    let bytes = b"toolchains:\n  rust: \"1.85.0\"\n  dotnet: 10.0\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    let ConfigError::NonStringVersion { toolchain } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(toolchain, "dotnet");
+}
+
+#[test]
+fn non_string_version_message_instructs_quoting() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: 1.85\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    let msg = err.to_string();
+    let msg_lower = msg.to_lowercase();
+    assert!(
+        msg_lower.contains("toolchains.rust"),
+        "message should name key path: {msg}"
+    );
+    assert!(
+        msg_lower.contains("quote"),
+        "message should tell user to quote: {msg}"
+    );
+    assert!(
+        msg.contains('"'),
+        "message should include a quoted example: {msg}"
+    );
+}
+
+#[test]
 fn non_string_toolchain_key_rejected() {
     // Arrange — numeric key inside toolchains mapping
     let bytes = b"toolchains:\n  42: \"1.0\"\n";
