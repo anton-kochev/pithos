@@ -112,6 +112,60 @@ fn cli_exit_2_on_missing_toolchains() {
 }
 
 #[test]
+fn cli_exit_2_on_unknown_toolchain() {
+    // Arrange
+    let td = tempdir().unwrap();
+    fs::write(
+        td.path().join(".pithos"),
+        "toolchains:\n  python: \"3.12\"\n",
+    )
+    .unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(&td)
+        .assert()
+        .code(2);
+
+    // Assert
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("python"),
+        "stderr missing offending toolchain name 'python': {stderr}"
+    );
+    assert!(
+        stderr.contains("dotnet") && stderr.contains("rust") && stderr.contains("go"),
+        "stderr missing valid toolchain names: {stderr}"
+    );
+}
+
+#[test]
+fn cli_exit_2_on_floating_version() {
+    // Arrange
+    let td = tempdir().unwrap();
+    fs::write(
+        td.path().join(".pithos"),
+        "toolchains:\n  rust: \"stable\"\n",
+    )
+    .unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(&td)
+        .assert()
+        .code(2);
+
+    // Assert
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("stable"),
+        "stderr missing offending value 'stable': {stderr}"
+    );
+}
+
+#[test]
 fn cli_exit_2_on_unknown_top_level_key() {
     // Arrange
     let td = tempdir().unwrap();

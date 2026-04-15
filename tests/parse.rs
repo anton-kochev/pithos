@@ -104,3 +104,231 @@ fn empty_toolchains_mapping_parses() {
     // Assert
     result.unwrap();
 }
+
+#[test]
+fn non_string_top_level_key_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\n123: x\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-top-level-key error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::NonStringTopLevelKey),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn toolchains_scalar_rejected() {
+    // Arrange
+    let bytes = b"toolchains: foo\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected toolchains-not-mapping error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::ToolchainsNotMapping),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn toolchains_sequence_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  - dotnet\n  - rust\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected toolchains-not-mapping error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::ToolchainsNotMapping),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn valid_toolchain_versions_parse() {
+    // Arrange
+    let bytes = b"toolchains:\n  dotnet: \"10.0.102\"\n  rust: \"1.85.0\"\n  go: \"1\"\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn unknown_toolchain_name_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  python: \"3.12\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected unknown-toolchain error");
+
+    // Assert
+    let ConfigError::UnknownToolchain { name } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(name, "python");
+}
+
+#[test]
+fn unknown_toolchain_error_message_lists_valid_names() {
+    // Arrange
+    let bytes = b"toolchains:\n  python: \"3.12\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected unknown-toolchain error");
+
+    // Assert
+    let msg = err.to_string();
+    for expected in ["dotnet", "rust", "go"] {
+        assert!(
+            msg.contains(expected),
+            "error message missing valid name `{expected}`: {msg}"
+        );
+    }
+}
+
+#[test]
+fn invalid_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  dotnet: \"1.2.3.4\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-version error");
+
+    // Assert
+    let ConfigError::InvalidVersion { toolchain, value } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(toolchain, "dotnet");
+    assert_eq!(value, "1.2.3.4");
+}
+
+#[test]
+fn non_numeric_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: \"1.85-beta\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::InvalidVersion { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn floating_stable_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: \"stable\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected floating-version error");
+
+    // Assert
+    let ConfigError::FloatingVersionRejected { toolchain, value } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(toolchain, "rust");
+    assert_eq!(value, "stable");
+}
+
+#[test]
+fn floating_nightly_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: \"nightly\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected floating-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::FloatingVersionRejected { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn floating_latest_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  dotnet: \"latest\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected floating-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::FloatingVersionRejected { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn floating_version_message_suggests_exact_version() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: \"stable\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected floating-version error");
+
+    // Assert
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("exact"),
+        "error message should suggest an exact version: {msg}"
+    );
+}
+
+#[test]
+fn non_string_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains:\n  rust: 1.85\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-version error");
+
+    // Assert
+    let ConfigError::NonStringVersion { toolchain } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(toolchain, "rust");
+}
+
+#[test]
+fn non_string_toolchain_key_rejected() {
+    // Arrange — numeric key inside toolchains mapping
+    let bytes = b"toolchains:\n  42: \"1.0\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-toolchain-key error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::NonStringToolchainKey),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn first_invalid_toolchain_wins() {
+    // Arrange — unknown toolchain comes first, invalid version second
+    let bytes = b"toolchains:\n  python: \"3.12\"\n  dotnet: \"latest\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected unknown-toolchain error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::UnknownToolchain { .. }),
+        "first offender should win, got {err:?}"
+    );
+}
