@@ -1,4 +1,5 @@
 mod error;
+mod extras;
 mod toolchains;
 
 use saphyr::{LoadableYamlNode, ScalarOwned, YamlOwned};
@@ -12,13 +13,17 @@ fn first_or_empty(docs: Vec<YamlOwned>) -> YamlOwned {
         .unwrap_or(YamlOwned::Value(ScalarOwned::Null))
 }
 
-fn validate_top_level(doc: &YamlOwned) -> Result<&YamlOwned, ConfigError> {
+/// Returns `(toolchains, extras)` — `extras` is `None` when the key is absent.
+fn validate_top_level(
+    doc: &YamlOwned,
+) -> Result<(&YamlOwned, Option<&YamlOwned>), ConfigError> {
     let Some(mapping) = doc.as_mapping() else {
         // Null, scalar, or sequence — none of these carry a `toolchains` key.
         return Err(ConfigError::MissingToolchains);
     };
 
     let mut toolchains: Option<&YamlOwned> = None;
+    let mut extras: Option<&YamlOwned> = None;
     for (key, value) in mapping {
         let Some(name) = key.as_str() else {
             return Err(ConfigError::NonStringTopLevelKey);
@@ -28,12 +33,15 @@ fn validate_top_level(doc: &YamlOwned) -> Result<&YamlOwned, ConfigError> {
                 key: name.to_string(),
             });
         }
-        if name == "toolchains" {
-            toolchains = Some(value);
+        match name {
+            "toolchains" => toolchains = Some(value),
+            "extras" => extras = Some(value),
+            _ => {}
         }
     }
 
-    toolchains.ok_or(ConfigError::MissingToolchains)
+    let toolchains = toolchains.ok_or(ConfigError::MissingToolchains)?;
+    Ok((toolchains, extras))
 }
 
 pub fn load(bytes: &[u8]) -> Result<YamlOwned, ConfigError> {
@@ -48,7 +56,10 @@ pub fn load(bytes: &[u8]) -> Result<YamlOwned, ConfigError> {
     })?;
     // Multi-doc rejection is deferred per the 1.1 plan — take the first.
     let doc = first_or_empty(docs);
-    let toolchains = validate_top_level(&doc)?;
+    let (toolchains, extras) = validate_top_level(&doc)?;
     toolchains::validate(toolchains)?;
+    if let Some(extras) = extras {
+        extras::validate(extras)?;
+    }
     Ok(doc)
 }

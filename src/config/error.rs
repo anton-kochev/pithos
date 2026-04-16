@@ -1,7 +1,8 @@
 use std::fmt;
 
-pub(super) const VALID_TOP_LEVEL: &[&str] = &["toolchains"];
+pub(super) const VALID_TOP_LEVEL: &[&str] = &["toolchains", "extras"];
 pub(super) const VALID_TOOLCHAINS: &[&str] = &["dotnet", "rust", "go"];
+pub(super) const VALID_EXTRAS: &[&str] = &["apt"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -48,6 +49,27 @@ pub enum ConfigError {
 
     #[error(".pithos toolchains.{toolchain}: version must be a quoted string; wrap the value in quotes, e.g. `{toolchain}: \"1.85.0\"`")]
     NonStringVersion { toolchain: String },
+
+    #[error(".pithos: `extras` must be a mapping")]
+    ExtrasNotMapping,
+
+    #[error(".pithos: `extras` keys must be strings")]
+    NonStringExtrasKey,
+
+    #[error(
+        ".pithos extras.{key}: unknown key; valid: {}",
+        ListBackticked(VALID_EXTRAS)
+    )]
+    UnknownExtrasKey { key: String },
+
+    #[error(".pithos extras.apt: must be a sequence")]
+    AptNotSequence,
+
+    #[error(".pithos extras.apt[{index}]: must be a string")]
+    AptEntryNotString { index: usize },
+
+    #[error(".pithos extras.apt: invalid package name `{entry}`; must match `^[a-z0-9][a-z0-9.+-]+$`")]
+    InvalidAptPackageName { entry: String },
 }
 
 struct ListBackticked(&'static [&'static str]);

@@ -494,6 +494,172 @@ fn non_string_toolchain_key_rejected() {
 }
 
 #[test]
+fn extras_empty_mapping_ok() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras: {}\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn extras_null_ok() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras: ~\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn extras_apt_null_ok() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras:\n  apt: ~\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn extras_apt_empty_sequence_ok() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras:\n  apt: []\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn extras_apt_valid_entries_ok() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras:\n  apt: [git, libssl3, g++]\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn extras_not_mapping_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras: foo\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected extras-not-mapping error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::ExtrasNotMapping), "got {err:?}");
+}
+
+#[test]
+fn extras_apt_not_sequence_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras:\n  apt: foo\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected apt-not-sequence error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::AptNotSequence), "got {err:?}");
+}
+
+#[test]
+fn extras_apt_entry_not_string_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras:\n  apt: [1]\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected apt-entry-not-string error");
+
+    // Assert
+    let ConfigError::AptEntryNotString { index } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(index, 0);
+}
+
+#[test]
+fn extras_apt_invalid_name_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras:\n  apt: [Git]\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-apt-package-name error");
+
+    // Assert
+    let msg = err.to_string();
+    let ConfigError::InvalidAptPackageName { entry } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(entry, "Git");
+    assert!(
+        msg.contains("Git"),
+        "error message should name the offending entry: {msg}"
+    );
+}
+
+#[test]
+fn extras_unknown_nested_key_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras:\n  aptt: [git]\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected unknown-extras-key error");
+
+    // Assert
+    let msg = err.to_string();
+    let ConfigError::UnknownExtrasKey { key } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(key, "aptt");
+    assert!(
+        msg.contains("apt"),
+        "error message should list valid key `apt`: {msg}"
+    );
+}
+
+#[test]
+fn extras_non_string_nested_key_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\nextras:\n  42: foo\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-extras-key error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::NonStringExtrasKey), "got {err:?}");
+}
+
+#[test]
+fn extras_apt_first_offender_wins() {
+    // Arrange — first entry valid, second invalid, third also invalid
+    let bytes = b"toolchains: {}\nextras:\n  apt: [git, BAD, also_bad]\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-apt-package-name error");
+
+    // Assert
+    let ConfigError::InvalidAptPackageName { entry } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(entry, "BAD");
+}
+
+#[test]
 fn first_invalid_toolchain_wins() {
     // Arrange — unknown toolchain comes first, invalid version second
     let bytes = b"toolchains:\n  python: \"3.12\"\n  dotnet: \"latest\"\n";

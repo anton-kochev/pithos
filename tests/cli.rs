@@ -166,6 +166,31 @@ fn cli_exit_2_on_floating_version() {
 }
 
 #[test]
+fn cli_exit_2_on_invalid_apt_name() {
+    // Arrange
+    let td = tempdir().unwrap();
+    fs::write(
+        td.path().join(".pithos"),
+        "toolchains: {}\nextras:\n  apt: [Git]\n",
+    )
+    .unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(&td)
+        .assert()
+        .code(2);
+
+    // Assert
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("Git"),
+        "stderr missing offending entry 'Git': {stderr}"
+    );
+}
+
+#[test]
 fn cli_exit_2_on_unknown_top_level_key() {
     // Arrange
     let td = tempdir().unwrap();
