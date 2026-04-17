@@ -228,6 +228,51 @@ mod tests {
     }
 
     #[test]
+    fn go_install_sh_exists_at_repo_root() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/go-install.sh");
+        assert!(
+            p.exists(),
+            "emitter's COPY toolchains/go-install.sh requires {} to exist",
+            p.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn go_install_sh_is_syntactically_valid_bash() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/go-install.sh");
+        let status = std::process::Command::new("bash")
+            .arg("-n")
+            .arg(&p)
+            .status()
+            .expect("bash must be available to run this test");
+        assert!(
+            status.success(),
+            "bash -n reported a syntax error in {}",
+            p.display()
+        );
+    }
+
+    #[test]
+    fn go_install_sh_contains_required_install_markers() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/go-install.sh");
+        let body = std::fs::read_to_string(&p).expect("go-install.sh must be readable");
+        for marker in [
+            "/opt/go",
+            "go.dev",
+            "mode=json",
+            "sha256sum",
+            "GOROOT",
+            "/etc/profile.d/pithos-go.sh",
+        ] {
+            assert!(
+                body.contains(marker),
+                "go-install.sh is missing required marker {marker:?}"
+            );
+        }
+    }
+
+    #[test]
     fn emit_base_only_for_empty_toolchains() {
         // Arrange
         const VALID: &str = "toolchains: {}\n";
