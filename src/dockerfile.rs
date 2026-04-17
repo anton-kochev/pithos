@@ -154,6 +154,34 @@ mod tests {
     }
 
     #[test]
+    fn dotnet_install_sh_exists_at_repo_root() {
+        let p =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/dotnet-install.sh");
+        assert!(
+            p.exists(),
+            "emitter's COPY toolchains/dotnet-install.sh requires {} to exist",
+            p.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dotnet_install_sh_is_syntactically_valid_bash() {
+        let p =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/dotnet-install.sh");
+        let status = std::process::Command::new("bash")
+            .arg("-n")
+            .arg(&p)
+            .status()
+            .expect("bash must be available to run this test");
+        assert!(
+            status.success(),
+            "bash -n reported a syntax error in {}",
+            p.display()
+        );
+    }
+
+    #[test]
     fn emit_base_only_for_empty_toolchains() {
         // Arrange
         const VALID: &str = "toolchains: {}\n";
