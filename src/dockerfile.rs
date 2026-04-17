@@ -182,6 +182,52 @@ mod tests {
     }
 
     #[test]
+    fn rust_install_sh_exists_at_repo_root() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/rust-install.sh");
+        assert!(
+            p.exists(),
+            "emitter's COPY toolchains/rust-install.sh requires {} to exist",
+            p.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_install_sh_is_syntactically_valid_bash() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/rust-install.sh");
+        let status = std::process::Command::new("bash")
+            .arg("-n")
+            .arg(&p)
+            .status()
+            .expect("bash must be available to run this test");
+        assert!(
+            status.success(),
+            "bash -n reported a syntax error in {}",
+            p.display()
+        );
+    }
+
+    #[test]
+    fn rust_install_sh_contains_required_install_markers() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/rust-install.sh");
+        let body = std::fs::read_to_string(&p).expect("rust-install.sh must be readable");
+        for marker in [
+            "/opt/cargo",
+            "/opt/rustup",
+            "rustfmt",
+            "clippy",
+            "chmod -R a+rX",
+            "sh.rustup.rs",
+            "/etc/profile.d/pithos-rust.sh",
+        ] {
+            assert!(
+                body.contains(marker),
+                "rust-install.sh is missing required marker {marker:?}"
+            );
+        }
+    }
+
+    #[test]
     fn emit_base_only_for_empty_toolchains() {
         // Arrange
         const VALID: &str = "toolchains: {}\n";
