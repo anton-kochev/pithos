@@ -144,6 +144,16 @@ mod tests {
     use crate::config;
 
     #[test]
+    fn entrypoint_sh_exists_at_repo_root() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("entrypoint.sh");
+        assert!(
+            p.exists(),
+            "emitter's COPY entrypoint.sh requires {} to exist",
+            p.display()
+        );
+    }
+
+    #[test]
     fn emit_base_only_for_empty_toolchains() {
         // Arrange
         const VALID: &str = "toolchains: {}\n";
