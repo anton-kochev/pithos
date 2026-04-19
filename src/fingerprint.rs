@@ -29,6 +29,18 @@ pub fn compute(dockerfile: &str, pithos: &[u8], installers: &BTreeMap<String, Ve
     hex
 }
 
+/// Docker label key under which the fingerprint is stored on built images
+/// (FR-202). Used by `docker build --label LABEL_KEY=<hash>` and queried
+/// via `docker inspect` to detect cache hits (FR-203).
+pub const LABEL_KEY: &str = "dev.pithos.fingerprint";
+
+/// Format a fingerprint hash as a `key=value` string ready to pass after
+/// `--label` to `docker build` (FR-402). `hash` is expected to be `compute()`
+/// output — this function does not validate; garbage in, garbage out.
+pub fn label(hash: &str) -> String {
+    format!("{LABEL_KEY}={hash}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +118,10 @@ mod tests {
         let a = compute("FROM base\n", b"x: 1\n", &a_map);
         let b = compute("FROM base\n", b"x: 1\n", &b_map);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn label_formats_key_equals_hash() {
+        assert_eq!(label("abc123"), "dev.pithos.fingerprint=abc123");
     }
 }
