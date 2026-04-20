@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 use crate::fingerprint;
@@ -43,6 +44,55 @@ fn parse_image_ids(stdout: &str) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .map(String::from)
         .collect()
+}
+
+/// Failure modes for [`build`]. `Spawn` covers the executable not being
+/// found in PATH or transient OS-level launch errors; `NonZero` carries
+/// the docker process's exit code so future callers can present richer
+/// diagnostics without re-parsing a string.
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error("docker build: {0}")]
+    Spawn(#[from] std::io::Error),
+    #[error("docker build failed (exit {code:?})")]
+    NonZero { code: Option<i32> },
+}
+
+/// Invoke `docker build` against `context`, using `dockerfile` (typically
+/// `<project>/.pithos.d/Dockerfile`), tagging the result `pithos:<project>`
+/// and labeling it with the fingerprint hash (FR-401, FR-402).
+///
+/// stdout/stderr inherit to the caller's terminal — output styling is a
+/// later concern. Errors surface as [`BuildError`]:
+/// - `docker` not in PATH or transient OS launch failure → [`BuildError::Spawn`]
+/// - non-zero exit from `docker build` → [`BuildError::NonZero`] carrying the exit code
+///
+/// Shells out to:
+///   docker build -f <dockerfile> --tag pithos:<project> --label <label> <context>
+pub fn build(
+    context: &Path,
+    dockerfile: &Path,
+    project: &str,
+    hash: &str,
+) -> Result<(), BuildError> {
+    let tag = format!("pithos:{project}");
+    let label = fingerprint::label(hash);
+    let status = Command::new("docker")
+        .arg("build")
+        .arg("-f")
+        .arg(dockerfile)
+        .arg("--tag")
+        .arg(&tag)
+        .arg("--label")
+        .arg(&label)
+        .arg(context)
+        .status()?;
+    if !status.success() {
+        return Err(BuildError::NonZero {
+            code: status.code(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

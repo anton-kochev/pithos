@@ -405,3 +405,41 @@ CMD [\"pi\"]
 ";
     assert_eq!(content, expected);
 }
+
+#[test]
+fn cli_build_subcommand_exits_nonzero_when_docker_unavailable() {
+    // Arrange — minimal valid .pithos; the build branch will reach the docker
+    // shellout, which fails at spawn because PATH is empty.
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), VALID).unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("build")
+        .current_dir(&td)
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        // Belt-and-suspenders: even if `docker` ends up on PATH after a
+        // future refactor, point it at a non-existent socket so it can't
+        // reach a real daemon.
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert()
+        .failure();
+
+    // Assert
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(">> ERROR:"),
+        "stderr missing '>> ERROR:' marker: {stderr}"
+    );
+    // Sanity: the Dockerfile should still have been emitted before the build
+    // attempt — emit precedes the docker shellout in main.rs.
+    assert!(
+        td.path().join(".pithos.d").join("Dockerfile").is_file(),
+        "Dockerfile should be emitted before the docker shellout failure"
+    );
+}

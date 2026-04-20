@@ -94,6 +94,17 @@ fn sorted_toolchains(yaml: &YamlOwned) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Return the toolchain names from a validated `.pithos` config in
+/// alphabetical order. Used by main.rs to assemble the installer-bytes
+/// map for fingerprinting; the full `(name, version)` shape stays private
+/// to the emitter.
+///
+/// **Precondition:** `yaml` must be the validated output of
+/// [`crate::config::load`]. Same panic contract as [`emit`].
+pub fn toolchain_names(yaml: &YamlOwned) -> impl Iterator<Item = String> {
+    sorted_toolchains(yaml).into_keys()
+}
+
 fn apt_packages(yaml: &YamlOwned) -> Vec<String> {
     // Walk the top-level mapping for `extras`; absent or null → empty.
     // Then walk the extras mapping for `apt`; absent or null → empty.
