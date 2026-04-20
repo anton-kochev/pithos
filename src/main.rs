@@ -7,18 +7,42 @@ use std::process::ExitCode;
 
 use saphyr::YamlOwned;
 
+#[derive(Debug, PartialEq, Eq)]
+enum RejectKind {
+    Subcommand,
+    Flag,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 enum Subcommand {
     None,
-    Build,
-    Unknown(String),
+    Build { rebuild: bool },
+    Reject { kind: RejectKind, value: String },
 }
 
 impl Subcommand {
     fn from_args(args: &[String]) -> Self {
         match args.get(1).map(String::as_str) {
             None => Self::None,
-            Some("build") => Self::Build,
-            Some(other) => Self::Unknown(other.to_string()),
+            Some("build") => {
+                let mut rebuild = false;
+                for arg in args.iter().skip(2) {
+                    match arg.as_str() {
+                        "--rebuild" => rebuild = true,
+                        other => {
+                            return Self::Reject {
+                                kind: RejectKind::Flag,
+                                value: other.to_string(),
+                            };
+                        }
+                    }
+                }
+                Self::Build { rebuild }
+            }
+            Some(other) => Self::Reject {
+                kind: RejectKind::Subcommand,
+                value: other.to_string(),
+            },
         }
     }
 }
@@ -27,10 +51,14 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let subcommand = Subcommand::from_args(&args);
 
-    // Fail fast on unknown subcommand before any I/O — typos like `pithos buidl`
-    // shouldn't require a `.pithos` file or mutate `.pithos.d/Dockerfile`.
-    if let Subcommand::Unknown(name) = &subcommand {
-        eprintln!(">> ERROR: unknown subcommand: {name}");
+    // Fail fast on unknown subcommand/flag before any I/O — typos like `pithos buidl`
+    // or `pithos build --nope` shouldn't require a `.pithos` file or mutate
+    // `.pithos.d/Dockerfile`.
+    if let Subcommand::Reject { kind, value } = &subcommand {
+        match kind {
+            RejectKind::Subcommand => eprintln!(">> ERROR: unknown subcommand: {value}"),
+            RejectKind::Flag => eprintln!(">> ERROR: unknown flag: {value}"),
+        }
         return ExitCode::from(1);
     }
 
@@ -60,14 +88,15 @@ fn main() -> ExitCode {
 
     match subcommand {
         Subcommand::None => ExitCode::SUCCESS,
-        Subcommand::Build => run_build(
+        Subcommand::Build { rebuild } => run_build(
             &cwd,
             &yaml,
             &pithos_bytes,
             &dockerfile_path,
             &dockerfile_content,
+            rebuild,
         ),
-        Subcommand::Unknown(_) => unreachable!("handled by fail-fast guard above"),
+        Subcommand::Reject { .. } => unreachable!("handled by fail-fast guard above"),
     }
 }
 
@@ -103,12 +132,19 @@ fn write_dockerfile(path: &Path, content: &str) -> Result<(), ExitCode> {
     Ok(())
 }
 
+/// Return the cached image id to reuse, if any, given the `--rebuild` flag
+/// and the result of a fingerprint cache lookup. Pure — no I/O.
+fn cached_image_to_reuse(rebuild: bool, cached: Option<&str>) -> Option<&str> {
+    if rebuild { None } else { cached }
+}
+
 fn run_build(
     cwd: &Path,
     yaml: &YamlOwned,
     pithos_bytes: &[u8],
     dockerfile_path: &Path,
     dockerfile_content: &str,
+    rebuild: bool,
 ) -> ExitCode {
     let project = match pithos::project::name_from_path(cwd) {
         Some(n) => n,
@@ -134,6 +170,18 @@ fn run_build(
     }
     let hash = pithos::fingerprint::compute(dockerfile_content, pithos_bytes, &installers);
 
+    let cached = match pithos::docker::find_image_by_fingerprint(&hash) {
+        Ok(opt) => opt,
+        Err(e) => {
+            eprintln!(">> ERROR: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Some(id) = cached_image_to_reuse(rebuild, cached.as_deref()) {
+        eprintln!(">> cached image {id} matches fingerprint; skipping build");
+        return ExitCode::SUCCESS;
+    }
+
     // `TempDir` cleans on Drop; SIGINT runs Drop, SIGKILL leaks under `$TMPDIR` for the OS to reap.
     let context = match tempfile::tempdir() {
         Ok(t) => t,
@@ -153,5 +201,105 @@ fn run_build(
             eprintln!(">> ERROR: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn cached_image_to_reuse_rebuild_with_cache_returns_none() {
+        // --rebuild overrides a cache hit → run the build
+        assert_eq!(cached_image_to_reuse(true, Some("abc123")), None);
+    }
+
+    #[test]
+    fn cached_image_to_reuse_rebuild_without_cache_returns_none() {
+        // --rebuild with no cache → still run the build
+        assert_eq!(cached_image_to_reuse(true, None), None);
+    }
+
+    #[test]
+    fn cached_image_to_reuse_no_rebuild_without_cache_returns_none() {
+        // No flag, no cache → build
+        assert_eq!(cached_image_to_reuse(false, None), None);
+    }
+
+    #[test]
+    fn cached_image_to_reuse_no_rebuild_with_cache_returns_id() {
+        // No flag, cache hit → skip and surface the id
+        assert_eq!(cached_image_to_reuse(false, Some("abc123")), Some("abc123"));
+    }
+
+    #[test]
+    fn from_args_build_without_flag() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "build"])),
+            Subcommand::Build { rebuild: false }
+        );
+    }
+
+    #[test]
+    fn from_args_build_with_rebuild() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "build", "--rebuild"])),
+            Subcommand::Build { rebuild: true }
+        );
+    }
+
+    #[test]
+    fn from_args_build_rejects_unknown_flag() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "build", "--nope"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "--nope".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_build_rejects_trailing_positional() {
+        // Stray positionals after a flag are rejected — `build` takes none.
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "build", "--rebuild", "extra"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "extra".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_flag_before_subcommand_is_unknown_subcommand() {
+        // `--rebuild` sitting in args[1] falls through the subcommand path.
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "--rebuild", "build"])),
+            Subcommand::Reject {
+                kind: RejectKind::Subcommand,
+                value: "--rebuild".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_no_subcommand_is_none() {
+        assert_eq!(Subcommand::from_args(&args(&["pithos"])), Subcommand::None);
+    }
+
+    #[test]
+    fn from_args_typo_is_unknown() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "buidl"])),
+            Subcommand::Reject {
+                kind: RejectKind::Subcommand,
+                value: "buidl".to_string(),
+            }
+        );
     }
 }

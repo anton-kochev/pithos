@@ -449,3 +449,29 @@ fn cli_build_subcommand_exits_nonzero_when_docker_unavailable() {
         "Dockerfile should be emitted before the docker shellout failure"
     );
 }
+
+#[test]
+fn cli_build_rejects_unknown_flag() {
+    // Arrange — no .pithos needed; unknown-flag parsing errors before any I/O.
+    let td = tempdir().unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .args(["build", "--nope"])
+        .current_dir(&td)
+        .assert()
+        .code(1);
+
+    // Assert
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains(">> ERROR: unknown flag: --nope"),
+        "stderr missing '>> ERROR: unknown flag: --nope' marker: {stderr}"
+    );
+    // Sanity: the fail-fast guard runs before any filesystem mutation.
+    assert!(
+        !td.path().join(".pithos.d").exists(),
+        ".pithos.d should not be created when flag parsing fails"
+    );
+}
