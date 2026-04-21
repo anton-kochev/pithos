@@ -433,7 +433,7 @@ fn cli_build_subcommand_exits_nonzero_when_docker_unavailable() {
         // reach a real daemon.
         .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
         .assert()
-        .failure();
+        .code(1);
 
     // Assert
     let output = assert.get_output();

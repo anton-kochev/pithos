@@ -56,7 +56,19 @@ pub enum BuildError {
     #[error("docker build: {0}")]
     Spawn(#[from] std::io::Error),
     #[error("docker build failed (exit {code:?})")]
-    NonZero { code: Option<i32> },
+    NonZero { code: Option<i32>, tail: Vec<String> },
+}
+
+/// Merge per-stream tails into a single capped tail. Stderr-first because
+/// `docker build --progress=plain` emits build progress on stderr; stdout
+/// carries at most the final image ID, so it belongs at the end of the
+/// chronological reconstruction. Truncates from the front to keep the last
+/// `cap` lines.
+fn merge_tails(stderr: Vec<String>, stdout: Vec<String>, cap: usize) -> Vec<String> {
+    let mut merged = stderr;
+    merged.extend(stdout);
+    let start = merged.len().saturating_sub(cap);
+    merged.split_off(start)
 }
 
 /// Invoke `docker build` against `context`, using `dockerfile` (typically
@@ -81,6 +93,7 @@ pub fn build(
     hash: &str,
     style: Style,
 ) -> Result<(), BuildError> {
+    const TAIL_LINES: usize = 20;
     let tag = format!("pithos:{project}");
     let label = fingerprint::label(hash);
     let mut child = Command::new("docker")
@@ -100,22 +113,21 @@ pub fn build(
     let stdout = child.stdout.take().expect("stdout piped above");
     let stderr = child.stderr.take().expect("stderr piped above");
     let t_out = std::thread::spawn(move || {
-        crate::output::stream_lines(stdout, std::io::stderr(), style)
+        crate::output::stream_lines(stdout, std::io::stderr(), style, TAIL_LINES)
     });
     let t_err = std::thread::spawn(move || {
-        crate::output::stream_lines(stderr, std::io::stderr(), style)
+        crate::output::stream_lines(stderr, std::io::stderr(), style, TAIL_LINES)
     });
 
     let status = child.wait()?;
     // Panics in reader threads are bugs — surface them loudly rather than
     // silently reporting success/failure based on docker's exit code alone.
-    t_out.join().expect("stdout reader thread panicked");
-    t_err.join().expect("stderr reader thread panicked");
+    let stdout_tail = t_out.join().expect("stdout reader thread panicked");
+    let stderr_tail = t_err.join().expect("stderr reader thread panicked");
 
     if !status.success() {
-        return Err(BuildError::NonZero {
-            code: status.code(),
-        });
+        let tail = merge_tails(stderr_tail, stdout_tail, TAIL_LINES);
+        return Err(BuildError::NonZero { code: status.code(), tail });
     }
     Ok(())
 }
@@ -142,5 +154,33 @@ mod tests {
             parse_image_ids("a1b2c3d4e5f6\nb2c3d4e5f6a1\n"),
             vec!["a1b2c3d4e5f6".to_string(), "b2c3d4e5f6a1".to_string()]
         );
+    }
+
+    #[test]
+    fn merge_tails_both_empty_returns_empty() {
+        let out: Vec<String> = merge_tails(vec![], vec![], 20);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn merge_tails_under_cap_preserves_all_in_order() {
+        // Stderr first, stdout last — reconstructs "stderr emitted progress,
+        // stdout emitted the image id at the end".
+        let out = merge_tails(
+            vec!["a".into(), "b".into()],
+            vec!["c".into()],
+            20,
+        );
+        assert_eq!(out, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn merge_tails_over_cap_truncates_from_front_to_last_n() {
+        let out = merge_tails(
+            vec!["a".into(), "b".into(), "c".into()],
+            vec!["d".into(), "e".into()],
+            3,
+        );
+        assert_eq!(out, vec!["c".to_string(), "d".to_string(), "e".to_string()]);
     }
 }

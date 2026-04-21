@@ -1,6 +1,7 @@
 //! Output styling for pithos narration (bold `>>`) and docker build output
 //! (dim + 2-space indent). Honors `NO_COLOR` and non-TTY stderr per §6.4.
 
+use std::collections::VecDeque;
 use std::io::{self, IsTerminal, Read, Write};
 
 const BOLD: &str = "\x1b[1m";
@@ -79,16 +80,35 @@ pub fn format_docker_line(line: &str, style: Style) -> String {
     }
 }
 
-/// Read `reader` line by line, write styled docker output to `writer`.
-/// Generic over `W: Write` so tests inject `Vec<u8>`; production passes
-/// `std::io::stderr()`. Errors writing to the sink are dropped — stderr
-/// failure has no recovery path.
-pub fn stream_lines<R: Read, W: Write>(reader: R, mut writer: W, style: Style) {
+/// Read `reader` line by line, write styled docker output to `writer`,
+/// and return a ring buffer of the last `tail_cap` raw (unstyled) lines.
+/// Generic over `W: Write` so tests inject `Vec<u8>`.
+///
+/// `tail_cap == 0` means "stream and drop" — nothing is retained, returned
+/// Vec is empty. Use when the caller only needs the side-effect of writing
+/// to the sink (e.g. happy-path docker stdout where the tail is unused).
+///
+/// Errors writing to the sink are dropped — stderr failure has no recovery
+/// path.
+pub fn stream_lines<R: Read, W: Write>(
+    reader: R,
+    mut writer: W,
+    style: Style,
+    tail_cap: usize,
+) -> Vec<String> {
     use std::io::BufRead;
     let br = io::BufReader::new(reader);
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(tail_cap);
     for line in br.lines().map_while(Result::ok) {
         let _ = writeln!(writer, "{}", format_docker_line(&line, style));
+        if tail_cap > 0 {
+            if tail.len() == tail_cap {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
     }
+    tail.into()
 }
 
 #[cfg(test)]
@@ -198,7 +218,7 @@ mod tests {
     fn stream_lines_writes_each_line_to_sink_when_disabled() {
         let input: &[u8] = b"a\nb\n";
         let mut sink: Vec<u8> = Vec::new();
-        stream_lines(input, &mut sink, Style::plain());
+        let _ = stream_lines(input, &mut sink, Style::plain(), 0);
         assert_eq!(sink, b"  a\n  b\n");
     }
 
@@ -206,7 +226,7 @@ mod tests {
     fn stream_lines_applies_dim_when_enabled() {
         let input: &[u8] = b"a\nb\n";
         let mut sink: Vec<u8> = Vec::new();
-        stream_lines(input, &mut sink, Style::colored());
+        let _ = stream_lines(input, &mut sink, Style::colored(), 0);
         let text = String::from_utf8(sink).unwrap();
         // Two lines, each dim-wrapped.
         assert_eq!(text.matches("\x1b[2m").count(), 2);
@@ -219,7 +239,73 @@ mod tests {
     fn stream_lines_drops_blank_lines_gracefully() {
         let input: &[u8] = b"a\n\nb\n";
         let mut sink: Vec<u8> = Vec::new();
-        stream_lines(input, &mut sink, Style::plain());
+        let _ = stream_lines(input, &mut sink, Style::plain(), 0);
         assert_eq!(sink, b"  a\n\n  b\n");
+    }
+
+    #[test]
+    fn stream_lines_returns_empty_tail_when_cap_zero() {
+        let input: &[u8] = b"a\nb\n";
+        let mut sink: Vec<u8> = Vec::new();
+        let tail = stream_lines(input, &mut sink, Style::plain(), 0);
+        assert!(tail.is_empty(), "cap 0 must retain nothing, got {tail:?}");
+        assert_eq!(sink, b"  a\n  b\n");
+    }
+
+    #[test]
+    fn stream_lines_returns_last_one_when_cap_one() {
+        let input: &[u8] = b"l1\nl2\nl3\n";
+        let mut sink: Vec<u8> = Vec::new();
+        let tail = stream_lines(input, &mut sink, Style::plain(), 1);
+        // Degenerate ring: pop_front fires on every push after the first.
+        assert_eq!(tail, vec!["l3".to_string()]);
+    }
+
+    #[test]
+    fn stream_lines_returns_all_when_exactly_at_cap() {
+        let input: &[u8] = b"l1\nl2\nl3\n";
+        let mut sink: Vec<u8> = Vec::new();
+        let tail = stream_lines(input, &mut sink, Style::plain(), 3);
+        // The `==` branch only fires on the (N+1)th push; at exactly N, nothing evicts.
+        assert_eq!(tail, vec!["l1".to_string(), "l2".to_string(), "l3".to_string()]);
+    }
+
+    #[test]
+    fn stream_lines_returns_all_lines_when_under_cap() {
+        let input: &[u8] = b"l1\nl2\nl3\n";
+        let mut sink: Vec<u8> = Vec::new();
+        let tail = stream_lines(input, &mut sink, Style::plain(), 20);
+        assert_eq!(tail, vec!["l1".to_string(), "l2".to_string(), "l3".to_string()]);
+    }
+
+    #[test]
+    fn stream_lines_returns_last_n_when_over_cap() {
+        // Feed 25 numbered lines, cap 20 → tail holds lines 6..=25.
+        let mut input = String::new();
+        for i in 1..=25 {
+            input.push_str(&format!("l{i}\n"));
+        }
+        let mut sink: Vec<u8> = Vec::new();
+        let tail = stream_lines(input.as_bytes(), &mut sink, Style::plain(), 20);
+        let expected: Vec<String> = (6..=25).map(|i| format!("l{i}")).collect();
+        assert_eq!(tail, expected);
+    }
+
+    #[test]
+    fn stream_lines_tail_contains_raw_unstyled_lines_while_sink_gets_styled() {
+        // One arrange-act, two assertions: sink bytes are ANSI-wrapped, tail is raw.
+        let input: &[u8] = b"x\n";
+        let mut sink: Vec<u8> = Vec::new();
+        let tail = stream_lines(input, &mut sink, Style::colored(), 3);
+        let sink_text = String::from_utf8(sink).unwrap();
+        assert!(
+            sink_text.contains("\x1b[2m  x\x1b[0m"),
+            "sink must carry styled bytes, got: {sink_text:?}"
+        );
+        assert_eq!(
+            tail,
+            vec!["x".to_string()],
+            "tail must carry raw unstyled line"
+        );
     }
 }

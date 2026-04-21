@@ -233,9 +233,26 @@ fn run_build(
 
     match pithos::docker::build(context.path(), dockerfile_path, &project, &hash, style) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            narrate(style, ">> ERROR:", &format!("{e}"));
+        Err(pithos::docker::BuildError::Spawn(e)) => {
+            narrate(style, ">> ERROR:", &format!("docker build: {e}"));
             ExitCode::from(1)
+        }
+        Err(pithos::docker::BuildError::NonZero { code, tail }) => {
+            let code_str = code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into());
+            narrate(
+                style,
+                ">> ERROR:",
+                &format!(
+                    "docker build failed (exit {code_str}); last {} lines:",
+                    tail.len()
+                ),
+            );
+            for line in &tail {
+                eprintln!("{}", pithos::output::format_docker_line(line, style));
+            }
+            ExitCode::from(3)
         }
     }
 }
