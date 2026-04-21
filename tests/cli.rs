@@ -451,6 +451,39 @@ fn cli_build_subcommand_exits_nonzero_when_docker_unavailable() {
 }
 
 #[test]
+fn cli_run_subcommand_exits_nonzero_when_docker_unavailable() {
+    // Arrange — minimal valid .pithos; the run branch will reach the docker
+    // shellout via ensure_image, which fails at spawn because PATH is empty.
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), VALID).unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("run")
+        .current_dir(&td)
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert()
+        .code(1);
+
+    // Assert
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(">> ERROR:"),
+        "stderr missing '>> ERROR:' marker: {stderr}"
+    );
+    assert!(
+        td.path().join(".pithos.d").join("Dockerfile").is_file(),
+        "Dockerfile should be emitted before the docker shellout failure"
+    );
+}
+
+#[test]
 fn cli_build_rejects_unknown_flag_writes_only_to_stderr() {
     // T-505 lock-down: narration goes to stderr; stdout stays clean so it's
     // safe to redirect stdout to /dev/null without losing error messaging.
