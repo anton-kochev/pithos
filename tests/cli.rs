@@ -484,6 +484,51 @@ fn cli_run_subcommand_exits_nonzero_when_docker_unavailable() {
 }
 
 #[test]
+fn cli_run_subcommand_with_cmd_reaches_docker_shellout() {
+    // Arrange — mirror the no-docker run test but invoke with `-- bash` to
+    // prove the cmd-parsing branch threads through rather than being rejected
+    // upstream. A parse-phase rejection of `--` would narrate "unknown flag:"
+    // or "unknown subcommand:"; if neither appears AND the Dockerfile was
+    // emitted, the cmd branch made it past parse into the execution pipeline.
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), VALID).unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .args(["run", "--", "bash"])
+        .current_dir(&td)
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert()
+        .code(1);
+
+    // Assert — absence of parse-phase markers proves `-- bash` was accepted
+    // as cmd; Dockerfile emission proves execution reached post-parse I/O.
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(">> ERROR:"),
+        "stderr missing '>> ERROR:' marker: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown flag:"),
+        "cmd branch was rejected as unknown flag: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown subcommand:"),
+        "cmd branch was rejected as unknown subcommand: {stderr}"
+    );
+    assert!(
+        td.path().join(".pithos.d").join("Dockerfile").is_file(),
+        "Dockerfile should be emitted before the docker shellout failure"
+    );
+}
+
+#[test]
 fn cli_build_rejects_unknown_flag_writes_only_to_stderr() {
     // T-505 lock-down: narration goes to stderr; stdout stays clean so it's
     // safe to redirect stdout to /dev/null without losing error messaging.

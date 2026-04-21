@@ -149,7 +149,8 @@ pub enum RunError {
 /// `pithos_repo` is the host path whose `pi-config/` subtree gets
 /// bind-mounted as Layer 3 (per-item if the path exists). `None` skips
 /// Layer 3 entirely. `env_file` is the path to `.env`; caller passes
-/// `None` when absent.
+/// `None` when absent. `cmd` is appended after the image tag; an empty
+/// slice means docker falls through to the Dockerfile's `CMD` (FR-502).
 ///
 /// Shells out to:
 ///   docker run --rm -it --init --name ... --hostname ... --user 501:20
@@ -157,15 +158,16 @@ pub enum RunError {
 ///              -v pithos-home-<project>:/home/pi
 ///              [-v <PITHOS_REPO>/pi-config/... per Layer 3 item, if exists]
 ///              [--env-file <.env>, if Some]
-///              -w /workspace/<project>  <image_tag>
+///              -w /workspace/<project>  <image_tag> [<cmd>...]
 pub fn run(
     image_tag: &str,
     project: &str,
     workspace: &Path,
     pithos_repo: Option<&Path>,
     env_file: Option<&Path>,
+    cmd: &[String],
 ) -> Result<std::process::ExitStatus, RunError> {
-    let args = assemble_run_args(image_tag, project, workspace, pithos_repo, env_file);
+    let args = assemble_run_args(image_tag, project, workspace, pithos_repo, env_file, cmd);
     // Stdio::inherit is the default; be explicit so a future refactor
     // pulling in stream_lines for "consistency with build" doesn't
     // accidentally swallow the user's TTY.
@@ -188,6 +190,7 @@ fn assemble_run_args(
     workspace: &Path,
     pithos_repo: Option<&Path>,
     env_file: Option<&Path>,
+    cmd: &[String],
 ) -> Vec<OsString> {
     let pid = std::process::id();
     let container_name = format!("pithos-{project}-{pid}");
@@ -243,6 +246,9 @@ fn assemble_run_args(
     args.push("-w".into());
     args.push(workdir.into());
     args.push(image_tag.into());
+    for arg in cmd {
+        args.push(arg.into());
+    }
     args
 }
 
@@ -306,6 +312,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
+            &[],
         );
         assert!(args.contains(&OsString::from("--rm")));
         assert!(args.contains(&OsString::from("-it")));
@@ -326,6 +333,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
+            &[],
         );
         let expected_name = format!("pithos-demo-{pid}");
         assert!(
@@ -348,6 +356,7 @@ mod tests {
             Path::new("/tmp/demo-ws"),
             None,
             None,
+            &[],
         );
         assert!(
             args.windows(2)
@@ -369,6 +378,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
+            &[],
         );
         assert!(
             args.windows(2)
@@ -393,6 +403,7 @@ mod tests {
             Path::new("/tmp/x"),
             Some(td.path()),
             None,
+            &[],
         );
         for (i, arg) in args.iter().enumerate() {
             if arg == "-v" {
@@ -415,6 +426,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
+            &[],
         );
         assert!(!args.contains(&OsString::from("--env-file")));
     }
@@ -427,6 +439,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             Some(Path::new("/tmp/.env")),
+            &[],
         );
         assert!(
             args.windows(2)
@@ -448,6 +461,7 @@ mod tests {
             Path::new("/tmp/x"),
             Some(td.path()),
             None,
+            &[],
         );
 
         let skills_bind = {
@@ -487,6 +501,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
+            &[],
         );
         assert!(
             !args_none
@@ -494,5 +509,37 @@ mod tests {
                 .any(|a| a.to_string_lossy().contains("/pi-config/")),
             "no pi-config binds expected when pithos_repo is None: {args_none:?}"
         );
+    }
+
+    #[test]
+    fn assemble_run_args_appends_cmd_after_image_tag() {
+        let cmd: Vec<String> = vec!["bash".into(), "-c".into(), "echo hi".into()];
+        let args = assemble_run_args(
+            "pithos:proj",
+            "proj",
+            Path::new("/work"),
+            None,
+            None,
+            &cmd,
+        );
+        let n = args.len();
+        assert!(n >= 4);
+        assert_eq!(args[n - 3], OsString::from("bash"));
+        assert_eq!(args[n - 2], OsString::from("-c"));
+        assert_eq!(args[n - 1], OsString::from("echo hi"));
+        assert_eq!(args[n - 4], OsString::from("pithos:proj"));
+    }
+
+    #[test]
+    fn assemble_run_args_omits_cmd_when_empty() {
+        let args = assemble_run_args(
+            "pithos:proj",
+            "proj",
+            Path::new("/work"),
+            None,
+            None,
+            &[],
+        );
+        assert_eq!(args.last(), Some(&OsString::from("pithos:proj")));
     }
 }

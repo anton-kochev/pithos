@@ -19,7 +19,7 @@ enum RejectKind {
 enum Subcommand {
     None,
     Build { rebuild: bool },
-    Run { rebuild: bool },
+    Run { rebuild: bool, cmd: Vec<String> },
     Reject { kind: RejectKind, value: String },
 }
 
@@ -44,18 +44,29 @@ impl Subcommand {
             }
             Some("run") => {
                 let mut rebuild = false;
-                for arg in args.iter().skip(2) {
+                let mut cmd: Vec<String> = Vec::new();
+                let mut iter = args.iter().skip(2);
+                while let Some(arg) = iter.next() {
                     match arg.as_str() {
+                        "--" => {
+                            cmd.extend(iter.by_ref().cloned());
+                            break;
+                        }
                         "--rebuild" => rebuild = true,
-                        other => {
+                        s if s.starts_with("--") => {
                             return Self::Reject {
                                 kind: RejectKind::Flag,
-                                value: other.to_string(),
+                                value: s.to_string(),
                             };
+                        }
+                        _ => {
+                            cmd.push(arg.clone());
+                            cmd.extend(iter.by_ref().cloned());
+                            break;
                         }
                     }
                 }
-                Self::Run { rebuild }
+                Self::Run { rebuild, cmd }
             }
             Some(other) => Self::Reject {
                 kind: RejectKind::Subcommand,
@@ -118,13 +129,14 @@ fn main() -> ExitCode {
             rebuild,
             style,
         ),
-        Subcommand::Run { rebuild } => run_run(
+        Subcommand::Run { rebuild, cmd } => run_run(
             &cwd,
             &yaml,
             &pithos_bytes,
             &dockerfile_path,
             &dockerfile_content,
             rebuild,
+            &cmd,
             style,
         ),
         Subcommand::Reject { .. } => unreachable!("handled by fail-fast guard above"),
@@ -330,6 +342,7 @@ fn run_run(
     dockerfile_path: &Path,
     dockerfile_content: &str,
     rebuild: bool,
+    cmd: &[String],
     style: Style,
 ) -> ExitCode {
     let ensured = match ensure_image(
@@ -357,6 +370,7 @@ fn run_run(
         cwd,
         pithos_repo.as_deref(),
         env_file.as_deref(),
+        cmd,
     ) {
         // status.code() is None on signal-death (128+N convention); report
         // 1 rather than synthesize a signal code — 7.3 owns SIGINT → 130
@@ -472,7 +486,7 @@ mod tests {
     fn from_args_run_without_flag() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run"])),
-            Subcommand::Run { rebuild: false }
+            Subcommand::Run { rebuild: false, cmd: vec![] }
         );
     }
 
@@ -480,7 +494,7 @@ mod tests {
     fn from_args_run_with_rebuild() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--rebuild"])),
-            Subcommand::Run { rebuild: true }
+            Subcommand::Run { rebuild: true, cmd: vec![] }
         );
     }
 
@@ -496,12 +510,69 @@ mod tests {
     }
 
     #[test]
-    fn from_args_run_rejects_trailing_positional() {
+    fn from_args_run_accepts_positional_as_cmd() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--rebuild", "extra"])),
-            Subcommand::Reject {
-                kind: RejectKind::Flag,
-                value: "extra".to_string(),
+            Subcommand::Run { rebuild: true, cmd: vec!["extra".to_string()] }
+        );
+    }
+
+    #[test]
+    fn from_args_run_accepts_bare_cmd() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "bash"])),
+            Subcommand::Run { rebuild: false, cmd: vec!["bash".to_string()] }
+        );
+    }
+
+    #[test]
+    fn from_args_run_accepts_cmd_with_args() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "bash", "-c", "echo"])),
+            Subcommand::Run {
+                rebuild: false,
+                cmd: vec!["bash".to_string(), "-c".to_string(), "echo".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_accepts_cmd_after_double_dash() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "--", "bash", "-c", "echo"])),
+            Subcommand::Run {
+                rebuild: false,
+                cmd: vec!["bash".to_string(), "-c".to_string(), "echo".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_rebuild_before_double_dash() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "--rebuild", "--", "bash"])),
+            Subcommand::Run { rebuild: true, cmd: vec!["bash".to_string()] }
+        );
+    }
+
+    #[test]
+    fn from_args_run_trailing_double_dash_yields_empty_cmd() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "--rebuild", "--"])),
+            Subcommand::Run { rebuild: true, cmd: vec![] }
+        );
+    }
+
+    // Locks design choice #3: once a non-flag token is seen, the parser does
+    // NOT re-enter flag mode. Without this, a refactor that starts re-recognizing
+    // --rebuild after a positional would pass CI silently.
+    #[test]
+    fn from_args_run_flag_after_positional_is_cmd_arg() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "bash", "--rebuild"])),
+            Subcommand::Run {
+                rebuild: false,
+                cmd: vec!["bash".to_string(), "--rebuild".to_string()],
             }
         );
     }
