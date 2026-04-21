@@ -1,7 +1,8 @@
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::fingerprint;
+use crate::output::Style;
 
 /// Query local Docker for an image carrying the given fingerprint label
 /// (FR-203, T-202). Returns the first matching image ID, or `None` if no
@@ -62,23 +63,29 @@ pub enum BuildError {
 /// `<project>/.pithos.d/Dockerfile`), tagging the result `pithos:<project>`
 /// and labeling it with the fingerprint hash (FR-401, FR-402).
 ///
-/// stdout/stderr inherit to the caller's terminal — output styling is a
-/// later concern. Errors surface as [`BuildError`]:
+/// Both stdout and stderr are piped and streamed through
+/// [`crate::output::stream_lines`] to the caller's stderr with a 2-space
+/// indent and dim styling (§6.4). `--progress=plain` is forced so BuildKit
+/// emits line-per-step output instead of its TUI.
+///
+/// Errors surface as [`BuildError`]:
 /// - `docker` not in PATH or transient OS launch failure → [`BuildError::Spawn`]
 /// - non-zero exit from `docker build` → [`BuildError::NonZero`] carrying the exit code
 ///
 /// Shells out to:
-///   docker build -f <dockerfile> --tag pithos:<project> --label <label> <context>
+///   docker build --progress=plain -f <dockerfile> --tag pithos:<project> --label <label> <context>
 pub fn build(
     context: &Path,
     dockerfile: &Path,
     project: &str,
     hash: &str,
+    style: Style,
 ) -> Result<(), BuildError> {
     let tag = format!("pithos:{project}");
     let label = fingerprint::label(hash);
-    let status = Command::new("docker")
+    let mut child = Command::new("docker")
         .arg("build")
+        .arg("--progress=plain")
         .arg("-f")
         .arg(dockerfile)
         .arg("--tag")
@@ -86,7 +93,25 @@ pub fn build(
         .arg("--label")
         .arg(&label)
         .arg(context)
-        .status()?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout = child.stdout.take().expect("stdout piped above");
+    let stderr = child.stderr.take().expect("stderr piped above");
+    let t_out = std::thread::spawn(move || {
+        crate::output::stream_lines(stdout, std::io::stderr(), style)
+    });
+    let t_err = std::thread::spawn(move || {
+        crate::output::stream_lines(stderr, std::io::stderr(), style)
+    });
+
+    let status = child.wait()?;
+    // Panics in reader threads are bugs — surface them loudly rather than
+    // silently reporting success/failure based on docker's exit code alone.
+    t_out.join().expect("stdout reader thread panicked");
+    t_err.join().expect("stderr reader thread panicked");
+
     if !status.success() {
         return Err(BuildError::NonZero {
             code: status.code(),

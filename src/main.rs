@@ -7,6 +7,8 @@ use std::process::ExitCode;
 
 use saphyr::YamlOwned;
 
+use pithos::output::{Style, narrate};
+
 #[derive(Debug, PartialEq, Eq)]
 enum RejectKind {
     Subcommand,
@@ -48,6 +50,7 @@ impl Subcommand {
 }
 
 fn main() -> ExitCode {
+    let style = Style::detect();
     let args: Vec<String> = env::args().collect();
     let subcommand = Subcommand::from_args(&args);
 
@@ -56,8 +59,10 @@ fn main() -> ExitCode {
     // `.pithos.d/Dockerfile`.
     if let Subcommand::Reject { kind, value } = &subcommand {
         match kind {
-            RejectKind::Subcommand => eprintln!(">> ERROR: unknown subcommand: {value}"),
-            RejectKind::Flag => eprintln!(">> ERROR: unknown flag: {value}"),
+            RejectKind::Subcommand => {
+                narrate(style, ">> ERROR:", &format!("unknown subcommand: {value}"))
+            }
+            RejectKind::Flag => narrate(style, ">> ERROR:", &format!("unknown flag: {value}")),
         }
         return ExitCode::from(1);
     }
@@ -65,24 +70,24 @@ fn main() -> ExitCode {
     let cwd = match env::current_dir() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!(">> ERROR: cannot read cwd: {e}");
+            narrate(style, ">> ERROR:", &format!("cannot read cwd: {e}"));
             return ExitCode::from(1);
         }
     };
-    let pithos_bytes = match read_pithos(&cwd) {
+    let pithos_bytes = match read_pithos(&cwd, style) {
         Ok(b) => b,
         Err(code) => return code,
     };
     let yaml = match pithos::config::load(&pithos_bytes) {
         Ok(y) => y,
         Err(e) => {
-            eprintln!(">> ERROR: {e}");
+            narrate(style, ">> ERROR:", &format!("{e}"));
             return ExitCode::from(2);
         }
     };
     let dockerfile_path = cwd.join(".pithos.d").join("Dockerfile");
     let dockerfile_content = pithos::dockerfile::emit(&yaml);
-    if let Err(code) = write_dockerfile(&dockerfile_path, &dockerfile_content) {
+    if let Err(code) = write_dockerfile(&dockerfile_path, &dockerfile_content, style) {
         return code;
     }
 
@@ -95,38 +100,51 @@ fn main() -> ExitCode {
             &dockerfile_path,
             &dockerfile_content,
             rebuild,
+            style,
         ),
         Subcommand::Reject { .. } => unreachable!("handled by fail-fast guard above"),
     }
 }
 
-fn read_pithos(cwd: &Path) -> Result<Vec<u8>, ExitCode> {
+fn read_pithos(cwd: &Path, style: Style) -> Result<Vec<u8>, ExitCode> {
     let path = cwd.join(".pithos");
     match fs::read(&path) {
         Ok(b) => Ok(b),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            eprintln!(">> ERROR: .pithos not found");
-            eprintln!(">> Create a .pithos file at the project root. Minimal example:");
-            eprintln!(">>");
-            eprintln!(">>   toolchains: {{}}");
+            narrate(style, ">> ERROR:", ".pithos not found");
+            narrate(
+                style,
+                ">>",
+                "Create a .pithos file at the project root. Minimal example:",
+            );
+            narrate(style, ">>", "");
+            narrate(style, ">>", "  toolchains: {}");
             Err(ExitCode::from(2))
         }
         Err(e) => {
-            eprintln!(">> ERROR: {}: {e}", path.display());
+            narrate(style, ">> ERROR:", &format!("{}: {e}", path.display()));
             Err(ExitCode::from(1))
         }
     }
 }
 
-fn write_dockerfile(path: &Path, content: &str) -> Result<(), ExitCode> {
+fn write_dockerfile(path: &Path, content: &str, style: Style) -> Result<(), ExitCode> {
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
-            eprintln!(">> ERROR: cannot create {}: {e}", parent.display());
+            narrate(
+                style,
+                ">> ERROR:",
+                &format!("cannot create {}: {e}", parent.display()),
+            );
             return Err(ExitCode::from(1));
         }
     }
     if let Err(e) = fs::write(path, content) {
-        eprintln!(">> ERROR: cannot write {}: {e}", path.display());
+        narrate(
+            style,
+            ">> ERROR:",
+            &format!("cannot write {}: {e}", path.display()),
+        );
         return Err(ExitCode::from(1));
     }
     Ok(())
@@ -145,13 +163,15 @@ fn run_build(
     dockerfile_path: &Path,
     dockerfile_content: &str,
     rebuild: bool,
+    style: Style,
 ) -> ExitCode {
     let project = match pithos::project::name_from_path(cwd) {
         Some(n) => n,
         None => {
-            eprintln!(
-                ">> ERROR: cannot derive project name from {}",
-                cwd.display()
+            narrate(
+                style,
+                ">> ERROR:",
+                &format!("cannot derive project name from {}", cwd.display()),
             );
             return ExitCode::from(1);
         }
@@ -160,9 +180,13 @@ fn run_build(
     let mut installers = BTreeMap::new();
     for name in pithos::dockerfile::toolchain_names(yaml) {
         let Some(bytes) = pithos::embed::installer_bytes(&name) else {
-            eprintln!(
-                ">> ERROR: no baked installer for toolchain {name:?} \
-                 (config validator and embed bundle are out of sync)"
+            narrate(
+                style,
+                ">> ERROR:",
+                &format!(
+                    "no baked installer for toolchain {name:?} \
+                     (config validator and embed bundle are out of sync)"
+                ),
             );
             return ExitCode::from(1);
         };
@@ -173,12 +197,16 @@ fn run_build(
     let cached = match pithos::docker::find_image_by_fingerprint(&hash) {
         Ok(opt) => opt,
         Err(e) => {
-            eprintln!(">> ERROR: {e}");
+            narrate(style, ">> ERROR:", &format!("{e}"));
             return ExitCode::from(1);
         }
     };
     if let Some(id) = cached_image_to_reuse(rebuild, cached.as_deref()) {
-        eprintln!(">> cached image {id} matches fingerprint; skipping build");
+        narrate(
+            style,
+            ">>",
+            &format!("cached image {id} matches fingerprint; skipping build"),
+        );
         return ExitCode::SUCCESS;
     }
 
@@ -186,19 +214,27 @@ fn run_build(
     let context = match tempfile::tempdir() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!(">> ERROR: cannot create build-context tempdir: {e}");
+            narrate(
+                style,
+                ">> ERROR:",
+                &format!("cannot create build-context tempdir: {e}"),
+            );
             return ExitCode::from(1);
         }
     };
     if let Err(e) = pithos::embed::extract_to(context.path()) {
-        eprintln!(">> ERROR: cannot extract build context: {e}");
+        narrate(
+            style,
+            ">> ERROR:",
+            &format!("cannot extract build context: {e}"),
+        );
         return ExitCode::from(1);
     }
 
-    match pithos::docker::build(context.path(), dockerfile_path, &project, &hash) {
+    match pithos::docker::build(context.path(), dockerfile_path, &project, &hash, style) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!(">> ERROR: {e}");
+            narrate(style, ">> ERROR:", &format!("{e}"));
             ExitCode::from(1)
         }
     }

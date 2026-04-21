@@ -451,6 +451,27 @@ fn cli_build_subcommand_exits_nonzero_when_docker_unavailable() {
 }
 
 #[test]
+fn cli_build_rejects_unknown_flag_writes_only_to_stderr() {
+    // T-505 lock-down: narration goes to stderr; stdout stays clean so it's
+    // safe to redirect stdout to /dev/null without losing error messaging.
+    let td = tempdir().unwrap();
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .args(["build", "--nope"])
+        .current_dir(&td)
+        .assert()
+        .code(1);
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(">>"), "stderr missing '>>' marker: {stderr}");
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must be empty for T-505: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn cli_build_rejects_unknown_flag() {
     // Arrange — no .pithos needed; unknown-flag parsing errors before any I/O.
     let td = tempdir().unwrap();

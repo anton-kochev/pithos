@@ -3,4 +3,5 @@ pub mod docker;
 pub mod dockerfile;
 pub mod embed;
 pub mod fingerprint;
+pub mod output;
 pub mod project;
