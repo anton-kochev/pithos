@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -74,7 +75,8 @@ fn merge_tails(stderr: Vec<String>, stdout: Vec<String>, cap: usize) -> Vec<Stri
 
 /// Invoke `docker build` against `context`, using `dockerfile` (typically
 /// `<project>/.pithos.d/Dockerfile`), tagging the result `pithos:<project>`
-/// and labeling it with the fingerprint hash (FR-401, FR-402).
+/// and labeling it with the fingerprint hash (FR-401, FR-402) plus any
+/// `extra_labels` (resolved toolchain versions).
 ///
 /// Both stdout and stderr are piped and streamed through
 /// [`crate::output::stream_lines`] to the caller's stderr with a 2-space
@@ -86,27 +88,19 @@ fn merge_tails(stderr: Vec<String>, stdout: Vec<String>, cap: usize) -> Vec<Stri
 /// - non-zero exit from `docker build` → [`BuildError::NonZero`] carrying the exit code
 ///
 /// Shells out to:
-///   docker build --progress=plain -f <dockerfile> --tag pithos:<project> --label <label> <context>
+///   docker build --progress=plain -f <dockerfile> --tag pithos:<project> --label <fingerprint> [--label <extra>...] <context>
 pub fn build(
     context: &Path,
     dockerfile: &Path,
     project: &str,
     hash: &str,
+    extra_labels: &BTreeMap<String, String>,
     style: Style,
 ) -> Result<(), BuildError> {
     const TAIL_LINES: usize = 20;
-    let tag = format!("pithos:{project}");
-    let label = fingerprint::label(hash);
+    let args = assemble_build_args(dockerfile, project, hash, extra_labels, context);
     let mut child = Command::new("docker")
-        .arg("build")
-        .arg("--progress=plain")
-        .arg("-f")
-        .arg(dockerfile)
-        .arg("--tag")
-        .arg(&tag)
-        .arg("--label")
-        .arg(&label)
-        .arg(context)
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -131,6 +125,172 @@ pub fn build(
         return Err(BuildError::NonZero { code: status.code(), tail });
     }
     Ok(())
+}
+
+/// Assemble the argv for `docker build` per FR-401/402 plus resolved
+/// toolchain version labels. Pure — split from [`build`] so the arg shape is
+/// unit-testable without a daemon. Same idiom as [`assemble_run_args`].
+///
+/// `extra_labels` iterates in BTreeMap sort-by-key order, which is the
+/// same order the launcher feeds `extract_versions` and therefore the
+/// same order the stored labels appear on the image.
+fn assemble_build_args(
+    dockerfile: &Path,
+    project: &str,
+    hash: &str,
+    extra_labels: &BTreeMap<String, String>,
+    context: &Path,
+) -> Vec<OsString> {
+    let tag = format!("pithos:{project}");
+    let fingerprint_label = fingerprint::label(hash);
+    let mut args: Vec<OsString> = vec![
+        "build".into(),
+        "--progress=plain".into(),
+        "-f".into(),
+        dockerfile.into(),
+        "--tag".into(),
+        tag.into(),
+        "--label".into(),
+        fingerprint_label.into(),
+    ];
+    for (key, value) in extra_labels {
+        args.push("--label".into());
+        args.push(format!("{key}={value}").into());
+    }
+    args.push(context.into());
+    args
+}
+
+/// Shell program executed by [`extract_versions`] inside the first-pass
+/// image. Reads `/opt/pithos-versions/<toolchain>` for each positional
+/// argument and emits `name=value` lines on stdout.
+///
+/// Positional args (`"$@"`) rather than interpolation is deliberate: the
+/// toolchain names are already validated by config::load, but keeping the
+/// `-c` string a fixed constant removes the last shell-injection surface
+/// belt-and-suspenders. A missing versions file yields an empty `value`,
+/// which [`parse_versions_stdout`] surfaces as [`ExtractError::EmptyValue`].
+const EXTRACT_SH: &str =
+    "for t in \"$@\"; do v=$(cat /opt/pithos-versions/\"$t\" 2>/dev/null || true); printf '%s=%s\\n' \"$t\" \"$v\"; done";
+
+/// Failure modes for [`extract_versions`]. All variants represent
+/// launcher/installer contract violations, not user configuration errors —
+/// callers should map every variant to an internal-error exit code, not
+/// to the user-build-failure code reserved for [`BuildError::NonZero`].
+#[derive(Debug, thiserror::Error)]
+pub enum ExtractError {
+    #[error("docker run (extract versions): {0}")]
+    Spawn(#[from] std::io::Error),
+    #[error("docker run (extract versions) failed (exit {code:?}): {stderr}")]
+    NonZero { code: Option<i32>, stderr: String },
+    #[error("installer contract: missing version entry for toolchain {0:?}")]
+    MissingEntry(String),
+    #[error("installer contract: empty version value for toolchain {0:?}")]
+    EmptyValue(String),
+}
+
+/// Read the resolved exact versions written by each installer to
+/// `/opt/pithos-versions/<toolchain>` inside the given image. Shells out
+/// one `docker run --rm --entrypoint sh <tag> -c <EXTRACT_SH> sh <tc>...`
+/// and parses `name=value` lines from stdout.
+///
+/// Returns a `BTreeMap` whose iteration order matches `toolchains`'
+/// BTreeMap-sort order — callers building `--label` args can rely on
+/// stable ordering across runs.
+pub fn extract_versions(
+    tag: &str,
+    toolchains: &[String],
+) -> Result<BTreeMap<String, String>, ExtractError> {
+    debug_assert!(
+        toolchains.windows(2).all(|w| w[0] <= w[1]),
+        "extract_versions requires sorted toolchain names; caller must pass BTreeMap-sorted slice"
+    );
+    let args = assemble_extract_run_args(tag, toolchains);
+    let output = Command::new("docker").args(&args).output()?;
+    if !output.status.success() {
+        return Err(ExtractError::NonZero {
+            code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim_end().to_string(),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_versions_stdout(&stdout, toolchains)
+}
+
+/// Assemble the argv for the `docker run` invocation that extracts
+/// `/opt/pithos-versions/<tc>` values. Pure — split from
+/// [`extract_versions`] so the arg shape is unit-testable without a daemon.
+///
+/// Shape: `run --rm --entrypoint sh <tag> -c <EXTRACT_SH> sh <tc>...`.
+/// The trailing `sh` is `$0` to the shell (purely cosmetic in error
+/// messages); the toolchain names follow as `$1`, `$2`, ... — never
+/// interpolated into the `-c` string.
+fn assemble_extract_run_args(tag: &str, toolchains: &[String]) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        "run".into(),
+        "--rm".into(),
+        "--entrypoint".into(),
+        "sh".into(),
+        tag.into(),
+        "-c".into(),
+        EXTRACT_SH.into(),
+        "sh".into(),
+    ];
+    for tc in toolchains {
+        args.push(tc.into());
+    }
+    args
+}
+
+/// Parse `name=value` lines emitted by [`EXTRACT_SH`] into a map keyed by
+/// toolchain name. Pure — the only non-trivial logic in [`extract_versions`]
+/// so it lives behind a daemon-free unit boundary.
+///
+/// Policy:
+/// - Split on the FIRST `=` only; values may legitimately contain `=`
+///   (e.g. embedded build metadata in a future installer).
+/// - Trim whitespace around both name and value.
+/// - Blank lines and trailing CRLF are tolerated.
+/// - Names NOT in `expected` are silently ignored — forward compat so a
+///   future installer that writes extras (`python`, ...) does not break an
+///   older launcher.
+/// - Missing expected name → [`ExtractError::MissingEntry`].
+/// - Empty or whitespace-only value → [`ExtractError::EmptyValue`].
+/// - Duplicate names in stdout → last-wins (shell loop over `"$@"` can't
+///   emit dups today, but the policy is defined for stability).
+fn parse_versions_stdout(
+    stdout: &str,
+    expected: &[String],
+) -> Result<BTreeMap<String, String>, ExtractError> {
+    let mut found: BTreeMap<String, String> = BTreeMap::new();
+    for raw in stdout.lines() {
+        let line = raw.trim_end_matches('\r').trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            // No `=` on a non-empty line: shell program contract says every
+            // line has a `=`. Treat as forward-compat noise — ignore rather
+            // than error — since `expected` validation below will still
+            // catch any missing names.
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if !expected.iter().any(|e| e == name) {
+            continue;
+        }
+        // Last-wins on duplicates — `insert` overwrites.
+        found.insert(name.to_string(), value.to_string());
+    }
+    for name in expected {
+        match found.get(name) {
+            None => return Err(ExtractError::MissingEntry(name.clone())),
+            Some(v) if v.is_empty() => return Err(ExtractError::EmptyValue(name.clone())),
+            Some(_) => {}
+        }
+    }
+    Ok(found)
 }
 
 /// Failure modes for [`run`]. Mirrors [`BuildError`] but carries no
@@ -541,5 +701,272 @@ mod tests {
             &[],
         );
         assert_eq!(args.last(), Some(&OsString::from("pithos:proj")));
+    }
+
+    // assemble_build_args — argv shape for `docker build`
+
+    #[test]
+    fn assemble_build_args_emits_fingerprint_label_when_extras_empty() {
+        let args = assemble_build_args(
+            Path::new("/ctx/Dockerfile"),
+            "demo",
+            "abc123",
+            &BTreeMap::new(),
+            Path::new("/ctx"),
+        );
+        // Exactly one --label, carrying the fingerprint.
+        assert_eq!(
+            args.iter().filter(|a| *a == "--label").count(),
+            1,
+            "expected exactly one --label with empty extras, got {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--label" && w[1] == "dev.pithos.fingerprint=abc123"),
+            "missing --label dev.pithos.fingerprint=abc123 in {args:?}"
+        );
+    }
+
+    #[test]
+    fn assemble_build_args_includes_core_flags_and_positionals() {
+        let args = assemble_build_args(
+            Path::new("/ctx/Dockerfile"),
+            "demo",
+            "abc123",
+            &BTreeMap::new(),
+            Path::new("/ctx"),
+        );
+        assert_eq!(args.first(), Some(&OsString::from("build")));
+        assert!(args.contains(&OsString::from("--progress=plain")));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-f" && w[1] == "/ctx/Dockerfile"),
+            "missing -f /ctx/Dockerfile pair in {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--tag" && w[1] == "pithos:demo"),
+            "missing --tag pithos:demo pair in {args:?}"
+        );
+        // Context path is the final positional.
+        assert_eq!(args.last(), Some(&OsString::from("/ctx")));
+    }
+
+    #[test]
+    fn assemble_build_args_renders_extra_labels_in_btreemap_order() {
+        // Insertion order reversed — if someone swaps BTreeMap for HashMap,
+        // order becomes non-deterministic and this test flakes.
+        let mut extras: BTreeMap<String, String> = BTreeMap::new();
+        extras.insert("dev.pithos.rust-version".into(), "1.85.0".into());
+        extras.insert("dev.pithos.dotnet-version".into(), "10.0.102".into());
+        let args = assemble_build_args(
+            Path::new("/ctx/Dockerfile"),
+            "demo",
+            "abc123",
+            &extras,
+            Path::new("/ctx"),
+        );
+        // Three --label args total: fingerprint + two extras.
+        assert_eq!(args.iter().filter(|a| *a == "--label").count(), 3);
+        // Collect the arg immediately following each --label.
+        let rendered: Vec<String> = args
+            .windows(2)
+            .filter_map(|w| {
+                if w[0] == "--label" {
+                    w[1].to_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "dev.pithos.fingerprint=abc123".to_string(),
+                "dev.pithos.dotnet-version=10.0.102".to_string(),
+                "dev.pithos.rust-version=1.85.0".to_string(),
+            ]
+        );
+    }
+
+    // assemble_extract_run_args — argv shape for `docker run ... sh -c ... sh <tc>...`
+
+    #[test]
+    fn assemble_extract_run_args_emits_rm_and_entrypoint_sh() {
+        let args = assemble_extract_run_args("pithos:demo", &["dotnet".into()]);
+        assert!(args.contains(&OsString::from("--rm")));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "--entrypoint" && w[1] == "sh"),
+            "missing --entrypoint sh pair in {args:?}"
+        );
+    }
+
+    #[test]
+    fn assemble_extract_run_args_image_tag_precedes_dash_c() {
+        let args = assemble_extract_run_args("pithos:demo", &["dotnet".into()]);
+        let tag_idx = args
+            .iter()
+            .position(|a| a == "pithos:demo")
+            .expect("tag present");
+        let c_idx = args.iter().position(|a| a == "-c").expect("-c present");
+        assert!(
+            tag_idx < c_idx,
+            "image tag must precede -c in {args:?}"
+        );
+    }
+
+    #[test]
+    fn assemble_extract_run_args_passes_toolchains_as_positionals_not_interpolated() {
+        let args = assemble_extract_run_args(
+            "pithos:demo",
+            &["dotnet".into(), "rust".into()],
+        );
+        // Find the -c string and assert no toolchain name is baked into it.
+        let c_idx = args.iter().position(|a| a == "-c").expect("-c present");
+        let script = args.get(c_idx + 1).expect("-c has value").clone();
+        let script_s = script.to_str().expect("script is utf8");
+        assert!(
+            !script_s.contains("dotnet"),
+            "toolchain name leaked into -c script: {script_s:?}"
+        );
+        assert!(
+            !script_s.contains("rust"),
+            "toolchain name leaked into -c script: {script_s:?}"
+        );
+        // And each toolchain appears as its own argv entry.
+        assert!(args.contains(&OsString::from("dotnet")));
+        assert!(args.contains(&OsString::from("rust")));
+    }
+
+    #[test]
+    fn assemble_extract_run_args_places_sh_dollar_zero_before_positionals() {
+        let args = assemble_extract_run_args(
+            "pithos:demo",
+            &["dotnet".into(), "rust".into()],
+        );
+        // Contract: `-c <SCRIPT> sh <tc1> <tc2>` — the "sh" is $0 to the shell.
+        let c_idx = args.iter().position(|a| a == "-c").expect("-c present");
+        assert_eq!(args.get(c_idx + 2), Some(&OsString::from("sh")));
+        assert_eq!(args.get(c_idx + 3), Some(&OsString::from("dotnet")));
+        assert_eq!(args.get(c_idx + 4), Some(&OsString::from("rust")));
+    }
+
+    // parse_versions_stdout — pure parser
+
+    #[test]
+    fn parse_versions_stdout_happy_path() {
+        let expected: Vec<String> = vec!["dotnet".into(), "rust".into()];
+        let out = parse_versions_stdout("dotnet=10.0.102\nrust=1.85.0\n", &expected).unwrap();
+        assert_eq!(out.get("dotnet").map(String::as_str), Some("10.0.102"));
+        assert_eq!(out.get("rust").map(String::as_str), Some("1.85.0"));
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn parse_versions_stdout_tolerates_blank_lines() {
+        let expected: Vec<String> = vec!["dotnet".into()];
+        let out = parse_versions_stdout("\ndotnet=10.0.102\n\n", &expected).unwrap();
+        assert_eq!(out.get("dotnet").map(String::as_str), Some("10.0.102"));
+    }
+
+    #[test]
+    fn parse_versions_stdout_trims_whitespace_around_name_and_value() {
+        let expected: Vec<String> = vec!["dotnet".into()];
+        let out = parse_versions_stdout("  dotnet  =  10.0.102  \n", &expected).unwrap();
+        assert_eq!(out.get("dotnet").map(String::as_str), Some("10.0.102"));
+    }
+
+    #[test]
+    fn parse_versions_stdout_tolerates_crlf() {
+        let expected: Vec<String> = vec!["dotnet".into()];
+        let out = parse_versions_stdout("dotnet=10.0.102\r\n", &expected).unwrap();
+        assert_eq!(out.get("dotnet").map(String::as_str), Some("10.0.102"));
+    }
+
+    #[test]
+    fn parse_versions_stdout_empty_value_errors() {
+        let expected: Vec<String> = vec!["dotnet".into()];
+        let err = parse_versions_stdout("dotnet=\n", &expected).unwrap_err();
+        match err {
+            ExtractError::EmptyValue(name) => assert_eq!(name, "dotnet"),
+            other => panic!("expected EmptyValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_versions_stdout_whitespace_only_value_errors() {
+        let expected: Vec<String> = vec!["dotnet".into()];
+        let err = parse_versions_stdout("dotnet=   \n", &expected).unwrap_err();
+        assert!(matches!(err, ExtractError::EmptyValue(_)));
+    }
+
+    #[test]
+    fn parse_versions_stdout_missing_expected_name_errors() {
+        let expected: Vec<String> = vec!["dotnet".into(), "rust".into()];
+        let err = parse_versions_stdout("dotnet=10.0.102\n", &expected).unwrap_err();
+        match err {
+            ExtractError::MissingEntry(name) => assert_eq!(name, "rust"),
+            other => panic!("expected MissingEntry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_versions_stdout_ignores_unexpected_names() {
+        // Forward compat: a future installer might write extras the
+        // launcher has no label key for — must not break today.
+        let expected: Vec<String> = vec!["dotnet".into()];
+        let out = parse_versions_stdout(
+            "dotnet=10.0.102\npython=3.12.0\n",
+            &expected,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out.contains_key("dotnet"));
+        assert!(!out.contains_key("python"));
+    }
+
+    #[test]
+    fn parse_versions_stdout_duplicate_name_last_wins() {
+        let expected: Vec<String> = vec!["dotnet".into()];
+        let out = parse_versions_stdout(
+            "dotnet=10.0.101\ndotnet=10.0.102\n",
+            &expected,
+        )
+        .unwrap();
+        assert_eq!(out.get("dotnet").map(String::as_str), Some("10.0.102"));
+    }
+
+    #[test]
+    fn parse_versions_stdout_splits_on_first_equals_only() {
+        // A future installer could emit a value containing `=` (build metadata,
+        // embedded config). Protect that invariant.
+        let expected: Vec<String> = vec!["dotnet".into()];
+        let out = parse_versions_stdout("dotnet=10.0.102+build=7\n", &expected).unwrap();
+        assert_eq!(
+            out.get("dotnet").map(String::as_str),
+            Some("10.0.102+build=7")
+        );
+    }
+
+    // Ordering contract — a shared sorted source feeds both the extract
+    // positional args and the parsed BTreeMap. If either side stopped
+    // sorting, downstream label ordering would silently drift.
+    #[test]
+    fn toolchain_ordering_is_sorted_end_to_end() {
+        let mut names: Vec<String> = vec!["rust".into(), "dotnet".into()];
+        names.sort();
+        assert_eq!(names, vec!["dotnet".to_string(), "rust".to_string()]);
+
+        let args = assemble_extract_run_args("pithos:demo", &names);
+        let c_idx = args.iter().position(|a| a == "-c").expect("-c present");
+        // Positional order mirrors sorted input.
+        assert_eq!(args.get(c_idx + 3), Some(&OsString::from("dotnet")));
+        assert_eq!(args.get(c_idx + 4), Some(&OsString::from("rust")));
+
+        let parsed = parse_versions_stdout("rust=1.85.0\ndotnet=10.0.102\n", &names).unwrap();
+        // BTreeMap iterates sort-by-key regardless of insertion/stdout order.
+        let keys: Vec<&String> = parsed.keys().collect();
+        assert_eq!(keys, vec![&"dotnet".to_string(), &"rust".to_string()]);
     }
 }

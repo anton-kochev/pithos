@@ -232,12 +232,48 @@ mod tests {
             "chmod -R a+rX",
             "sh.rustup.rs",
             "/etc/profile.d/pithos-rust.sh",
+            // Story 4.4: record resolved version under /opt/pithos-versions/<tc>.
+            "mkdir -p /opt/pithos-versions",
+            // Pin the full version-recording pipeline, not just `--version`,
+            // so an unrelated `--version` usage can't false-positive.
+            "awk '{print $2}' > /opt/pithos-versions/rust",
         ] {
             assert!(
                 body.contains(marker),
                 "rust-install.sh is missing required marker {marker:?}"
             );
         }
+        // Exactly one write site — guards against accidental duplicate blocks
+        // silently cloned from another installer.
+        assert_eq!(
+            body.matches("/opt/pithos-versions/rust").count(),
+            1,
+            "rust-install.sh must reference /opt/pithos-versions/rust exactly once"
+        );
+    }
+
+    #[test]
+    fn dotnet_install_sh_contains_required_install_markers() {
+        let p =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/dotnet-install.sh");
+        let body = std::fs::read_to_string(&p).expect("dotnet-install.sh must be readable");
+        for marker in [
+            // Story 4.4: record resolved version under /opt/pithos-versions/<tc>.
+            "mkdir -p /opt/pithos-versions",
+            // Pin the full recording redirect, not just `--version`, so an
+            // unrelated `--version` usage can't false-positive.
+            "--version > /opt/pithos-versions/dotnet",
+        ] {
+            assert!(
+                body.contains(marker),
+                "dotnet-install.sh is missing required marker {marker:?}"
+            );
+        }
+        assert_eq!(
+            body.matches("/opt/pithos-versions/dotnet").count(),
+            1,
+            "dotnet-install.sh must reference /opt/pithos-versions/dotnet exactly once"
+        );
     }
 
     #[test]
@@ -277,12 +313,23 @@ mod tests {
             "sha256sum",
             "GOROOT",
             "/etc/profile.d/pithos-go.sh",
+            // Story 4.4: record resolved version under /opt/pithos-versions/<tc>.
+            "mkdir -p /opt/pithos-versions",
+            // Pin the full recording redirect so the assertion uniquely
+            // identifies the version-writing line (no `--version` flag here;
+            // go just echoes the input to the versions file).
+            "printf '%s\\n' \"$version\" > /opt/pithos-versions/go",
         ] {
             assert!(
                 body.contains(marker),
                 "go-install.sh is missing required marker {marker:?}"
             );
         }
+        assert_eq!(
+            body.matches("/opt/pithos-versions/go").count(),
+            1,
+            "go-install.sh must reference /opt/pithos-versions/go exactly once"
+        );
     }
 
     #[test]

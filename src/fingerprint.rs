@@ -41,6 +41,26 @@ pub fn label(hash: &str) -> String {
     format!("{LABEL_KEY}={hash}")
 }
 
+/// Docker label key under which the resolved exact version of a toolchain is
+/// stored on built images. The launcher reads
+/// `/opt/pithos-versions/<toolchain>` from a first-pass image and applies
+/// `--label dev.pithos.<toolchain>-version=<resolved>` on the second pass,
+/// so `docker inspect` is the audit source for what patch actually landed.
+///
+/// Co-located with [`LABEL_KEY`] and [`label`] so the `dev.pithos.*`
+/// namespace lives in one place.
+///
+/// Note the asymmetry with [`compute`]: the fingerprint (installer-script
+/// contents) is the identity / cache key, whereas this label is informational
+/// metadata about what the installer happened to resolve to the day the
+/// image was built. Two builds that share a fingerprint can legitimately
+/// carry different version labels — e.g. `dotnet: "10"` resolving to a
+/// newer patch on a later day — and [`crate::docker::find_image_by_fingerprint`]
+/// will reuse whichever image is already tagged without re-resolving.
+pub fn version_label_key(toolchain: &str) -> String {
+    format!("dev.pithos.{toolchain}-version")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +143,14 @@ mod tests {
     #[test]
     fn label_formats_key_equals_hash() {
         assert_eq!(label("abc123"), "dev.pithos.fingerprint=abc123");
+    }
+
+    #[test]
+    fn version_label_key_formats_per_toolchain() {
+        // Format lock — the `--version` suffix and `dev.pithos.` prefix are
+        // externally observable via `docker inspect` and must not drift.
+        assert_eq!(version_label_key("dotnet"), "dev.pithos.dotnet-version");
+        assert_eq!(version_label_key("rust"), "dev.pithos.rust-version");
+        assert_eq!(version_label_key("go"), "dev.pithos.go-version");
     }
 }

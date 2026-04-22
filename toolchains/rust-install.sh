@@ -33,6 +33,13 @@ fi
 "$CARGO_HOME/bin/rustup" component add rustfmt clippy
 chmod -R a+rX "$CARGO_HOME" "$RUSTUP_HOME"
 
+# Record the resolved exact version. `rustc --version` prints e.g.
+# "rustc 1.85.0 (a28077b28 2025-01-07)"; second field is the semver.
+# The launcher reads this file to apply the dev.pithos.rust-version
+# label on the final image.
+mkdir -p /opt/pithos-versions
+"$CARGO_HOME/bin/rustc" --version | awk '{print $2}' > /opt/pithos-versions/rust
+
 cat > /etc/profile.d/pithos-rust.sh <<'EOF'
 export CARGO_HOME=/opt/cargo
 export RUSTUP_HOME=/opt/rustup

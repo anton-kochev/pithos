@@ -68,6 +68,13 @@ tar -C /opt --no-same-owner -xzf "$tmp/$archive"
 chmod -R a+rX "$install_dir"
 echo "$version" > "$sentinel"
 
+# Record the resolved exact version. Go's installer already requires a
+# 3-segment exact version as input, so $version is the resolved version.
+# The launcher reads this file to apply the dev.pithos.go-version label
+# on the final image.
+mkdir -p /opt/pithos-versions
+printf '%s\n' "$version" > /opt/pithos-versions/go
+
 cat > /etc/profile.d/pithos-go.sh <<'EOF'
 export GOROOT=/opt/go
 export PATH="/opt/go/bin:$PATH"

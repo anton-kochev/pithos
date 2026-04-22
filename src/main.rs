@@ -232,8 +232,9 @@ fn ensure_image(
     };
 
     let mut installers = BTreeMap::new();
-    for name in pithos::dockerfile::toolchain_names(yaml) {
-        let Some(bytes) = pithos::embed::installer_bytes(&name) else {
+    let toolchain_names: Vec<String> = pithos::dockerfile::toolchain_names(yaml).collect();
+    for name in &toolchain_names {
+        let Some(bytes) = pithos::embed::installer_bytes(name) else {
             narrate(
                 style,
                 ">> ERROR:",
@@ -244,7 +245,7 @@ fn ensure_image(
             );
             return Err(ExitCode::from(1));
         };
-        installers.insert(name, bytes.to_vec());
+        installers.insert(name.clone(), bytes.to_vec());
     }
     let hash = pithos::fingerprint::compute(dockerfile_content, pithos_bytes, &installers);
 
@@ -286,11 +287,20 @@ fn ensure_image(
         return Err(ExitCode::from(1));
     }
 
-    match pithos::docker::build(context.path(), dockerfile_path, &project, &hash, style) {
-        Ok(()) => Ok(EnsuredImage { tag, project }),
+    // First pass: fingerprint label only. Installer RUN steps populate
+    // /opt/pithos-versions/<tc> inside the image as a side-effect.
+    match pithos::docker::build(
+        context.path(),
+        dockerfile_path,
+        &project,
+        &hash,
+        &BTreeMap::new(),
+        style,
+    ) {
+        Ok(()) => {}
         Err(pithos::docker::BuildError::Spawn(e)) => {
             narrate(style, ">> ERROR:", &format!("docker build: {e}"));
-            Err(ExitCode::from(1))
+            return Err(ExitCode::from(1));
         }
         Err(pithos::docker::BuildError::NonZero { code, tail }) => {
             let code_str = code
@@ -307,7 +317,109 @@ fn ensure_image(
             for line in &tail {
                 eprintln!("{}", pithos::output::format_docker_line(line, style));
             }
-            Err(ExitCode::from(3))
+            // Exit 3 is reserved for first-pass user-config-caused build failure.
+            return Err(ExitCode::from(3));
+        }
+    }
+
+    if toolchain_names.is_empty() {
+        // Nothing to extract; single-pass is sufficient.
+        return Ok(EnsuredImage { tag, project });
+    }
+
+    rebuild_with_version_labels(
+        &toolchain_names,
+        context.path(),
+        dockerfile_path,
+        &project,
+        &hash,
+        &tag,
+        style,
+    )?;
+    Ok(EnsuredImage { tag, project })
+}
+
+/// Second pass: read resolved versions from the first-pass image, then
+/// rebuild with `dev.pithos.<tc>-version=<v>` labels stacked on top of the
+/// fingerprint label. BuildKit cache-hits every layer; the `pithos:<project>`
+/// tag gets reassigned to the new (labeled) image without re-doing work.
+///
+/// All failure modes here are internal-error exits (code 1), not user-build
+/// failures (code 3) — an installer or launcher contract violation, not a
+/// broken `.pithos`.
+fn rebuild_with_version_labels(
+    toolchain_names: &[String],
+    context: &Path,
+    dockerfile_path: &Path,
+    project: &str,
+    hash: &str,
+    tag: &str,
+    style: Style,
+) -> Result<(), ExitCode> {
+    let versions = match pithos::docker::extract_versions(tag, toolchain_names) {
+        Ok(v) => v,
+        Err(e) => {
+            narrate(
+                style,
+                ">> ERROR:",
+                &format!("internal: version extraction failed: {e}"),
+            );
+            return Err(ExitCode::from(1));
+        }
+    };
+
+    // BTreeMap iteration is sort-by-key, so the narration is deterministic.
+    let resolved: Vec<String> = versions
+        .iter()
+        .map(|(name, version)| format!("{name}={version}"))
+        .collect();
+    narrate(
+        style,
+        ">>",
+        &format!("resolved: {}", resolved.join(", ")),
+    );
+
+    let mut extra_labels: BTreeMap<String, String> = BTreeMap::new();
+    for (name, version) in &versions {
+        extra_labels.insert(
+            pithos::fingerprint::version_label_key(name),
+            version.clone(),
+        );
+    }
+
+    match pithos::docker::build(
+        context,
+        dockerfile_path,
+        project,
+        hash,
+        &extra_labels,
+        style,
+    ) {
+        Ok(()) => Ok(()),
+        Err(pithos::docker::BuildError::Spawn(e)) => {
+            narrate(
+                style,
+                ">> ERROR:",
+                &format!("internal: metadata rebuild failed: {e}"),
+            );
+            Err(ExitCode::from(1))
+        }
+        Err(pithos::docker::BuildError::NonZero { code, tail }) => {
+            let code_str = code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into());
+            narrate(
+                style,
+                ">> ERROR:",
+                &format!(
+                    "internal: metadata rebuild failed (exit {code_str}); last {} lines:",
+                    tail.len()
+                ),
+            );
+            for line in &tail {
+                eprintln!("{}", pithos::output::format_docker_line(line, style));
+            }
+            Err(ExitCode::from(1))
         }
     }
 }

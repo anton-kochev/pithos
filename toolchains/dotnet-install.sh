@@ -33,6 +33,13 @@ fi
 "$tmp/dotnet-install.sh" "$flag" "$arg" --install-dir "$install_dir"
 ln -sf "$install_dir/dotnet" "$symlink"
 
+# Record the resolved exact version. Channel inputs like "10" or "10.0"
+# collapse to whatever patch was latest when this layer built; the
+# launcher reads these files to apply dev.pithos.<toolchain>-version
+# labels on the final image.
+mkdir -p /opt/pithos-versions
+"$symlink" --version > /opt/pithos-versions/dotnet
+
 cat > /etc/profile.d/pithos-dotnet.sh <<'EOF'
 export DOTNET_ROOT=/usr/share/dotnet
 export DOTNET_CLI_TELEMETRY_OPTOUT=1
