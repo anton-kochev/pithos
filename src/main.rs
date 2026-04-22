@@ -15,11 +15,23 @@ enum RejectKind {
     Flag,
 }
 
+/// Execution mode for the `run` (and internally for `build`) pipeline.
+///
+/// Encodes the `--rebuild` / `--no-build` flags as a closed enum rather
+/// than two correlated bools, so the parser-precluded combo is
+/// unrepresentable by construction instead of by convention.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum RunMode {
+    Default,
+    Rebuild,
+    NoBuild,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand {
     None,
     Build { rebuild: bool },
-    Run { rebuild: bool, cmd: Vec<String> },
+    Run { mode: RunMode, cmd: Vec<String> },
     Reject { kind: RejectKind, value: String },
 }
 
@@ -43,7 +55,7 @@ impl Subcommand {
                 Self::Build { rebuild }
             }
             Some("run") => {
-                let mut rebuild = false;
+                let mut mode = RunMode::Default;
                 let mut cmd: Vec<String> = Vec::new();
                 let mut iter = args.iter().skip(2);
                 while let Some(arg) = iter.next() {
@@ -52,7 +64,26 @@ impl Subcommand {
                             cmd.extend(iter.by_ref().cloned());
                             break;
                         }
-                        "--rebuild" => rebuild = true,
+                        "--rebuild" => match mode {
+                            RunMode::NoBuild => {
+                                return Self::Reject {
+                                    kind: RejectKind::Flag,
+                                    value: "--rebuild and --no-build are mutually exclusive"
+                                        .to_string(),
+                                };
+                            }
+                            RunMode::Default | RunMode::Rebuild => mode = RunMode::Rebuild,
+                        },
+                        "--no-build" => match mode {
+                            RunMode::Rebuild => {
+                                return Self::Reject {
+                                    kind: RejectKind::Flag,
+                                    value: "--rebuild and --no-build are mutually exclusive"
+                                        .to_string(),
+                                };
+                            }
+                            RunMode::Default | RunMode::NoBuild => mode = RunMode::NoBuild,
+                        },
                         s if s.starts_with("--") => {
                             return Self::Reject {
                                 kind: RejectKind::Flag,
@@ -66,7 +97,7 @@ impl Subcommand {
                         }
                     }
                 }
-                Self::Run { rebuild, cmd }
+                Self::Run { mode, cmd }
             }
             Some(other) => Self::Reject {
                 kind: RejectKind::Subcommand,
@@ -129,13 +160,13 @@ fn main() -> ExitCode {
             rebuild,
             style,
         ),
-        Subcommand::Run { rebuild, cmd } => run_run(
+        Subcommand::Run { mode, cmd } => run_run(
             &cwd,
             &yaml,
             &pithos_bytes,
             &dockerfile_path,
             &dockerfile_content,
-            rebuild,
+            mode,
             &cmd,
             style,
         ),
@@ -187,10 +218,33 @@ fn write_dockerfile(path: &Path, content: &str, style: Style) -> Result<(), Exit
     Ok(())
 }
 
-/// Return the cached image id to reuse, if any, given the `--rebuild` flag
-/// and the result of a fingerprint cache lookup. Pure — no I/O.
-fn cached_image_to_reuse(rebuild: bool, cached: Option<&str>) -> Option<&str> {
-    if rebuild { None } else { cached }
+/// Action to take after a fingerprint cache lookup, given the `--rebuild`
+/// and `--no-build` flags. `Reuse(id)` short-circuits with the existing
+/// image; `Build` falls through to the build path; `Abort` signals that
+/// `--no-build` was set and no matching image exists (exit 4).
+#[derive(Debug, PartialEq, Eq)]
+enum BuildAction<'a> {
+    Reuse(&'a str),
+    Build,
+    Abort,
+}
+
+/// Resolve the build decision from the run mode and fingerprint lookup.
+/// Pure — no I/O. Total over its domain by construction of `RunMode`.
+fn resolve_build_action(mode: RunMode, cached: Option<&str>) -> BuildAction<'_> {
+    match (mode, cached) {
+        (RunMode::Rebuild, _) => BuildAction::Build,
+        (RunMode::NoBuild, None) => BuildAction::Abort,
+        (RunMode::NoBuild, Some(id)) => BuildAction::Reuse(id),
+        (RunMode::Default, Some(id)) => BuildAction::Reuse(id),
+        (RunMode::Default, None) => BuildAction::Build,
+    }
+}
+
+/// Narration body for the `--no-build` + cache-miss abort. Pure so the
+/// wording is lockable in a unit test without reaching through `ensure_image`.
+fn abort_message(project: &str) -> String {
+    format!("image pithos:{project} not found; run `pithos build` to create it (--no-build is set)")
 }
 
 /// Return `<cwd>/.env` if it exists, else `None`. Extracted so the
@@ -216,7 +270,7 @@ fn ensure_image(
     pithos_bytes: &[u8],
     dockerfile_path: &Path,
     dockerfile_content: &str,
-    rebuild: bool,
+    mode: RunMode,
     style: Style,
 ) -> Result<EnsuredImage, ExitCode> {
     let project = match pithos::project::name_from_path(cwd) {
@@ -257,13 +311,20 @@ fn ensure_image(
         }
     };
     let tag = format!("pithos:{project}");
-    if let Some(id) = cached_image_to_reuse(rebuild, cached.as_deref()) {
-        narrate(
-            style,
-            ">>",
-            &format!("cached image {id} matches fingerprint; skipping build"),
-        );
-        return Ok(EnsuredImage { tag, project });
+    match resolve_build_action(mode, cached.as_deref()) {
+        BuildAction::Reuse(id) => {
+            narrate(
+                style,
+                ">>",
+                &format!("cached image {id} matches fingerprint; skipping build"),
+            );
+            return Ok(EnsuredImage { tag, project });
+        }
+        BuildAction::Abort => {
+            narrate(style, ">> ERROR:", &abort_message(&project));
+            return Err(ExitCode::from(4));
+        }
+        BuildAction::Build => {}
     }
 
     // `TempDir` cleans on Drop; SIGINT runs Drop, SIGKILL leaks under `$TMPDIR` for the OS to reap.
@@ -433,13 +494,21 @@ fn run_build(
     rebuild: bool,
     style: Style,
 ) -> ExitCode {
+    // `build` never aborts: --no-build is a `run`-only flag, so NoBuild is
+    // unreachable here by construction. Collapsing to Default/Rebuild keeps
+    // that invariant in the type system.
+    let mode = if rebuild {
+        RunMode::Rebuild
+    } else {
+        RunMode::Default
+    };
     match ensure_image(
         cwd,
         yaml,
         pithos_bytes,
         dockerfile_path,
         dockerfile_content,
-        rebuild,
+        mode,
         style,
     ) {
         Ok(_) => ExitCode::SUCCESS,
@@ -453,7 +522,7 @@ fn run_run(
     pithos_bytes: &[u8],
     dockerfile_path: &Path,
     dockerfile_content: &str,
-    rebuild: bool,
+    mode: RunMode,
     cmd: &[String],
     style: Style,
 ) -> ExitCode {
@@ -463,7 +532,7 @@ fn run_run(
         pithos_bytes,
         dockerfile_path,
         dockerfile_content,
-        rebuild,
+        mode,
         style,
     ) {
         Ok(e) => e,
@@ -504,27 +573,64 @@ mod tests {
     }
 
     #[test]
-    fn cached_image_to_reuse_rebuild_with_cache_returns_none() {
-        // --rebuild overrides a cache hit → run the build
-        assert_eq!(cached_image_to_reuse(true, Some("abc123")), None);
+    fn resolve_build_action_rebuild_with_cache_builds() {
+        // --rebuild overrides a cache hit → build
+        assert_eq!(
+            resolve_build_action(RunMode::Rebuild, Some("abc123")),
+            BuildAction::Build
+        );
     }
 
     #[test]
-    fn cached_image_to_reuse_rebuild_without_cache_returns_none() {
-        // --rebuild with no cache → still run the build
-        assert_eq!(cached_image_to_reuse(true, None), None);
+    fn resolve_build_action_rebuild_without_cache_builds() {
+        assert_eq!(
+            resolve_build_action(RunMode::Rebuild, None),
+            BuildAction::Build
+        );
     }
 
     #[test]
-    fn cached_image_to_reuse_no_rebuild_without_cache_returns_none() {
-        // No flag, no cache → build
-        assert_eq!(cached_image_to_reuse(false, None), None);
+    fn resolve_build_action_no_build_with_cache_reuses() {
+        // --no-build + cache hit → reuse, don't build
+        assert_eq!(
+            resolve_build_action(RunMode::NoBuild, Some("abc123")),
+            BuildAction::Reuse("abc123")
+        );
     }
 
     #[test]
-    fn cached_image_to_reuse_no_rebuild_with_cache_returns_id() {
-        // No flag, cache hit → skip and surface the id
-        assert_eq!(cached_image_to_reuse(false, Some("abc123")), Some("abc123"));
+    fn resolve_build_action_no_build_without_cache_aborts() {
+        // --no-build + cache miss → exit 4 signal
+        assert_eq!(
+            resolve_build_action(RunMode::NoBuild, None),
+            BuildAction::Abort
+        );
+    }
+
+    #[test]
+    fn resolve_build_action_default_with_cache_reuses() {
+        assert_eq!(
+            resolve_build_action(RunMode::Default, Some("abc123")),
+            BuildAction::Reuse("abc123")
+        );
+    }
+
+    #[test]
+    fn resolve_build_action_default_without_cache_builds() {
+        assert_eq!(
+            resolve_build_action(RunMode::Default, None),
+            BuildAction::Build
+        );
+    }
+
+    #[test]
+    fn abort_message_mentions_pithos_build_and_flag_and_project() {
+        // Lock the three user-facing tokens so the guidance can't silently
+        // drift — CI runners grep for "pithos build" to diagnose exit 4.
+        let m = abort_message("widgets");
+        assert!(m.contains("pithos build"), "missing 'pithos build': {m}");
+        assert!(m.contains("--no-build"), "missing '--no-build': {m}");
+        assert!(m.contains("widgets"), "missing project name: {m}");
     }
 
     #[test]
@@ -598,7 +704,10 @@ mod tests {
     fn from_args_run_without_flag() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run"])),
-            Subcommand::Run { rebuild: false, cmd: vec![] }
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec![],
+            }
         );
     }
 
@@ -606,7 +715,10 @@ mod tests {
     fn from_args_run_with_rebuild() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--rebuild"])),
-            Subcommand::Run { rebuild: true, cmd: vec![] }
+            Subcommand::Run {
+                mode: RunMode::Rebuild,
+                cmd: vec![],
+            }
         );
     }
 
@@ -625,7 +737,10 @@ mod tests {
     fn from_args_run_accepts_positional_as_cmd() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--rebuild", "extra"])),
-            Subcommand::Run { rebuild: true, cmd: vec!["extra".to_string()] }
+            Subcommand::Run {
+                mode: RunMode::Rebuild,
+                cmd: vec!["extra".to_string()],
+            }
         );
     }
 
@@ -633,7 +748,10 @@ mod tests {
     fn from_args_run_accepts_bare_cmd() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "bash"])),
-            Subcommand::Run { rebuild: false, cmd: vec!["bash".to_string()] }
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec!["bash".to_string()],
+            }
         );
     }
 
@@ -642,7 +760,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "bash", "-c", "echo"])),
             Subcommand::Run {
-                rebuild: false,
+                mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "-c".to_string(), "echo".to_string()],
             }
         );
@@ -653,7 +771,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--", "bash", "-c", "echo"])),
             Subcommand::Run {
-                rebuild: false,
+                mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "-c".to_string(), "echo".to_string()],
             }
         );
@@ -663,7 +781,10 @@ mod tests {
     fn from_args_run_rebuild_before_double_dash() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--rebuild", "--", "bash"])),
-            Subcommand::Run { rebuild: true, cmd: vec!["bash".to_string()] }
+            Subcommand::Run {
+                mode: RunMode::Rebuild,
+                cmd: vec!["bash".to_string()],
+            }
         );
     }
 
@@ -671,7 +792,10 @@ mod tests {
     fn from_args_run_trailing_double_dash_yields_empty_cmd() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--rebuild", "--"])),
-            Subcommand::Run { rebuild: true, cmd: vec![] }
+            Subcommand::Run {
+                mode: RunMode::Rebuild,
+                cmd: vec![],
+            }
         );
     }
 
@@ -683,8 +807,108 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "bash", "--rebuild"])),
             Subcommand::Run {
-                rebuild: false,
+                mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "--rebuild".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_with_no_build() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "--no-build"])),
+            Subcommand::Run {
+                mode: RunMode::NoBuild,
+                cmd: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_no_build_before_cmd() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "--no-build", "bash"])),
+            Subcommand::Run {
+                mode: RunMode::NoBuild,
+                cmd: vec!["bash".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_rejects_rebuild_then_no_build_combo() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "--rebuild", "--no-build"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "--rebuild and --no-build are mutually exclusive".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_rejects_no_build_then_rebuild_combo() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "--no-build", "--rebuild"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "--rebuild and --no-build are mutually exclusive".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_no_build_after_double_dash_is_cmd_arg() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "--", "--no-build"])),
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec!["--no-build".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_no_build_after_positional_is_cmd_arg() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "bash", "--no-build"])),
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec!["bash".to_string(), "--no-build".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_no_build_twice_is_idempotent() {
+        // Mirrors how --rebuild --rebuild silently coalesces; keeps the
+        // rejection surface minimal (combo-with-rebuild is the only invalid
+        // shape).
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "--no-build", "--no-build"])),
+            Subcommand::Run {
+                mode: RunMode::NoBuild,
+                cmd: vec![],
+            }
+        );
+    }
+
+    // Combo rejection must fire inside the iteration loop, not post-loop —
+    // otherwise a trailing positional like `extra` would get captured into
+    // `cmd` before the incoherent combo is noticed.
+    #[test]
+    fn from_args_run_combo_rejection_fires_before_trailing_positional() {
+        assert_eq!(
+            Subcommand::from_args(&args(&[
+                "pithos",
+                "run",
+                "--rebuild",
+                "--no-build",
+                "extra"
+            ])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "--rebuild and --no-build are mutually exclusive".to_string(),
             }
         );
     }
