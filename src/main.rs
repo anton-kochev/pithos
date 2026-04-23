@@ -27,9 +27,11 @@ enum RunMode {
     NoBuild,
 }
 
+// Short usage line for fail-fast reject paths; full help is story 7.2's job.
+const USAGE: &str = "usage: pithos [run | build] [options]";
+
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand {
-    None,
     Build { rebuild: bool },
     Run { mode: RunMode, cmd: Vec<String> },
     Reject { kind: RejectKind, value: String },
@@ -38,7 +40,11 @@ enum Subcommand {
 impl Subcommand {
     fn from_args(args: &[String]) -> Self {
         match args.get(1).map(String::as_str) {
-            None => Self::None,
+            // Bare `pithos` = `pithos run`: matches common-invocation muscle memory.
+            None => Self::Run {
+                mode: RunMode::Default,
+                cmd: Vec::new(),
+            },
             Some("build") => {
                 let mut rebuild = false;
                 for arg in args.iter().skip(2) {
@@ -126,7 +132,8 @@ fn main() -> ExitCode {
             }
             RejectKind::Flag => narrate(style, ">> ERROR:", &format!("unknown flag: {value}")),
         }
-        return ExitCode::from(1);
+        narrate(style, ">>", USAGE);
+        return ExitCode::from(2);
     }
 
     let cwd = match env::current_dir() {
@@ -160,7 +167,6 @@ fn main() -> ExitCode {
     }
 
     match subcommand {
-        Subcommand::None => ExitCode::SUCCESS,
         Subcommand::Build { rebuild } => run_build(
             &cwd,
             &yaml,
@@ -708,8 +714,14 @@ mod tests {
     }
 
     #[test]
-    fn from_args_no_subcommand_is_none() {
-        assert_eq!(Subcommand::from_args(&args(&["pithos"])), Subcommand::None);
+    fn from_args_no_subcommand_defaults_to_run() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos"])),
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec![],
+            }
+        );
     }
 
     #[test]

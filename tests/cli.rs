@@ -42,31 +42,51 @@ fn cli_exit_2_on_parse_error() {
 
 #[test]
 fn cli_reads_from_cwd() {
+    // Launcher reads from cwd: valid config → emits Dockerfile, malformed
+    // config → parse error (exit 2) and no emit.
     // Arrange
     let good = tempdir().unwrap();
     let bad = tempdir().unwrap();
     fs::write(good.path().join(".pithos"), VALID).unwrap();
     fs::write(bad.path().join(".pithos"), MALFORMED).unwrap();
 
-    // Act
-    let good_code = Command::cargo_bin("pithos")
+    // Act — good path: exit code is incidental (daemon probe), Dockerfile
+    // emission is the invariant that proves the valid config was read.
+    let _ = Command::cargo_bin("pithos")
         .unwrap()
+        .arg("build")
         .current_dir(&good)
-        .assert()
-        .get_output()
-        .status
-        .code();
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert();
     let bad_code = Command::cargo_bin("pithos")
         .unwrap()
+        .arg("build")
         .current_dir(&bad)
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
         .assert()
+        .code(2)
         .get_output()
         .status
         .code();
 
     // Assert
-    assert_eq!(good_code, Some(0), "valid config should exit 0");
+    assert!(
+        good.path().join(".pithos.d").join("Dockerfile").exists(),
+        "valid config should have emitted .pithos.d/Dockerfile"
+    );
     assert_eq!(bad_code, Some(2), "malformed config should exit 2");
+    assert!(
+        !bad.path().join(".pithos.d").join("Dockerfile").exists(),
+        "malformed config should NOT emit Dockerfile (parse fails before emit)"
+    );
 }
 
 #[test]
@@ -234,14 +254,20 @@ fn cli_writes_dockerfile_to_pithos_d() {
     let td = tempdir().unwrap();
     fs::write(td.path().join(".pithos"), VALID).unwrap();
 
-    // Act
-    Command::cargo_bin("pithos")
+    // Act — exit code is incidental (daemon probe failure); Dockerfile
+    // content is the invariant under test.
+    let _ = Command::cargo_bin("pithos")
         .unwrap()
+        .arg("build")
         .current_dir(&td)
-        .assert()
-        .code(0);
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert();
 
-    // Assert
+    // Assert — emit precedes daemon probe, so Dockerfile still gets written.
     let dockerfile = td.path().join(".pithos.d").join("Dockerfile");
     assert!(
         dockerfile.exists(),
@@ -262,12 +288,18 @@ fn cli_overwrites_existing_dockerfile() {
     let dockerfile = dir.join("Dockerfile");
     fs::write(&dockerfile, "STALE\n").unwrap();
 
-    // Act
-    Command::cargo_bin("pithos")
+    // Act — exit code is incidental (daemon probe failure); Dockerfile
+    // content is the invariant under test.
+    let _ = Command::cargo_bin("pithos")
         .unwrap()
+        .arg("build")
         .current_dir(&td)
-        .assert()
-        .code(0);
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert();
 
     // Assert
     let content = fs::read_to_string(&dockerfile).unwrap();
@@ -305,17 +337,28 @@ fn cli_emits_deterministic_dockerfile_for_identical_config() {
     fs::write(td_a.path().join(".pithos"), VALID).unwrap();
     fs::write(td_b.path().join(".pithos"), VALID).unwrap();
 
-    // Act
-    Command::cargo_bin("pithos")
+    // Act — exit code is incidental (daemon probe failure); Dockerfile
+    // content is the invariant under test.
+    let _ = Command::cargo_bin("pithos")
         .unwrap()
+        .arg("build")
         .current_dir(&td_a)
-        .assert()
-        .code(0);
-    Command::cargo_bin("pithos")
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert();
+    let _ = Command::cargo_bin("pithos")
         .unwrap()
+        .arg("build")
         .current_dir(&td_b)
-        .assert()
-        .code(0);
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert();
 
     // Assert
     let bytes_a = fs::read(td_a.path().join(".pithos.d").join("Dockerfile")).unwrap();
@@ -336,12 +379,18 @@ fn cli_emits_toolchain_layers_in_alphabetical_order() {
     )
     .unwrap();
 
-    // Act
-    Command::cargo_bin("pithos")
+    // Act — exit code is incidental (daemon probe failure); Dockerfile
+    // content is the invariant under test.
+    let _ = Command::cargo_bin("pithos")
         .unwrap()
+        .arg("build")
         .current_dir(&td)
-        .assert()
-        .code(0);
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert();
 
     // Assert
     let dockerfile = td.path().join(".pithos.d").join("Dockerfile");
@@ -379,12 +428,18 @@ fn cli_emits_extras_layer_after_toolchains() {
     )
     .unwrap();
 
-    // Act
-    Command::cargo_bin("pithos")
+    // Act — exit code is incidental (daemon probe failure); Dockerfile
+    // content is the invariant under test.
+    let _ = Command::cargo_bin("pithos")
         .unwrap()
+        .arg("build")
         .current_dir(&td)
-        .assert()
-        .code(0);
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert();
 
     // Assert
     let dockerfile = td.path().join(".pithos.d").join("Dockerfile");
@@ -538,7 +593,7 @@ fn cli_build_rejects_unknown_flag_writes_only_to_stderr() {
         .args(["build", "--nope"])
         .current_dir(&td)
         .assert()
-        .code(1);
+        .code(2);
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(">>"), "stderr missing '>>' marker: {stderr}");
@@ -550,22 +605,25 @@ fn cli_build_rejects_unknown_flag_writes_only_to_stderr() {
 }
 
 #[test]
-fn cli_bare_invocation_skips_daemon_probe() {
-    // Guard policy contract: `pithos` with no subcommand must NOT probe the
-    // daemon — it only emits the Dockerfile (pure/offline). This locks the
-    // dispatch guard to Build/Run; a regression that widens the guard to all
-    // subcommands would flip this test to exit 126.
+fn cli_bare_invocation_dispatches_run() {
+    // Bare `pithos` no longer short-circuits with exit 0; Dockerfile gets
+    // emitted. Unit test `from_args_no_subcommand_defaults_to_run` locks the
+    // Run-specific parse contract; this integration test only proves the
+    // post-parse pipeline engages.
     let td = tempdir().unwrap();
     fs::write(td.path().join(".pithos"), VALID).unwrap();
-    Command::cargo_bin("pithos")
+    let _ = Command::cargo_bin("pithos")
         .unwrap()
         .current_dir(&td)
-        .env("DOCKER_HOST", "unix:///nonexistent-pithos-6.5.sock")
-        .assert()
-        .code(0);
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert();
     assert!(
         td.path().join(".pithos.d/Dockerfile").exists(),
-        "Dockerfile should be emitted for bare invocation"
+        "Dockerfile should be emitted before daemon probe on bare invocation"
     );
 }
 
@@ -644,7 +702,7 @@ fn cli_build_rejects_unknown_flag() {
         .args(["build", "--nope"])
         .current_dir(&td)
         .assert()
-        .code(1);
+        .code(2);
 
     // Assert
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
@@ -652,9 +710,50 @@ fn cli_build_rejects_unknown_flag() {
         stderr.contains(">> ERROR: unknown flag: --nope"),
         "stderr missing '>> ERROR: unknown flag: --nope' marker: {stderr}"
     );
+    assert!(
+        stderr.contains("usage:"),
+        "stderr missing 'usage:' line after reject: {stderr}"
+    );
     // Sanity: the fail-fast guard runs before any filesystem mutation.
     assert!(
         !td.path().join(".pithos.d").exists(),
         ".pithos.d should not be created when flag parsing fails"
+    );
+}
+
+#[test]
+fn cli_unknown_subcommand_exits_2_with_usage() {
+    // Arrange
+    let td = tempdir().unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("bogus")
+        .current_dir(&td)
+        .assert()
+        .code(2);
+
+    // Assert
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown subcommand: bogus"),
+        "stderr missing error: {stderr}"
+    );
+    assert!(
+        stderr.contains("usage:"),
+        "stderr missing usage line: {stderr}"
+    );
+    // T-505 invariant: narration goes to stderr; stdout stays clean.
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must be empty for T-505: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    // Fail-fast guard: parse error runs before any filesystem mutation.
+    assert!(
+        !td.path().join(".pithos.d").exists(),
+        ".pithos.d should not be created when subcommand parsing fails"
     );
 }
