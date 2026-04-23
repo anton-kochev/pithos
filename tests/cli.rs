@@ -550,6 +550,90 @@ fn cli_build_rejects_unknown_flag_writes_only_to_stderr() {
 }
 
 #[test]
+fn cli_bare_invocation_skips_daemon_probe() {
+    // Guard policy contract: `pithos` with no subcommand must NOT probe the
+    // daemon — it only emits the Dockerfile (pure/offline). This locks the
+    // dispatch guard to Build/Run; a regression that widens the guard to all
+    // subcommands would flip this test to exit 126.
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), VALID).unwrap();
+    Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(&td)
+        .env("DOCKER_HOST", "unix:///nonexistent-pithos-6.5.sock")
+        .assert()
+        .code(0);
+    assert!(
+        td.path().join(".pithos.d/Dockerfile").exists(),
+        "Dockerfile should be emitted for bare invocation"
+    );
+}
+
+#[test]
+fn cli_exit_126_within_3s_when_daemon_unreachable() {
+    // NFR-12 / T-504: unreachable daemon → exit 126 within 3s with guidance
+    // to start Docker Desktop.
+    //
+    // Gate on `docker --version` (not `which docker`): --version proves the
+    // binary exists AND execs cleanly, so the failure lands in Unreachable
+    // (daemon-side), not Spawn (binary-missing). Without the gate, a CI
+    // runner without docker would produce a false green via the Spawn path.
+    let docker_ok = std::process::Command::new("docker")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !docker_ok {
+        eprintln!(
+            "cli_exit_126_within_3s_when_daemon_unreachable: skipped (docker not on PATH)"
+        );
+        return;
+    }
+
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), VALID).unwrap();
+
+    let start = std::time::Instant::now();
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("build")
+        .current_dir(&td)
+        .env("DOCKER_HOST", "unix:///nonexistent-pithos-6.5.sock")
+        .assert()
+        .code(126);
+    let elapsed = start.elapsed();
+
+    // 7s budget = 3s probe cap + 4s slack for cold-macOS CI (CLI-plugin scan
+    // + child spawn/teardown add ~300-500ms).
+    assert!(
+        elapsed < std::time::Duration::from_secs(7),
+        "probe exceeded 3s + slack: {elapsed:?}"
+    );
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains(">> ERROR:"),
+        "stderr missing '>> ERROR:' marker: {stderr}"
+    );
+    assert!(
+        stderr.contains("start Docker Desktop"),
+        "stderr missing 'start Docker Desktop' guidance: {stderr}"
+    );
+    // Parse-phase regression guard: a future refactor that makes
+    // `pithos build` fail at parse instead of probe would surface
+    // different exit codes; these catch the miscategorization even if
+    // the primary 126 assertion happened to pass spuriously.
+    assert!(
+        !stderr.contains("unknown flag:"),
+        "unexpected parse-phase rejection: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown subcommand:"),
+        "unexpected parse-phase rejection: {stderr}"
+    );
+}
+
+#[test]
 fn cli_build_rejects_unknown_flag() {
     // Arrange — no .pithos needed; unknown-flag parsing errors before any I/O.
     let td = tempdir().unwrap();

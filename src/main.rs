@@ -105,6 +105,10 @@ impl Subcommand {
             },
         }
     }
+
+    fn requires_daemon(&self) -> bool {
+        matches!(self, Self::Build { .. } | Self::Run { .. })
+    }
 }
 
 fn main() -> ExitCode {
@@ -147,6 +151,12 @@ fn main() -> ExitCode {
     let dockerfile_content = pithos::dockerfile::emit(&yaml);
     if let Err(code) = write_dockerfile(&dockerfile_path, &dockerfile_content, style) {
         return code;
+    }
+
+    if subcommand.requires_daemon() {
+        if let Err(code) = require_daemon(style) {
+            return code;
+        }
     }
 
     match subcommand {
@@ -253,6 +263,19 @@ fn abort_message(project: &str) -> String {
 fn discover_env_file(cwd: &Path) -> Option<std::path::PathBuf> {
     let p = cwd.join(".env");
     p.exists().then_some(p)
+}
+
+/// Probe the Docker daemon and translate the outcome into an exit code
+/// + user-facing narration via the pure `classify_probe` helper.
+fn require_daemon(style: Style) -> Result<(), ExitCode> {
+    match pithos::docker::probe_daemon(std::time::Duration::from_secs(3)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let (code, message) = pithos::docker::classify_probe(&e);
+            narrate(style, ">> ERROR:", message);
+            Err(ExitCode::from(code))
+        }
+    }
 }
 
 struct EnsuredImage {
