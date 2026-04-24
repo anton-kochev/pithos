@@ -51,6 +51,62 @@ fn parse_image_ids(stdout: &str) -> Vec<String> {
         .collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct ImageInfo {
+    pub id: String,
+    pub size_bytes: u64,
+    pub created: String,
+    pub fingerprint: Option<String>,
+}
+
+pub fn inspect_image(tag: &str) -> std::io::Result<Option<ImageInfo>> {
+    let output = Command::new("docker")
+        .args([
+            "image",
+            "inspect",
+            tag,
+            "--format",
+            r#"{{.Id}}|{{.Size}}|{{.Created}}|{{with .Config.Labels}}{{index . "dev.pithos.fingerprint"}}{{end}}"#,
+        ])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No such image") || stderr.contains("No such object") {
+            return Ok(None);
+        }
+        return Err(std::io::Error::other(format!(
+            "docker image inspect failed (exit {:?}): {}",
+            output.status.code(),
+            stderr.trim_end()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next().unwrap_or("");
+    parse_inspect_line(line).map(Some).ok_or_else(|| {
+        std::io::Error::other(format!(
+            "docker image inspect returned unparseable line: {line}"
+        ))
+    })
+}
+
+fn parse_inspect_line(line: &str) -> Option<ImageInfo> {
+    let parts: Vec<&str> = line.splitn(4, '|').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let id = parts[0].to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let size_bytes = parts[1].parse::<u64>().ok()?;
+    let created = parts[2].to_string();
+    let fingerprint = match parts[3] {
+        "" | "<no value>" => None,
+        v => Some(v.to_string()),
+    };
+    Some(ImageInfo { id, size_bytes, created, fingerprint })
+}
+
 /// Failure modes for [`build`]. `Spawn` covers the executable not being
 /// found in PATH or transient OS-level launch errors; `NonZero` carries
 /// the docker process's exit code so future callers can present richer
@@ -516,6 +572,45 @@ mod tests {
     #[test]
     fn parse_image_ids_returns_empty_for_no_output() {
         assert!(parse_image_ids("").is_empty());
+    }
+
+    #[test]
+    fn parse_inspect_line_parses_full_record() {
+        let line = "sha256:abc123|12345678|2026-04-24T10:30:00.123456789Z|deadbeef";
+        let info = parse_inspect_line(line).unwrap();
+        assert_eq!(info.id, "sha256:abc123");
+        assert_eq!(info.size_bytes, 12345678);
+        assert_eq!(info.created, "2026-04-24T10:30:00.123456789Z");
+        assert_eq!(info.fingerprint.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parse_inspect_line_treats_empty_label_as_absent_fingerprint() {
+        let line = "sha256:abc123|12345678|2026-04-24T10:30:00Z|";
+        let info = parse_inspect_line(line).unwrap();
+        assert!(info.fingerprint.is_none());
+    }
+
+    #[test]
+    fn parse_inspect_line_treats_no_value_as_absent_fingerprint() {
+        let line = "sha256:abc123|12345678|2026-04-24T10:30:00Z|<no value>";
+        let info = parse_inspect_line(line).unwrap();
+        assert!(info.fingerprint.is_none());
+    }
+
+    #[test]
+    fn parse_inspect_line_rejects_missing_fields() {
+        assert!(parse_inspect_line("only|two|fields").is_none());
+    }
+
+    #[test]
+    fn parse_inspect_line_rejects_non_numeric_size() {
+        assert!(parse_inspect_line("sha256:abc|notanumber|2026|fp").is_none());
+    }
+
+    #[test]
+    fn parse_inspect_line_rejects_empty_id() {
+        assert!(parse_inspect_line("|123|2026|fp").is_none());
     }
 
     #[test]

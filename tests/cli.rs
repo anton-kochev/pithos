@@ -734,7 +734,7 @@ fn cli_help_exits_0_and_lists_subcommands() {
 
     let output = assert.get_output();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for name in ["run", "build", "help", "version"] {
+    for name in ["run", "build", "info", "help", "version"] {
         assert!(
             stdout.contains(name),
             "stdout missing subcommand {name:?}: {stdout}"
@@ -874,5 +874,74 @@ fn cli_unknown_subcommand_exits_2_with_usage() {
     assert!(
         !td.path().join(".pithos.d").exists(),
         ".pithos.d should not be created when subcommand parsing fails"
+    );
+}
+
+#[test]
+fn cli_info_exit_2_when_pithos_missing() {
+    let td = tempdir().unwrap();
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("info")
+        .current_dir(&td)
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains(".pithos not found"),
+        "stderr missing '.pithos not found' phrase: {stderr}"
+    );
+}
+
+#[test]
+fn cli_info_exit_2_on_parse_error() {
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), MALFORMED).unwrap();
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("info")
+        .current_dir(&td)
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("line "),
+        "stderr missing 'line N' phrase: {stderr}"
+    );
+}
+
+#[test]
+fn cli_info_rejects_trailing_arg() {
+    let td = tempdir().unwrap();
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .args(["info", "extra"])
+        .current_dir(&td)
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("unknown flag: extra"),
+        "stderr missing 'unknown flag: extra': {stderr}"
+    );
+}
+
+#[test]
+fn cli_info_does_not_create_pithos_d() {
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), VALID).unwrap();
+    let _ = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("info")
+        .current_dir(&td)
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert();
+    assert!(
+        !td.path().join(".pithos.d").exists(),
+        "`pithos info` should not create .pithos.d/"
     );
 }

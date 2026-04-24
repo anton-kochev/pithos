@@ -28,12 +28,13 @@ enum RunMode {
 }
 
 // Short usage line for fail-fast reject paths. `pithos help` prints the full usage.
-const USAGE: &str = "usage: pithos [run | build | help | version] [options]";
+const USAGE: &str = "usage: pithos [run | build | info | help | version] [options]";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand {
     Build { rebuild: bool },
     Run { mode: RunMode, cmd: Vec<String> },
+    Info,
     Help,
     Version,
     Reject { kind: RejectKind, value: String },
@@ -121,6 +122,13 @@ impl Subcommand {
                     value: extra.clone(),
                 },
             },
+            Some("info") => match args.get(2) {
+                None => Self::Info,
+                Some(extra) => Self::Reject {
+                    kind: RejectKind::Flag,
+                    value: extra.clone(),
+                },
+            },
             Some(other) => Self::Reject {
                 kind: RejectKind::Subcommand,
                 value: other.to_string(),
@@ -129,6 +137,10 @@ impl Subcommand {
     }
 
     fn requires_daemon(&self) -> bool {
+        matches!(self, Self::Build { .. } | Self::Run { .. })
+    }
+
+    fn writes_dockerfile(&self) -> bool {
         matches!(self, Self::Build { .. } | Self::Run { .. })
     }
 }
@@ -192,8 +204,10 @@ fn main() -> ExitCode {
     };
     let dockerfile_path = cwd.join(".pithos.d").join("Dockerfile");
     let dockerfile_content = pithos::dockerfile::emit(&yaml);
-    if let Err(code) = write_dockerfile(&dockerfile_path, &dockerfile_content, style) {
-        return code;
+    if subcommand.writes_dockerfile() {
+        if let Err(code) = write_dockerfile(&dockerfile_path, &dockerfile_content, style) {
+            return code;
+        }
     }
 
     if subcommand.requires_daemon() {
@@ -222,6 +236,7 @@ fn main() -> ExitCode {
             &cmd,
             style,
         ),
+        Subcommand::Info => run_info(&cwd, &yaml, &pithos_bytes, &dockerfile_content, style),
         Subcommand::Help | Subcommand::Version => {
             unreachable!("handled by fail-fast guard above")
         }
@@ -323,6 +338,7 @@ fn help_text() -> String {
          Commands:\n  \
            run [cmd...]   Build-if-needed, then launch container (default when no command given)\n  \
            build          Build the image without launching\n  \
+           info           Print project config, fingerprint, and image status\n  \
            help           Print this help\n  \
            version        Print the pithos version\n\
          \n\
@@ -676,9 +692,148 @@ fn run_run(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RebuildStatus {
+    NotBuilt,
+    Cached,
+    RebuildNeeded,
+    Unavailable,
+}
+
+fn rebuild_status(current_fp: &str, image: Option<&pithos::docker::ImageInfo>) -> RebuildStatus {
+    match image {
+        None => RebuildStatus::NotBuilt,
+        Some(info) => match &info.fingerprint {
+            Some(label) if label == current_fp => RebuildStatus::Cached,
+            _ => RebuildStatus::RebuildNeeded,
+        },
+    }
+}
+
+fn summarize_config(yaml: &YamlOwned) -> String {
+    let toolchains: Vec<String> = pithos::dockerfile::toolchain_names(yaml).collect();
+    let apt_count = pithos::dockerfile::apt_package_count(yaml);
+    let tc_part = if toolchains.is_empty() {
+        "toolchains: none".to_string()
+    } else {
+        format!("toolchains: {}", toolchains.join(", "))
+    };
+    let apt_part = match apt_count {
+        0 => "extras.apt: none".to_string(),
+        1 => "extras.apt: 1 package".to_string(),
+        n => format!("extras.apt: {n} packages"),
+    };
+    format!("{tc_part}; {apt_part}")
+}
+
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    const TB: u64 = GB * 1024;
+    if bytes >= TB {
+        format!("{:.1} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn render_info(
+    project: &str,
+    config_summary: &str,
+    fingerprint: &str,
+    tag: &str,
+    image: Option<&pithos::docker::ImageInfo>,
+    status: RebuildStatus,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("project:      {project}\n"));
+    out.push_str(&format!("config:       {config_summary}\n"));
+    out.push_str(&format!("fingerprint:  {fingerprint}\n"));
+    out.push_str(&format!("image:        {tag}\n"));
+    if let Some(info) = image {
+        out.push_str(&format!("image id:     {}\n", info.id));
+        out.push_str(&format!("image size:   {}\n", format_size(info.size_bytes)));
+        out.push_str(&format!("created:      {}\n", info.created));
+    }
+    let status_str = match status {
+        RebuildStatus::NotBuilt => "not-built",
+        RebuildStatus::Cached => "cached",
+        RebuildStatus::RebuildNeeded => "rebuild-needed",
+        RebuildStatus::Unavailable => "unavailable",
+    };
+    out.push_str(&format!("status:       {status_str}\n"));
+    out
+}
+
+fn run_info(
+    cwd: &Path,
+    yaml: &YamlOwned,
+    pithos_bytes: &[u8],
+    dockerfile_content: &str,
+    style: Style,
+) -> ExitCode {
+    let project = match pithos::project::name_from_path(cwd) {
+        Some(n) => n,
+        None => {
+            narrate(
+                style,
+                ">> ERROR:",
+                &format!("cannot derive project name from {}", cwd.display()),
+            );
+            return ExitCode::from(1);
+        }
+    };
+    let tag = format!("pithos:{project}");
+
+    let mut installers = BTreeMap::new();
+    for name in pithos::dockerfile::toolchain_names(yaml) {
+        let Some(bytes) = pithos::embed::installer_bytes(&name) else {
+            narrate(
+                style,
+                ">> ERROR:",
+                &format!(
+                    "no baked installer for toolchain {name:?} \
+                     (config validator and embed bundle are out of sync)"
+                ),
+            );
+            return ExitCode::from(1);
+        };
+        installers.insert(name, bytes.to_vec());
+    }
+    let fingerprint = pithos::fingerprint::compute(dockerfile_content, pithos_bytes, &installers);
+
+    let (image, status) = match pithos::docker::inspect_image(&tag) {
+        Ok(img_opt) => {
+            let status = rebuild_status(&fingerprint, img_opt.as_ref());
+            (img_opt, status)
+        }
+        Err(e) => {
+            narrate(
+                style,
+                ">>",
+                &format!("docker unreachable; image status unavailable: {e}"),
+            );
+            (None, RebuildStatus::Unavailable)
+        }
+    };
+
+    let config_summary = summarize_config(yaml);
+    let rendered = render_info(&project, &config_summary, &fingerprint, &tag, image.as_ref(), status);
+    print!("{rendered}");
+    ExitCode::SUCCESS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use saphyr::LoadableYamlNode;
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -1110,7 +1265,7 @@ mod tests {
     #[test]
     fn help_text_lists_all_wired_subcommands() {
         let t = help_text();
-        for name in ["run", "build", "help", "version"] {
+        for name in ["run", "build", "info", "help", "version"] {
             assert!(t.contains(name), "help missing subcommand {name:?}: {t}");
         }
     }
@@ -1127,6 +1282,179 @@ mod tests {
         assert_eq!(
             version_text(),
             format!("pithos {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn rebuild_status_not_built_when_no_image() {
+        assert_eq!(rebuild_status("abc", None), RebuildStatus::NotBuilt);
+    }
+
+    #[test]
+    fn rebuild_status_cached_when_fingerprint_matches() {
+        let img = pithos::docker::ImageInfo {
+            id: "sha256:x".into(),
+            size_bytes: 1,
+            created: "now".into(),
+            fingerprint: Some("abc".into()),
+        };
+        assert_eq!(rebuild_status("abc", Some(&img)), RebuildStatus::Cached);
+    }
+
+    #[test]
+    fn rebuild_status_rebuild_needed_when_fingerprint_differs() {
+        let img = pithos::docker::ImageInfo {
+            id: "sha256:x".into(),
+            size_bytes: 1,
+            created: "now".into(),
+            fingerprint: Some("other".into()),
+        };
+        assert_eq!(rebuild_status("abc", Some(&img)), RebuildStatus::RebuildNeeded);
+    }
+
+    #[test]
+    fn rebuild_status_rebuild_needed_when_label_absent() {
+        let img = pithos::docker::ImageInfo {
+            id: "sha256:x".into(),
+            size_bytes: 1,
+            created: "now".into(),
+            fingerprint: None,
+        };
+        assert_eq!(rebuild_status("abc", Some(&img)), RebuildStatus::RebuildNeeded);
+    }
+
+    #[test]
+    fn format_size_bytes_below_kb() {
+        assert_eq!(format_size(512), "512 B");
+    }
+
+    #[test]
+    fn format_size_kb() {
+        assert_eq!(format_size(2048), "2.0 KB");
+    }
+
+    #[test]
+    fn format_size_mb() {
+        assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[test]
+    fn format_size_gb() {
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0 GB");
+    }
+
+    #[test]
+    fn summarize_config_lists_toolchains_and_apt_count() {
+        let yaml = saphyr::YamlOwned::load_from_str(
+            "toolchains:\n  rust: \"1.85.0\"\n  dotnet: \"10.0.102\"\nextras:\n  apt: [git, libssl3]\n",
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        let s = summarize_config(&yaml);
+        assert!(s.contains("dotnet"), "{s}");
+        assert!(s.contains("rust"), "{s}");
+        assert!(s.contains("2 packages"), "{s}");
+    }
+
+    #[test]
+    fn summarize_config_with_no_toolchains_and_no_apt() {
+        let yaml = saphyr::YamlOwned::load_from_str("toolchains: {}\n")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let s = summarize_config(&yaml);
+        assert!(s.contains("toolchains: none"), "{s}");
+        assert!(s.contains("extras.apt: none"), "{s}");
+    }
+
+    #[test]
+    fn summarize_config_with_single_apt_uses_singular_package() {
+        let yaml = saphyr::YamlOwned::load_from_str(
+            "toolchains: {}\nextras:\n  apt: [git]\n",
+        )
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+        let s = summarize_config(&yaml);
+        assert!(s.contains("1 package"), "{s}");
+        assert!(!s.contains("1 packages"), "{s}");
+    }
+
+    #[test]
+    fn render_info_includes_all_fields_when_image_present() {
+        let img = pithos::docker::ImageInfo {
+            id: "sha256:abc".into(),
+            size_bytes: 1024 * 1024,
+            created: "2026-04-24T10:30:00Z".into(),
+            fingerprint: Some("ff".into()),
+        };
+        let out = render_info(
+            "widgets",
+            "toolchains: rust; extras.apt: none",
+            "ff",
+            "pithos:widgets",
+            Some(&img),
+            RebuildStatus::Cached,
+        );
+        assert!(out.contains("project:      widgets"), "{out}");
+        assert!(out.contains("fingerprint:  ff"), "{out}");
+        assert!(out.contains("image:        pithos:widgets"), "{out}");
+        assert!(out.contains("image id:     sha256:abc"), "{out}");
+        assert!(out.contains("image size:   1.0 MB"), "{out}");
+        assert!(out.contains("created:      2026-04-24T10:30:00Z"), "{out}");
+        assert!(out.contains("status:       cached"), "{out}");
+    }
+
+    #[test]
+    fn render_info_omits_image_rows_when_not_built() {
+        let out = render_info(
+            "widgets",
+            "toolchains: none; extras.apt: none",
+            "ff",
+            "pithos:widgets",
+            None,
+            RebuildStatus::NotBuilt,
+        );
+        assert!(out.contains("status:       not-built"), "{out}");
+        assert!(!out.contains("image id:"), "{out}");
+        assert!(!out.contains("image size:"), "{out}");
+        assert!(!out.contains("created:"), "{out}");
+    }
+
+    #[test]
+    fn render_info_shows_unavailable_status_when_daemon_unreachable() {
+        let out = render_info(
+            "widgets",
+            "toolchains: rust; extras.apt: none",
+            "ff",
+            "pithos:widgets",
+            None,
+            RebuildStatus::Unavailable,
+        );
+        assert!(out.contains("status:       unavailable"), "{out}");
+        assert!(!out.contains("image id:"), "{out}");
+    }
+
+    #[test]
+    fn from_args_info_bare() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "info"])),
+            Subcommand::Info
+        );
+    }
+
+    #[test]
+    fn from_args_info_rejects_trailing_arg() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "info", "extra"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "extra".to_string(),
+            }
         );
     }
 }

@@ -151,6 +151,10 @@ fn apt_packages(yaml: &YamlOwned) -> Vec<String> {
         .collect()
 }
 
+pub fn apt_package_count(yaml: &YamlOwned) -> usize {
+    apt_packages(yaml).len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::emit;
