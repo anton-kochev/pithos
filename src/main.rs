@@ -27,13 +27,15 @@ enum RunMode {
     NoBuild,
 }
 
-// Short usage line for fail-fast reject paths; full help is story 7.2's job.
-const USAGE: &str = "usage: pithos [run | build] [options]";
+// Short usage line for fail-fast reject paths. `pithos help` prints the full usage.
+const USAGE: &str = "usage: pithos [run | build | help | version] [options]";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand {
     Build { rebuild: bool },
     Run { mode: RunMode, cmd: Vec<String> },
+    Help,
+    Version,
     Reject { kind: RejectKind, value: String },
 }
 
@@ -105,6 +107,20 @@ impl Subcommand {
                 }
                 Self::Run { mode, cmd }
             }
+            Some("help") => match args.get(2) {
+                None => Self::Help,
+                Some(extra) => Self::Reject {
+                    kind: RejectKind::Flag,
+                    value: extra.clone(),
+                },
+            },
+            Some("version") => match args.get(2) {
+                None => Self::Version,
+                Some(extra) => Self::Reject {
+                    kind: RejectKind::Flag,
+                    value: extra.clone(),
+                },
+            },
             Some(other) => Self::Reject {
                 kind: RejectKind::Subcommand,
                 value: other.to_string(),
@@ -134,6 +150,21 @@ fn main() -> ExitCode {
         }
         narrate(style, ">>", USAGE);
         return ExitCode::from(2);
+    }
+
+    // Discovery subcommands short-circuit before any I/O — no `.pithos`, no
+    // Dockerfile emission, no daemon probe. Output goes to stdout (Unix
+    // convention for requested output), distinct from stderr narration.
+    match &subcommand {
+        Subcommand::Help => {
+            println!("{}", help_text());
+            return ExitCode::SUCCESS;
+        }
+        Subcommand::Version => {
+            println!("{}", version_text());
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
     }
 
     let cwd = match env::current_dir() {
@@ -186,6 +217,9 @@ fn main() -> ExitCode {
             &cmd,
             style,
         ),
+        Subcommand::Help | Subcommand::Version => {
+            unreachable!("handled by fail-fast guard above")
+        }
         Subcommand::Reject { .. } => unreachable!("handled by fail-fast guard above"),
     }
 }
@@ -269,6 +303,32 @@ fn abort_message(project: &str) -> String {
 fn discover_env_file(cwd: &Path) -> Option<std::path::PathBuf> {
     let p = cwd.join(".env");
     p.exists().then_some(p)
+}
+
+fn version_text() -> String {
+    format!("pithos {}", env!("CARGO_PKG_VERSION"))
+}
+
+fn help_text() -> String {
+    format!(
+        "pithos {} — declarative Docker development containers\n\
+         \n\
+         usage: pithos <COMMAND> [OPTIONS]\n\
+         \n\
+         Commands:\n  \
+           run [cmd...]   Build-if-needed, then launch container (default when no command given)\n  \
+           build          Build the image without launching\n  \
+           help           Print this help\n  \
+           version        Print the pithos version\n\
+         \n\
+         Options:\n  \
+           run:    --rebuild, --no-build, -- <cmd...>\n  \
+           build:  --rebuild\n\
+         \n\
+         All narration is written to stderr; stdout is reserved for container output and\n\
+         for `pithos help` / `pithos version`.",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 /// Probe the Docker daemon and translate the outcome into an exit code
@@ -960,5 +1020,66 @@ mod tests {
     fn discover_env_file_returns_none_when_env_absent() {
         let td = tempfile::tempdir().unwrap();
         assert!(discover_env_file(td.path()).is_none());
+    }
+
+    #[test]
+    fn from_args_help_bare() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "help"])),
+            Subcommand::Help
+        );
+    }
+
+    #[test]
+    fn from_args_version_bare() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "version"])),
+            Subcommand::Version
+        );
+    }
+
+    #[test]
+    fn from_args_help_rejects_trailing_arg() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "help", "extra"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "extra".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_version_rejects_trailing_arg() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "version", "extra"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "extra".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn help_text_lists_all_wired_subcommands() {
+        let t = help_text();
+        for name in ["run", "build", "help", "version"] {
+            assert!(t.contains(name), "help missing subcommand {name:?}: {t}");
+        }
+    }
+
+    #[test]
+    fn help_text_lists_all_wired_flags() {
+        let t = help_text();
+        assert!(t.contains("--rebuild"), "help missing --rebuild: {t}");
+        assert!(t.contains("--no-build"), "help missing --no-build: {t}");
+    }
+
+    #[test]
+    fn version_text_matches_cargo_pkg_version() {
+        assert_eq!(
+            version_text(),
+            format!("pithos {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 }

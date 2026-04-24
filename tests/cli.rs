@@ -722,6 +722,125 @@ fn cli_build_rejects_unknown_flag() {
 }
 
 #[test]
+fn cli_help_exits_0_and_lists_subcommands() {
+    let td = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("help")
+        .current_dir(&td)
+        .assert()
+        .code(0);
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for name in ["run", "build", "help", "version"] {
+        assert!(
+            stdout.contains(name),
+            "stdout missing subcommand {name:?}: {stdout}"
+        );
+    }
+    assert!(
+        output.stderr.is_empty(),
+        "stderr must be empty on help: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cli_version_exits_0_and_prints_version() {
+    let td = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("version")
+        .current_dir(&td)
+        .assert()
+        .code(0);
+
+    let output = assert.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with("pithos "),
+        "stdout should start with 'pithos ': {stdout}"
+    );
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "stdout missing CARGO_PKG_VERSION ({}): {stdout}",
+        env!("CARGO_PKG_VERSION")
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "stderr must be empty on version: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cli_help_does_not_touch_filesystem() {
+    // No `.pithos` present; `help` must short-circuit before `read_pithos`
+    // and before any `.pithos.d/` creation.
+    let td = tempdir().unwrap();
+
+    Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("help")
+        .current_dir(&td)
+        .assert()
+        .code(0);
+
+    assert!(
+        !td.path().join(".pithos.d").exists(),
+        ".pithos.d should not be created by `pithos help`"
+    );
+}
+
+#[test]
+fn cli_version_does_not_touch_filesystem() {
+    let td = tempdir().unwrap();
+
+    Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("version")
+        .current_dir(&td)
+        .assert()
+        .code(0);
+
+    assert!(
+        !td.path().join(".pithos.d").exists(),
+        ".pithos.d should not be created by `pithos version`"
+    );
+}
+
+#[test]
+fn cli_help_rejects_trailing_arg() {
+    let td = tempdir().unwrap();
+
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .args(["help", "extra"])
+        .current_dir(&td)
+        .assert()
+        .code(2);
+
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown flag: extra"),
+        "stderr missing 'unknown flag: extra': {stderr}"
+    );
+    assert!(
+        stderr.contains("usage:"),
+        "stderr missing 'usage:' line after reject: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must be empty on reject: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn cli_unknown_subcommand_exits_2_with_usage() {
     // Arrange
     let td = tempdir().unwrap();
