@@ -134,6 +134,11 @@ impl Subcommand {
 }
 
 fn main() -> ExitCode {
+    // §6.3: SIGINT → 130. Installed first so Ctrl-C at any stage (arg parse,
+    // docker probe, build, run) exits with the standardized code and runs
+    // destructors that would otherwise be skipped by default signal death.
+    let _ = ctrlc::set_handler(|| std::process::exit(130));
+
     let style = Style::detect();
     let args: Vec<String> = env::args().collect();
     let subcommand = Subcommand::from_args(&args);
@@ -605,6 +610,27 @@ fn run_build(
     }
 }
 
+/// Translate a completed child `ExitStatus` into a launcher exit byte per
+/// §6.3. Normal exits propagate the child's code; signal-death on Unix maps
+/// to `128 + sig` (SIGINT→130, SIGTERM→143). `1` is reserved for the
+/// exotic "neither code nor signal" state.
+#[cfg(unix)]
+fn exit_code_from_status(status: std::process::ExitStatus) -> u8 {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(code) = status.code() {
+        return code as u8;
+    }
+    if let Some(sig) = status.signal() {
+        return (128 + sig) as u8;
+    }
+    1
+}
+
+#[cfg(not(unix))]
+fn exit_code_from_status(status: std::process::ExitStatus) -> u8 {
+    status.code().unwrap_or(1) as u8
+}
+
 fn run_run(
     cwd: &Path,
     yaml: &YamlOwned,
@@ -642,10 +668,7 @@ fn run_run(
         env_file.as_deref(),
         cmd,
     ) {
-        // status.code() is None on signal-death (128+N convention); report
-        // 1 rather than synthesize a signal code — 7.3 owns SIGINT → 130
-        // properly.
-        Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+        Ok(status) => ExitCode::from(exit_code_from_status(status)),
         Err(pithos::docker::RunError::Spawn(e)) => {
             narrate(style, ">> ERROR:", &format!("docker run: {e}"));
             ExitCode::from(1)
@@ -659,6 +682,30 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_code_from_status_propagates_normal_exit_code() {
+        use std::os::unix::process::ExitStatusExt;
+        let s = std::process::ExitStatus::from_raw(7 << 8);
+        assert_eq!(exit_code_from_status(s), 7);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_code_from_status_maps_sigint_to_130() {
+        use std::os::unix::process::ExitStatusExt;
+        let s = std::process::ExitStatus::from_raw(2); // SIGINT
+        assert_eq!(exit_code_from_status(s), 130);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_code_from_status_maps_sigterm_to_143() {
+        use std::os::unix::process::ExitStatusExt;
+        let s = std::process::ExitStatus::from_raw(15); // SIGTERM
+        assert_eq!(exit_code_from_status(s), 143);
     }
 
     #[test]

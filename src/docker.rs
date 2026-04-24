@@ -340,7 +340,8 @@ pub fn classify_probe(err: &ProbeError) -> (u8, &'static str) {
 ///   deadlock risk in practice. If a future docker wrapper is verbose
 ///   enough to fill the buffer, the child blocks on write() and the
 ///   timeout fires with `Timeout` — same user-facing outcome.
-/// - SIGINT during the probe orphans the child; Story 7.3 owns SIGINT.
+/// - SIGINT is handled at the main() level (exit 130); the probe child
+///   inherits the signal via the process group and dies alongside us.
 pub fn probe_daemon(timeout: std::time::Duration) -> Result<(), ProbeError> {
     let mut child = match Command::new("docker")
         .arg("info")
