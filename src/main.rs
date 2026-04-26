@@ -28,13 +28,14 @@ enum RunMode {
 }
 
 // Short usage line for fail-fast reject paths. `pithos help` prints the full usage.
-const USAGE: &str = "usage: pithos [run | build | info | help | version] [options]";
+const USAGE: &str = "usage: pithos [run | build | info | clean | help | version] [options]";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand {
     Build { rebuild: bool },
     Run { mode: RunMode, cmd: Vec<String> },
     Info,
+    Clean { all: bool },
     Help,
     Version,
     Reject { kind: RejectKind, value: String },
@@ -129,6 +130,21 @@ impl Subcommand {
                     value: extra.clone(),
                 },
             },
+            Some("clean") => {
+                let mut all = false;
+                for arg in args.iter().skip(2) {
+                    match arg.as_str() {
+                        "--all" => all = true,
+                        other => {
+                            return Self::Reject {
+                                kind: RejectKind::Flag,
+                                value: other.to_string(),
+                            };
+                        }
+                    }
+                }
+                Self::Clean { all }
+            }
             Some(other) => Self::Reject {
                 kind: RejectKind::Subcommand,
                 value: other.to_string(),
@@ -137,7 +153,7 @@ impl Subcommand {
     }
 
     fn requires_daemon(&self) -> bool {
-        matches!(self, Self::Build { .. } | Self::Run { .. })
+        matches!(self, Self::Build { .. } | Self::Run { .. } | Self::Clean { .. })
     }
 
     fn writes_dockerfile(&self) -> bool {
@@ -182,6 +198,16 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         _ => {}
+    }
+
+    // Clean needs the daemon but neither cwd resolution nor Dockerfile emit —
+    // short-circuiting here keeps the prelude single-purpose for build/run/info.
+    if let Subcommand::Clean { all } = &subcommand {
+        let all = *all;
+        if let Err(code) = require_daemon(style) {
+            return code;
+        }
+        return run_clean(all, style);
     }
 
     let cwd = match env::current_dir() {
@@ -237,6 +263,7 @@ fn main() -> ExitCode {
             style,
         ),
         Subcommand::Info => run_info(&cwd, &yaml, &pithos_bytes, &dockerfile_content, style),
+        Subcommand::Clean { .. } => unreachable!("handled by short-circuit above"),
         Subcommand::Help | Subcommand::Version => {
             unreachable!("handled by fail-fast guard above")
         }
@@ -339,6 +366,7 @@ fn help_text() -> String {
            run [cmd...]   Build-if-needed, then launch container (default when no command given)\n  \
            build          Build the image without launching\n  \
            info           Print project config, fingerprint, and image status\n  \
+           clean          Remove dangling pithos images (or all with --all)\n  \
            help           Print this help\n  \
            version        Print the pithos version\n\
          \n\
@@ -830,6 +858,169 @@ fn run_info(
     ExitCode::SUCCESS
 }
 
+/// Pure: lowercase, trim, accept `y` or `yes` only. Treats CRLF and trailing
+/// whitespace as ignorable. Empty string → false (used by the EOF path in
+/// `prompt_confirm`, so piped/CI input without a tty defaults to "no").
+fn parse_confirm_answer(line: &str) -> bool {
+    let trimmed = line.trim().to_ascii_lowercase();
+    trimmed == "y" || trimmed == "yes"
+}
+
+/// Narrate the prompt to stderr (newline-terminated, matching house style),
+/// read one line from stdin, classify with `parse_confirm_answer`. EOF maps
+/// to false — safer default for piped/non-interactive use.
+fn prompt_confirm(prompt_msg: &str, style: Style) -> bool {
+    narrate(style, ">>", prompt_msg);
+    let mut buf = String::new();
+    match std::io::stdin().read_line(&mut buf) {
+        Ok(0) => false,
+        Ok(_) => parse_confirm_answer(&buf),
+        Err(_) => false,
+    }
+}
+
+/// Pure: render one indented row per image for the candidate list narration.
+/// Format: `<tag-or-none>  <id-12>  <created>` — single spaces between fields,
+/// the caller adds the `>>   ` prefix when narrating each row.
+fn render_candidate_lines(images: &[pithos::docker::PithosImage]) -> Vec<String> {
+    images
+        .iter()
+        .map(|img| {
+            let tag = img.tag.as_deref().unwrap_or("<none>");
+            let id_short: String = img.id.chars().take(12).collect();
+            format!("{tag}  {id_short}  {created}", created = img.created)
+        })
+        .collect()
+}
+
+/// Pure: union of dangling and tagged candidate lists, dedupe-by-id.
+/// Docker semantics put tagged and dangling-labeled images in disjoint sets,
+/// so dedupe is belt-and-suspenders against an upstream bug. Order: dangling
+/// first, then tagged (insertion order preserved within each input).
+fn merge_candidates(
+    dangling: Vec<pithos::docker::PithosImage>,
+    tagged: Vec<pithos::docker::PithosImage>,
+) -> Vec<pithos::docker::PithosImage> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(dangling.len() + tagged.len());
+    for img in dangling.into_iter().chain(tagged.into_iter()) {
+        if seen.insert(img.id.clone()) {
+            out.push(img);
+        }
+    }
+    out
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CleanDecision {
+    Nothing,
+    Prompt(Vec<pithos::docker::PithosImage>),
+}
+
+/// Pure: decide what `run_clean` should do given the lists. `all=false`
+/// ignores the tagged list entirely (default mode = dangling-only).
+fn decide_clean(
+    all: bool,
+    dangling: Vec<pithos::docker::PithosImage>,
+    tagged: Vec<pithos::docker::PithosImage>,
+) -> CleanDecision {
+    let candidates = if all {
+        merge_candidates(dangling, tagged)
+    } else {
+        dangling
+    };
+    if candidates.is_empty() {
+        CleanDecision::Nothing
+    } else {
+        CleanDecision::Prompt(candidates)
+    }
+}
+
+/// Pure: classify per-image removal results into a single (exit_code, lines)
+/// pair. Best-effort: every result is rendered. Exit 1 if any `Err` present,
+/// 0 if all `Ok`. The trailing `done.` line is emitted only on full success.
+fn summarize_removal_outcome(results: &[Result<String, String>]) -> (u8, Vec<String>) {
+    let mut lines = Vec::with_capacity(results.len() + 1);
+    let mut had_err = false;
+    for r in results {
+        match r {
+            Ok(label) => lines.push(format!("removed {label}")),
+            Err(msg) => {
+                lines.push(format!("ERROR: {msg}"));
+                had_err = true;
+            }
+        }
+    }
+    if had_err {
+        (1, lines)
+    } else {
+        lines.push("done.".to_string());
+        (0, lines)
+    }
+}
+
+/// Impure wrapper: list candidates, decide, prompt, remove. Best-effort
+/// removal — keeps going past failures, reports each, exits 1 if any failed.
+/// Empty list → "No images to clean." exit 0. User says no → "aborted." exit 0.
+fn run_clean(all: bool, style: Style) -> ExitCode {
+    let dangling = match pithos::docker::list_dangling_pithos_images() {
+        Ok(v) => v,
+        Err(e) => {
+            narrate(style, ">> ERROR:", &format!("{e}"));
+            return ExitCode::from(1);
+        }
+    };
+    let tagged = if all {
+        match pithos::docker::list_tagged_pithos_images() {
+            Ok(v) => v,
+            Err(e) => {
+                narrate(style, ">> ERROR:", &format!("{e}"));
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    let decision = decide_clean(all, dangling, tagged);
+    let candidates = match decision {
+        CleanDecision::Nothing => {
+            narrate(style, ">>", "No images to clean.");
+            return ExitCode::SUCCESS;
+        }
+        CleanDecision::Prompt(c) => c,
+    };
+
+    narrate(style, ">>", &format!("Found {} image(s):", candidates.len()));
+    for line in render_candidate_lines(&candidates) {
+        narrate(style, ">>", &format!("  {line}"));
+    }
+
+    let prompt = format!("Remove {} image(s)? [y/N]:", candidates.len());
+    if !prompt_confirm(&prompt, style) {
+        narrate(style, ">>", "aborted.");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut results: Vec<Result<String, String>> = Vec::with_capacity(candidates.len());
+    for img in &candidates {
+        let label = img
+            .tag
+            .clone()
+            .unwrap_or_else(|| img.id.chars().take(12).collect::<String>());
+        match pithos::docker::remove_image(&img.id) {
+            Ok(()) => results.push(Ok(label)),
+            Err(e) => results.push(Err(format!("cannot remove {label}: {e}"))),
+        }
+    }
+
+    let (code, lines) = summarize_removal_outcome(&results);
+    for line in lines {
+        narrate(style, ">>", &line);
+    }
+    ExitCode::from(code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1265,7 +1456,7 @@ mod tests {
     #[test]
     fn help_text_lists_all_wired_subcommands() {
         let t = help_text();
-        for name in ["run", "build", "info", "help", "version"] {
+        for name in ["run", "build", "info", "clean", "help", "version"] {
             assert!(t.contains(name), "help missing subcommand {name:?}: {t}");
         }
     }
@@ -1456,5 +1647,289 @@ mod tests {
                 value: "extra".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn from_args_clean_bare() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "clean"])),
+            Subcommand::Clean { all: false }
+        );
+    }
+
+    #[test]
+    fn from_args_clean_all() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "clean", "--all"])),
+            Subcommand::Clean { all: true }
+        );
+    }
+
+    #[test]
+    fn from_args_clean_double_all_is_idempotent() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "clean", "--all", "--all"])),
+            Subcommand::Clean { all: true }
+        );
+    }
+
+    #[test]
+    fn from_args_clean_rejects_unknown_flag() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "clean", "--nope"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "--nope".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_clean_rejects_trailing_positional() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "clean", "extra"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "extra".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_clean_rejects_all_after_positional() {
+        // Locks the no-positional-cmd policy: a positional anywhere in `clean`
+        // is a reject, even if `--all` follows.
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "clean", "extra", "--all"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "extra".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn subcommand_clean_does_not_write_dockerfile() {
+        assert!(!Subcommand::Clean { all: false }.writes_dockerfile());
+        assert!(!Subcommand::Clean { all: true }.writes_dockerfile());
+    }
+
+    #[test]
+    fn subcommand_clean_requires_daemon() {
+        assert!(Subcommand::Clean { all: false }.requires_daemon());
+        assert!(Subcommand::Clean { all: true }.requires_daemon());
+    }
+
+    #[test]
+    fn parse_confirm_answer_accepts_y_lowercase() {
+        assert!(parse_confirm_answer("y"));
+        assert!(parse_confirm_answer("y\n"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_accepts_yes_lowercase() {
+        assert!(parse_confirm_answer("yes"));
+        assert!(parse_confirm_answer("yes\n"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_accepts_mixed_case_yes() {
+        assert!(parse_confirm_answer("Y"));
+        assert!(parse_confirm_answer("YES"));
+        assert!(parse_confirm_answer("Yes"));
+        assert!(parse_confirm_answer("YeS"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_treats_crlf_like_lf() {
+        assert!(parse_confirm_answer("y\r\n"));
+        assert!(parse_confirm_answer("yes\r\n"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_rejects_n_no_empty_garbage() {
+        assert!(!parse_confirm_answer("n"));
+        assert!(!parse_confirm_answer("no"));
+        assert!(!parse_confirm_answer("garbage"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_rejects_whitespace_only() {
+        assert!(!parse_confirm_answer("   "));
+        assert!(!parse_confirm_answer("\t\n"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_rejects_yep_and_other_near_matches() {
+        assert!(!parse_confirm_answer("yep"));
+        assert!(!parse_confirm_answer("yeah"));
+        assert!(!parse_confirm_answer("ya"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_rejects_empty_string() {
+        // Locks the EOF→false invariant via the pure path. `prompt_confirm`'s
+        // Ok(0) branch returns false directly, but if a future refactor pipes
+        // the empty string through `parse_confirm_answer`, the answer stays no.
+        assert!(!parse_confirm_answer(""));
+    }
+
+    #[test]
+    fn render_candidate_lines_empty_list_returns_empty_vec() {
+        assert!(render_candidate_lines(&[]).is_empty());
+    }
+
+    #[test]
+    fn render_candidate_lines_emits_one_row_per_image() {
+        let imgs = vec![
+            pithos::docker::PithosImage {
+                id: "sha256:abc123def456ghi".into(),
+                tag: Some("pithos:widgets".into()),
+                created: "2026-04-24".into(),
+                fingerprint: Some("fp".into()),
+            },
+            pithos::docker::PithosImage {
+                id: "sha256:zzz999".into(),
+                tag: None,
+                created: "2026-04-25".into(),
+                fingerprint: Some("fp2".into()),
+            },
+        ];
+        let lines = render_candidate_lines(&imgs);
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn render_candidate_lines_preserves_input_order() {
+        let imgs = vec![
+            pithos::docker::PithosImage {
+                id: "sha256:first".into(),
+                tag: Some("pithos:a".into()),
+                created: "2026-04-24".into(),
+                fingerprint: None,
+            },
+            pithos::docker::PithosImage {
+                id: "sha256:second".into(),
+                tag: Some("pithos:b".into()),
+                created: "2026-04-25".into(),
+                fingerprint: None,
+            },
+        ];
+        let lines = render_candidate_lines(&imgs);
+        assert!(lines[0].contains("pithos:a"));
+        assert!(lines[1].contains("pithos:b"));
+    }
+
+    #[test]
+    fn render_candidate_lines_handles_dangling_tag() {
+        let imgs = vec![pithos::docker::PithosImage {
+            id: "sha256:abc".into(),
+            tag: None,
+            created: "2026-04-24".into(),
+            fingerprint: Some("fp".into()),
+        }];
+        let lines = render_candidate_lines(&imgs);
+        assert!(lines[0].contains("<none>"), "{:?}", lines);
+    }
+
+    fn img(id: &str, tag: Option<&str>) -> pithos::docker::PithosImage {
+        pithos::docker::PithosImage {
+            id: id.to_string(),
+            tag: tag.map(String::from),
+            created: "2026-04-24".into(),
+            fingerprint: None,
+        }
+    }
+
+    #[test]
+    fn merge_candidates_dedupes_by_id() {
+        let dangling = vec![img("sha256:a", None)];
+        let tagged = vec![img("sha256:a", Some("pithos:x")), img("sha256:b", Some("pithos:y"))];
+        let merged = merge_candidates(dangling, tagged);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, "sha256:a");
+        // First wins: dangling entry preserved over the tagged duplicate.
+        assert!(merged[0].tag.is_none());
+        assert_eq!(merged[1].id, "sha256:b");
+    }
+
+    #[test]
+    fn merge_candidates_preserves_dangling_first_then_tagged_order() {
+        let dangling = vec![img("sha256:d1", None), img("sha256:d2", None)];
+        let tagged = vec![img("sha256:t1", Some("pithos:x"))];
+        let merged = merge_candidates(dangling, tagged);
+        assert_eq!(merged[0].id, "sha256:d1");
+        assert_eq!(merged[1].id, "sha256:d2");
+        assert_eq!(merged[2].id, "sha256:t1");
+    }
+
+    #[test]
+    fn merge_candidates_with_empty_inputs_returns_empty() {
+        assert!(merge_candidates(Vec::new(), Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn decide_clean_returns_nothing_for_empty_dangling_when_not_all() {
+        assert_eq!(decide_clean(false, vec![], vec![]), CleanDecision::Nothing);
+    }
+
+    #[test]
+    fn decide_clean_returns_nothing_for_empty_union_when_all() {
+        assert_eq!(decide_clean(true, vec![], vec![]), CleanDecision::Nothing);
+    }
+
+    #[test]
+    fn decide_clean_returns_prompt_for_dangling_only_when_not_all() {
+        let d = vec![img("sha256:a", None)];
+        match decide_clean(false, d, vec![]) {
+            CleanDecision::Prompt(v) => assert_eq!(v.len(), 1),
+            other => panic!("expected Prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_clean_returns_prompt_for_union_when_all() {
+        let d = vec![img("sha256:a", None)];
+        let t = vec![img("sha256:b", Some("pithos:x"))];
+        match decide_clean(true, d, t) {
+            CleanDecision::Prompt(v) => assert_eq!(v.len(), 2),
+            other => panic!("expected Prompt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_clean_ignores_tagged_when_not_all() {
+        // Locks the default-mode contract: tagged images are never considered
+        // candidates unless --all is set.
+        let t = vec![img("sha256:t1", Some("pithos:x")), img("sha256:t2", Some("pithos:y"))];
+        assert_eq!(decide_clean(false, vec![], t), CleanDecision::Nothing);
+    }
+
+    #[test]
+    fn summarize_removal_outcome_all_ok_returns_zero() {
+        let results: Vec<Result<String, String>> = vec![
+            Ok("pithos:a".into()),
+            Ok("pithos:b".into()),
+        ];
+        let (code, lines) = summarize_removal_outcome(&results);
+        assert_eq!(code, 0);
+        assert!(lines.iter().any(|l| l.contains("removed pithos:a")));
+        assert!(lines.iter().any(|l| l.contains("removed pithos:b")));
+        assert!(lines.iter().any(|l| l.contains("done")));
+    }
+
+    #[test]
+    fn summarize_removal_outcome_partial_failure_renders_all_and_returns_one() {
+        let results: Vec<Result<String, String>> = vec![
+            Ok("pithos:a".into()),
+            Err("nope".into()),
+            Ok("pithos:c".into()),
+        ];
+        let (code, lines) = summarize_removal_outcome(&results);
+        assert_eq!(code, 1);
+        assert!(lines.iter().any(|l| l.contains("removed pithos:a")));
+        assert!(lines.iter().any(|l| l.contains("ERROR: nope")));
+        assert!(lines.iter().any(|l| l.contains("removed pithos:c")));
+        assert!(!lines.iter().any(|l| l.contains("done.")));
     }
 }

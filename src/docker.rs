@@ -107,6 +107,138 @@ fn parse_inspect_line(line: &str) -> Option<ImageInfo> {
     Some(ImageInfo { id, size_bytes, created, fingerprint })
 }
 
+/// One row of the `pithos clean` candidate list. `tag` is `None` for dangling
+/// images (no repository:tag pair); `fingerprint` is `None` when the
+/// `dev.pithos.fingerprint` label is absent or the docker template emitted
+/// `<no value>`.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct PithosImage {
+    pub id: String,
+    pub tag: Option<String>,
+    pub created: String,
+    pub fingerprint: Option<String>,
+}
+
+const PITHOS_IMAGE_TEMPLATE: &str =
+    r#"{{.ID}}|{{.Repository}}:{{.Tag}}|{{.CreatedAt}}|{{.Label "dev.pithos.fingerprint"}}"#;
+
+/// List dangling images carrying the `dev.pithos.fingerprint` label —
+/// previous-build leftovers from `pithos build` rebuilds.
+///
+/// Shells out to:
+///   docker image ls --no-trunc --filter label=dev.pithos.fingerprint
+///                   --filter dangling=true --format <TEMPLATE>
+pub fn list_dangling_pithos_images() -> std::io::Result<Vec<PithosImage>> {
+    let output = Command::new("docker")
+        .args([
+            "image",
+            "ls",
+            "--no-trunc",
+            "--filter",
+            "label=dev.pithos.fingerprint",
+            "--filter",
+            "dangling=true",
+            "--format",
+            PITHOS_IMAGE_TEMPLATE,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "docker image ls failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_pithos_image_lines(&stdout))
+}
+
+/// List every image tagged under the `pithos` repository. Used by
+/// `pithos clean --all` to widen the candidate set beyond dangling leftovers.
+///
+/// Shells out to:
+///   docker image ls --no-trunc --format <TEMPLATE> pithos
+pub fn list_tagged_pithos_images() -> std::io::Result<Vec<PithosImage>> {
+    // The bare `pithos` repo filter intentionally won't match registry-prefixed
+    // `*/pithos` images — pithos only ever produces local `pithos:<tag>`.
+    let output = Command::new("docker")
+        .args([
+            "image",
+            "ls",
+            "--no-trunc",
+            "--format",
+            PITHOS_IMAGE_TEMPLATE,
+            "pithos",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "docker image ls failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_pithos_image_lines(&stdout))
+}
+
+/// Remove an image by ID. Shells `docker image rm <id>`. Non-zero exit
+/// (image in use, missing, etc.) → `io::Error::other` carrying stderr.
+pub fn remove_image(id: &str) -> std::io::Result<()> {
+    let output = Command::new("docker")
+        .args(["image", "rm", id])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "docker image rm failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        )));
+    }
+    Ok(())
+}
+
+/// Parse the multi-line stdout of `docker image ls --format <TEMPLATE>`
+/// into a `Vec<PithosImage>`. Blank lines are skipped; malformed lines are
+/// silently dropped — same forward-compat policy as `parse_image_ids`.
+fn parse_pithos_image_lines(stdout: &str) -> Vec<PithosImage> {
+    stdout.lines().filter_map(parse_pithos_image_line).collect()
+}
+
+/// Parse one line of `docker image ls --format <TEMPLATE>` output into a
+/// `PithosImage`. Pure. `splitn(4, '|')` so a `|` embedded in a label value
+/// falls into the trailing field rather than desyncing columns. Tag literal
+/// `<none>:<none>` (docker's dangling marker) maps to `tag: None`.
+fn parse_pithos_image_line(line: &str) -> Option<PithosImage> {
+    let line = line.trim_end_matches('\r').trim();
+    if line.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = line.splitn(4, '|').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let id = parts[0].to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let tag = match parts[1] {
+        "<none>:<none>" | "" => None,
+        v => Some(v.to_string()),
+    };
+    let created = parts[2].to_string();
+    let fingerprint = match parts[3] {
+        "" | "<no value>" => None,
+        v => Some(v.to_string()),
+    };
+    Some(PithosImage {
+        id,
+        tag,
+        created,
+        fingerprint,
+    })
+}
+
 /// Failure modes for [`build`]. `Spawn` covers the executable not being
 /// found in PATH or transient OS-level launch errors; `NonZero` carries
 /// the docker process's exit code so future callers can present richer
@@ -1180,6 +1312,83 @@ mod tests {
             msg.contains("start Docker Desktop"),
             "missing 'start Docker Desktop' token: {msg}"
         );
+    }
+
+    #[test]
+    fn parse_pithos_image_line_parses_tagged_entry() {
+        let line = "sha256:abc123|pithos:widgets|2026-04-24 10:30:00 +0000 UTC|deadbeef";
+        let img = parse_pithos_image_line(line).unwrap();
+        assert_eq!(img.id, "sha256:abc123");
+        assert_eq!(img.tag.as_deref(), Some("pithos:widgets"));
+        assert_eq!(img.created, "2026-04-24 10:30:00 +0000 UTC");
+        assert_eq!(img.fingerprint.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parse_pithos_image_line_parses_dangling_entry() {
+        let line = "sha256:abc123|<none>:<none>|2026-04-24 10:30:00 +0000 UTC|deadbeef";
+        let img = parse_pithos_image_line(line).unwrap();
+        assert!(img.tag.is_none());
+        assert_eq!(img.fingerprint.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parse_pithos_image_line_treats_no_value_label_as_absent_fingerprint() {
+        let line = "sha256:abc123|pithos:widgets|2026-04-24|<no value>";
+        let img = parse_pithos_image_line(line).unwrap();
+        assert!(img.fingerprint.is_none());
+    }
+
+    #[test]
+    fn parse_pithos_image_line_treats_empty_label_as_absent_fingerprint() {
+        let line = "sha256:abc123|pithos:widgets|2026-04-24|";
+        let img = parse_pithos_image_line(line).unwrap();
+        assert!(img.fingerprint.is_none());
+    }
+
+    #[test]
+    fn parse_pithos_image_line_preserves_pipe_in_label_via_splitn() {
+        // Even though pithos doesn't write pipes in labels today, the parser must
+        // not desync if a future label or a foreign label leaks through.
+        let line = "sha256:abc|pithos:widgets|2026-04-24|abc|123|extra";
+        let img = parse_pithos_image_line(line).unwrap();
+        assert_eq!(img.fingerprint.as_deref(), Some("abc|123|extra"));
+    }
+
+    #[test]
+    fn parse_pithos_image_line_tolerates_crlf() {
+        let line = "sha256:abc|pithos:demo|2026-04-24|fp\r";
+        let img = parse_pithos_image_line(line).unwrap();
+        assert_eq!(img.fingerprint.as_deref(), Some("fp"));
+    }
+
+    #[test]
+    fn parse_pithos_image_line_rejects_missing_fields() {
+        assert!(parse_pithos_image_line("sha256:abc|pithos:demo|2026-04-24").is_none());
+    }
+
+    #[test]
+    fn parse_pithos_image_line_rejects_empty_id() {
+        assert!(parse_pithos_image_line("|pithos:demo|2026-04-24|fp").is_none());
+    }
+
+    #[test]
+    fn parse_pithos_image_line_rejects_empty_input() {
+        assert!(parse_pithos_image_line("").is_none());
+    }
+
+    #[test]
+    fn parse_pithos_image_line_rejects_blank_line() {
+        assert!(parse_pithos_image_line("   ").is_none());
+    }
+
+    #[test]
+    fn parse_pithos_image_lines_skips_blank_and_malformed_lines() {
+        let stdout = "\nsha256:a|pithos:x|now|fp\nmalformed\n\nsha256:b|<none>:<none>|now|fp2\n";
+        let imgs = parse_pithos_image_lines(stdout);
+        assert_eq!(imgs.len(), 2);
+        assert_eq!(imgs[0].id, "sha256:a");
+        assert_eq!(imgs[1].id, "sha256:b");
     }
 
     // Ordering contract — a shared sorted source feeds both the extract

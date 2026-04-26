@@ -734,7 +734,7 @@ fn cli_help_exits_0_and_lists_subcommands() {
 
     let output = assert.get_output();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for name in ["run", "build", "info", "help", "version"] {
+    for name in ["run", "build", "info", "clean", "help", "version"] {
         assert!(
             stdout.contains(name),
             "stdout missing subcommand {name:?}: {stdout}"
@@ -943,5 +943,91 @@ fn cli_info_does_not_create_pithos_d() {
     assert!(
         !td.path().join(".pithos.d").exists(),
         "`pithos info` should not create .pithos.d/"
+    );
+}
+
+#[test]
+fn cli_clean_rejects_unknown_flag() {
+    let td = tempfile::tempdir().unwrap();
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(td.path())
+        .args(["clean", "--nope"])
+        .assert()
+        .failure()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("unknown flag"),
+        "stderr missing 'unknown flag': {stderr}"
+    );
+}
+
+#[test]
+fn cli_clean_rejects_trailing_arg() {
+    let td = tempfile::tempdir().unwrap();
+    Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(td.path())
+        .args(["clean", "--all", "extra"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn cli_clean_does_not_require_pithos() {
+    // Empty tempdir, no docker on PATH, no DOCKER_HOST. With Clean
+    // short-circuiting before the .pithos read, we hit require_daemon's
+    // Spawn path, which classify_probe maps to exit 1 — NOT exit 2 (which
+    // would mean we accidentally hit the .pithos-required path).
+    let td = tempfile::tempdir().unwrap();
+    let assertion = Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(td.path())
+        .env_clear()
+        .env("PATH", "")
+        .env("DOCKER_HOST", "/nonexistent/docker.sock")
+        .arg("clean")
+        .assert()
+        .failure()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).to_string();
+    assert!(
+        !stderr.contains(".pithos not found"),
+        "clean should not require .pithos; got stderr: {stderr}"
+    );
+}
+
+#[test]
+fn cli_clean_all_does_not_require_pithos() {
+    let td = tempfile::tempdir().unwrap();
+    Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(td.path())
+        .env_clear()
+        .env("PATH", "")
+        .env("DOCKER_HOST", "/nonexistent/docker.sock")
+        .args(["clean", "--all"])
+        .assert()
+        .failure()
+        .code(1);
+}
+
+#[test]
+fn cli_clean_does_not_create_pithos_d() {
+    let td = tempfile::tempdir().unwrap();
+    Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(td.path())
+        .env_clear()
+        .env("PATH", "")
+        .env("DOCKER_HOST", "/nonexistent/docker.sock")
+        .arg("clean")
+        .assert()
+        .failure();
+    assert!(
+        !td.path().join(".pithos.d").exists(),
+        ".pithos.d/ should not be created by clean"
     );
 }
