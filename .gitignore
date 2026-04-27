@@ -21,3 +21,4 @@
 
 # Pithos generated artifacts
 /.pithos.d/
+/node_modules
