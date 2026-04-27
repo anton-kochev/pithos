@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1.7
+# Pithos base image — published to ghcr.io/anton-kochev/pithos:base.
+# Multi-arch (amd64 + arm64). Generated user Dockerfiles inherit FROM this image.
+
+FROM debian:bookworm-slim
+
+ARG HOST_UID=501
+ARG HOST_GID=20
+ARG NODE_VERSION=24
+
+ENV DEBIAN_FRONTEND=noninteractive \
+  LANG=C.UTF-8 \
+  LC_ALL=C.UTF-8 \
+  CARGO_HOME=/opt/cargo \
+  RUSTUP_HOME=/opt/rustup \
+  PATH=/opt/cargo/bin:/usr/local/go/bin:$PATH
+
+# --- System packages ---
+# tini: PID 1 zombie reaper
+# rsync: used by entrypoint to seed pi-defaults
+# build-essential, pkg-config, libssl-dev: needed for any native code compilation
+# ripgrep, fd-find, jq, fzf: pi's bash tool benefits from these for search/data munging
+# python3 + pip + venv: in base because agents reach for Python constantly
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  tini rsync git curl ca-certificates gnupg \
+  build-essential pkg-config libssl-dev \
+  ripgrep fd-find jq fzf less tmux vim nano unzip sudo \
+  python3 python3-pip python3-venv \
+  && rm -rf /var/lib/apt/lists/*
+
+# --- gh CLI (GitHub) ---
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+  | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+  > /etc/apt/sources.list.d/github-cli.list \
+  && apt-get update && apt-get install -y --no-install-recommends gh \
+  && rm -rf /var/lib/apt/lists/*
+
+# --- Node.js ${NODE_VERSION} via NodeSource (required by pi itself) ---
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
+  && apt-get install -y --no-install-recommends nodejs \
+  && rm -rf /var/lib/apt/lists/*
+
+# --- uv (Python package manager) installed system-wide to /usr/local/bin ---
+# Using UV_INSTALL_DIR to keep it out of $HOME so it's shared across all users.
+RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin UV_UNMANAGED_INSTALL=1 sh
+
+# --- Pi coding agent (global npm install to /usr/lib/node_modules) ---
+RUN npm install -g @mariozechner/pi-coding-agent
+
+# --- Create the pi user (UID-matched to macOS default 501:20) ---
+RUN (getent group ${HOST_GID} || groupadd --gid ${HOST_GID} pi) \
+  && useradd --uid ${HOST_UID} --gid ${HOST_GID} --create-home --shell /bin/bash pi \
+  && echo 'pi ALL=(ALL) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt' > /etc/sudoers.d/pi \
+  && chmod 0440 /etc/sudoers.d/pi
+
+# --- Bake pi-config defaults into the image at /opt/pi-defaults/ ---
+# These are seeded into fresh per-project volumes by the entrypoint script.
+COPY --chown=pi:pi pi-config/ /opt/pi-defaults/
+
+# --- Bake entrypoint and helper scripts ---
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY scripts/bootstrap.sh /usr/local/bin/bootstrap.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/bootstrap.sh
+
+USER pi
+WORKDIR /workspace
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+CMD ["sleep", "infinity"]
