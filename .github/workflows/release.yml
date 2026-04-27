@@ -1,0 +1,57 @@
+name: Build and publish launcher binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v0.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Smoke test (pithos version)
+        run: ./target/${{ matrix.target }}/release/pithos version
+
+      - name: Strip and package
+        run: |
+          strip target/${{ matrix.target }}/release/pithos
+          tar -czf pithos-${{ matrix.target }}.tar.gz \
+            -C target/${{ matrix.target }}/release pithos
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pithos-${{ matrix.target }}.tar.gz
+          tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
