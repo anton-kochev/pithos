@@ -2,11 +2,6 @@ use saphyr::YamlOwned;
 
 use super::error::{ConfigError, VALID_EXTRAS};
 
-/// The Debian-safe package-name pattern. Mirrored verbatim in
-/// `ConfigError::InvalidAptPackageName`'s `#[error(...)]` string and
-/// re-implemented by `is_valid_apt_name`. Keep all three in sync.
-pub(super) const APT_NAME_PATTERN: &str = "^[a-z0-9][a-z0-9.+-]+$";
-
 pub(super) fn validate(extras: &YamlOwned) -> Result<(), ConfigError> {
     if extras.is_null() {
         return Ok(());
@@ -53,7 +48,8 @@ pub(super) fn validate(extras: &YamlOwned) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Implements `APT_NAME_PATTERN`. Keep in sync.
+/// Debian-safe package name: `^[a-z0-9][a-z0-9.+-]+$`. Mirrored verbatim
+/// in `ConfigError::InvalidAptPackageName`'s `#[error(...)]` string.
 fn is_valid_apt_name(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.len() < 2 {
