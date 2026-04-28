@@ -1,11 +1,18 @@
 name: Update Homebrew formula
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Build and publish launcher binaries"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (without v prefix, e.g. 0.3.0)'
+        required: true
 
 jobs:
   update-formula:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tap
@@ -17,7 +24,18 @@ jobs:
 
       - name: Resolve version
         id: ver
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$DISPATCH_VERSION"
+          else
+            VERSION="${HEAD_BRANCH#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Download asset and compute sha256
         id: sha
