@@ -1,0 +1,70 @@
+name: Update Homebrew formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          repository: anton-kochev/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_PAT }}
+          path: homebrew-tap
+
+      - name: Resolve version
+        id: ver
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download asset and compute sha256
+        id: sha
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          URL="https://github.com/anton-kochev/pithos/releases/download/v${V}/pithos-aarch64-apple-darwin.tar.gz"
+          curl -fL "$URL" -o /tmp/pithos.tar.gz
+          echo "sha256=$(shasum -a 256 /tmp/pithos.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Render formula
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          SHA="${{ steps.sha.outputs.sha256 }}"
+          mkdir -p homebrew-tap/Formula
+          cat > homebrew-tap/Formula/pithos.rb <<EOF
+          class Pithos < Formula
+            desc "Pithos launcher"
+            homepage "https://github.com/anton-kochev/pithos"
+            version "${V}"
+            url "https://github.com/anton-kochev/pithos/releases/download/v${V}/pithos-aarch64-apple-darwin.tar.gz"
+            sha256 "${SHA}"
+
+            depends_on arch: :arm64
+            depends_on :macos
+
+            def install
+              bin.install "pithos"
+            end
+
+            test do
+              system "#{bin}/pithos", "version"
+            end
+          end
+          EOF
+
+      - name: Commit and push if changed
+        run: |
+          set -euo pipefail
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/pithos.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date"
+          else
+            git commit -m "Update pithos to ${{ steps.ver.outputs.version }}"
+            git push
+          fi
