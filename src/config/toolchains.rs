@@ -1,6 +1,6 @@
 use saphyr::YamlOwned;
 
-use super::error::{ConfigError, VALID_TOOLCHAINS};
+use super::error::ConfigError;
 
 pub(super) fn validate(toolchains: &YamlOwned) -> Result<(), ConfigError> {
     let Some(mapping) = toolchains.as_mapping() else {
@@ -11,7 +11,7 @@ pub(super) fn validate(toolchains: &YamlOwned) -> Result<(), ConfigError> {
         let Some(name) = key.as_str() else {
             return Err(ConfigError::NonStringToolchainKey);
         };
-        if !VALID_TOOLCHAINS.contains(&name) {
+        if !crate::embed::VALID_TOOLCHAINS.contains(&name) {
             return Err(ConfigError::UnknownToolchain {
                 name: name.to_string(),
             });

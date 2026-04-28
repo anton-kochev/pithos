@@ -1,7 +1,6 @@
 use std::fmt;
 
 pub(super) const VALID_TOP_LEVEL: &[&str] = &["toolchains", "extras"];
-pub(super) const VALID_TOOLCHAINS: &[&str] = &["dotnet", "rust", "go"];
 pub(super) const VALID_EXTRAS: &[&str] = &["apt"];
 
 #[derive(Debug, thiserror::Error)]
@@ -37,7 +36,7 @@ pub enum ConfigError {
 
     #[error(
         ".pithos: unknown toolchain `{name}`; valid: {}",
-        ListBackticked(VALID_TOOLCHAINS)
+        ListBackticked(crate::embed::VALID_TOOLCHAINS)
     )]
     UnknownToolchain { name: String },
 
