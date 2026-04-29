@@ -1031,3 +1031,75 @@ fn cli_clean_does_not_create_pithos_d() {
         ".pithos.d/ should not be created by clean"
     );
 }
+
+#[test]
+fn cli_creates_pithos_on_empty_input() {
+    // User hits Enter at the [Y/n] prompt → yes-default → file written and
+    // `pithos info` continues into a clean SUCCESS.
+    //
+    // We nest a non-dot subdir inside the tempdir because `tempdir()` produces
+    // basenames starting with `.tmp...`, which `project::name_from_path`
+    // rejects (dotfile-style names collide under sanitization), making `info`
+    // exit 1 before reaching SUCCESS.
+    let td = tempdir().unwrap();
+    let proj = td.path().join("proj");
+    fs::create_dir(&proj).unwrap();
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("info")
+        .current_dir(&proj)
+        .write_stdin("\n")
+        .assert()
+        .code(0);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("Created"),
+        "stderr missing 'Created' narration: {stderr}"
+    );
+    let pithos_path = proj.join(".pithos");
+    let content = fs::read_to_string(&pithos_path).expect(".pithos should have been created");
+    assert_eq!(content, "toolchains: {}\n");
+}
+
+#[test]
+fn cli_creates_pithos_on_y_input() {
+    // Explicit `y` is also yes — locks the typed-accept branch independently
+    // of the empty-input default in case the parser's default ever flips.
+    let td = tempdir().unwrap();
+    let proj = td.path().join("proj");
+    fs::create_dir(&proj).unwrap();
+    Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("info")
+        .current_dir(&proj)
+        .write_stdin("y\n")
+        .assert()
+        .code(0);
+    let pithos_path = proj.join(".pithos");
+    let content = fs::read_to_string(&pithos_path).expect(".pithos should have been created");
+    assert_eq!(content, "toolchains: {}\n");
+}
+
+#[test]
+fn cli_does_not_create_pithos_on_n_input() {
+    // `n` declines → no file, exit 2, narration confirms abort.
+    let td = tempdir().unwrap();
+    let proj = td.path().join("proj");
+    fs::create_dir(&proj).unwrap();
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("info")
+        .current_dir(&proj)
+        .write_stdin("n\n")
+        .assert()
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        stderr.contains("aborted"),
+        "stderr missing 'aborted' narration: {stderr}"
+    );
+    assert!(
+        !proj.join(".pithos").exists(),
+        ".pithos should NOT exist after declining the prompt"
+    );
+}

@@ -30,6 +30,10 @@ enum RunMode {
 // Short usage line for fail-fast reject paths. `pithos help` prints the full usage.
 const USAGE: &str = "usage: pithos [run | build | info | clean | help | version] [options]";
 
+// Content written when the user accepts the prompt to create a missing `.pithos`.
+// Mirrors the example in the prompt narration; validates cleanly through `pithos::config::load`.
+const MINIMAL_PITHOS: &str = "toolchains: {}\n";
+
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand {
     Build { rebuild: bool },
@@ -277,14 +281,29 @@ fn read_pithos(cwd: &Path, style: Style) -> Result<Vec<u8>, ExitCode> {
         Ok(b) => Ok(b),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             narrate(style, ">> ERROR:", ".pithos not found");
-            narrate(
-                style,
-                ">>",
-                "Create a .pithos file at the project root. Minimal example:",
-            );
+            narrate(style, ">>", "Create a minimal .pithos here? It will contain:");
             narrate(style, ">>", "");
             narrate(style, ">>", "  toolchains: {}");
-            Err(ExitCode::from(2))
+            narrate(style, ">>", "");
+            if prompt_confirm_default_yes("Create .pithos? [Y/n]:", style) {
+                match fs::write(&path, MINIMAL_PITHOS) {
+                    Ok(()) => {
+                        narrate(style, ">>", &format!("Created {}.", path.display()));
+                        Ok(MINIMAL_PITHOS.as_bytes().to_vec())
+                    }
+                    Err(e) => {
+                        narrate(
+                            style,
+                            ">> ERROR:",
+                            &format!("cannot write {}: {e}", path.display()),
+                        );
+                        Err(ExitCode::from(1))
+                    }
+                }
+            } else {
+                narrate(style, ">>", "aborted; .pithos not created.");
+                Err(ExitCode::from(2))
+            }
         }
         Err(e) => {
             narrate(style, ">> ERROR:", &format!("{}: {e}", path.display()));
@@ -875,6 +894,28 @@ fn prompt_confirm(prompt_msg: &str, style: Style) -> bool {
     match std::io::stdin().read_line(&mut buf) {
         Ok(0) => false,
         Ok(_) => parse_confirm_answer(&buf),
+        Err(_) => false,
+    }
+}
+
+/// Pure: lowercase, trim, accept anything except `n`/`no` as yes.
+/// Empty/whitespace-only → yes. Mirrors `parse_confirm_answer` but flips
+/// the default for the `.pithos` create-on-missing prompt where Enter
+/// should accept the offered minimal stub.
+fn parse_confirm_answer_default_yes(line: &str) -> bool {
+    let trimmed = line.trim().to_ascii_lowercase();
+    !(trimmed == "n" || trimmed == "no")
+}
+
+/// Like `prompt_confirm` but yes-default for typed input. EOF still maps
+/// to false so non-interactive callers (closed stdin under `assert_cmd`,
+/// CI without redirect) don't silently mutate the filesystem.
+fn prompt_confirm_default_yes(prompt_msg: &str, style: Style) -> bool {
+    narrate(style, ">>", prompt_msg);
+    let mut buf = String::new();
+    match std::io::stdin().read_line(&mut buf) {
+        Ok(0) => false,
+        Ok(_) => parse_confirm_answer_default_yes(&buf),
         Err(_) => false,
     }
 }
@@ -1772,6 +1813,48 @@ mod tests {
         // Ok(0) branch returns false directly, but if a future refactor pipes
         // the empty string through `parse_confirm_answer`, the answer stays no.
         assert!(!parse_confirm_answer(""));
+    }
+
+    #[test]
+    fn parse_confirm_answer_default_yes_accepts_empty() {
+        // Empty line / Enter without typing → yes (default-accept).
+        assert!(parse_confirm_answer_default_yes(""));
+        assert!(parse_confirm_answer_default_yes("\n"));
+        assert!(parse_confirm_answer_default_yes("\r\n"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_default_yes_accepts_whitespace_only() {
+        assert!(parse_confirm_answer_default_yes("   "));
+        assert!(parse_confirm_answer_default_yes("\t\n"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_default_yes_accepts_y_yes_mixed_case() {
+        assert!(parse_confirm_answer_default_yes("y"));
+        assert!(parse_confirm_answer_default_yes("Y"));
+        assert!(parse_confirm_answer_default_yes("yes"));
+        assert!(parse_confirm_answer_default_yes("YES"));
+        assert!(parse_confirm_answer_default_yes("Yes\n"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_default_yes_rejects_n_and_no() {
+        assert!(!parse_confirm_answer_default_yes("n"));
+        assert!(!parse_confirm_answer_default_yes("N"));
+        assert!(!parse_confirm_answer_default_yes("no"));
+        assert!(!parse_confirm_answer_default_yes("NO"));
+        assert!(!parse_confirm_answer_default_yes("no\n"));
+        assert!(!parse_confirm_answer_default_yes("No\r\n"));
+    }
+
+    #[test]
+    fn parse_confirm_answer_default_yes_accepts_garbage_as_yes() {
+        // Non-`n`/`no` typed input is treated as accept — symmetric with the
+        // default-no parser's rule that anything not `y`/`yes` is reject.
+        assert!(parse_confirm_answer_default_yes("garbage"));
+        assert!(parse_confirm_answer_default_yes("yep"));
+        assert!(parse_confirm_answer_default_yes("nope"));
     }
 
     #[test]
