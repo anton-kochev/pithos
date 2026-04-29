@@ -1,4 +1,4 @@
-//! Output styling for pithos narration (bold `>>`) and docker build output
+//! Output styling for pithos narration (bold `»`) and docker build output
 //! (dim + 2-space indent). Honors `NO_COLOR` and non-TTY stderr per §6.4.
 
 use std::collections::VecDeque;
@@ -58,14 +58,14 @@ impl Style {
 }
 
 /// Build a narration line: `<marker> <message>` where only the marker is
-/// bolded. `marker` is one of `">>"`, `">> ERROR:"`, `">> WARN:"`. Returns
+/// bolded. `marker` is one of `"»"`, `"» ERROR:"`, `"» WARN:"`. Returns
 /// a `String` so it's trivial to unit-test without capturing stderr.
 pub fn format_narration(style: Style, marker: &str, message: &str) -> String {
     format!("{} {message}", style.bold(marker))
 }
 
 /// Thin wrapper: formats and writes to stderr. Call sites replace
-/// `eprintln!(">> ...")` with this.
+/// `eprintln!("» ...")` with this.
 pub fn narrate(style: Style, marker: &str, message: &str) {
     eprintln!("{}", format_narration(style, marker, message));
 }
@@ -167,20 +167,20 @@ mod tests {
 
     #[test]
     fn format_narration_bolds_only_the_marker_when_enabled() {
-        let out = format_narration(Style::colored(), ">>", "msg");
-        assert_eq!(out, "\x1b[1m>>\x1b[0m msg");
+        let out = format_narration(Style::colored(), "»", "msg");
+        assert_eq!(out, "\x1b[1m»\x1b[0m msg");
     }
 
     #[test]
     fn format_narration_is_plain_when_disabled() {
-        assert_eq!(format_narration(Style::plain(), ">>", "msg"), ">> msg");
+        assert_eq!(format_narration(Style::plain(), "»", "msg"), "» msg");
     }
 
     #[test]
     fn format_narration_supports_error_marker() {
         assert_eq!(
-            format_narration(Style::plain(), ">> ERROR:", "boom"),
-            ">> ERROR: boom"
+            format_narration(Style::plain(), "» ERROR:", "boom"),
+            "» ERROR: boom"
         );
     }
 

@@ -494,8 +494,8 @@ fn cli_build_subcommand_exits_nonzero_when_docker_unavailable() {
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(">> ERROR:"),
-        "stderr missing '>> ERROR:' marker: {stderr}"
+        stderr.contains("» ERROR:"),
+        "stderr missing '» ERROR:' marker: {stderr}"
     );
     // Sanity: the Dockerfile should still have been emitted before the build
     // attempt — emit precedes the docker shellout in main.rs.
@@ -529,8 +529,8 @@ fn cli_run_subcommand_exits_nonzero_when_docker_unavailable() {
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(">> ERROR:"),
-        "stderr missing '>> ERROR:' marker: {stderr}"
+        stderr.contains("» ERROR:"),
+        "stderr missing '» ERROR:' marker: {stderr}"
     );
     assert!(
         td.path().join(".pithos.d").join("Dockerfile").is_file(),
@@ -566,8 +566,8 @@ fn cli_run_subcommand_with_cmd_reaches_docker_shellout() {
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(">> ERROR:"),
-        "stderr missing '>> ERROR:' marker: {stderr}"
+        stderr.contains("» ERROR:"),
+        "stderr missing '» ERROR:' marker: {stderr}"
     );
     assert!(
         !stderr.contains("unknown flag:"),
@@ -596,7 +596,7 @@ fn cli_build_rejects_unknown_flag_writes_only_to_stderr() {
         .code(2);
     let output = assert.get_output();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(">>"), "stderr missing '>>' marker: {stderr}");
+    assert!(stderr.contains("»"), "stderr missing '»' marker: {stderr}");
     assert!(
         output.stdout.is_empty(),
         "stdout must be empty for T-505: {:?}",
@@ -670,8 +670,8 @@ fn cli_exit_126_within_3s_when_daemon_unreachable() {
 
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains(">> ERROR:"),
-        "stderr missing '>> ERROR:' marker: {stderr}"
+        stderr.contains("» ERROR:"),
+        "stderr missing '» ERROR:' marker: {stderr}"
     );
     assert!(
         stderr.contains("start Docker Desktop"),
@@ -707,8 +707,8 @@ fn cli_build_rejects_unknown_flag() {
     // Assert
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains(">> ERROR: unknown flag: --nope"),
-        "stderr missing '>> ERROR: unknown flag: --nope' marker: {stderr}"
+        stderr.contains("» ERROR: unknown flag: --nope"),
+        "stderr missing '» ERROR: unknown flag: --nope' marker: {stderr}"
     );
     assert!(
         stderr.contains("usage:"),

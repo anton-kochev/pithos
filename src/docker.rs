@@ -503,7 +503,7 @@ pub enum ProbeError {
 /// Extracted so the 6.5 exit-code / message contract (NFR-12 / T-504) is
 /// unit-testable without spawning docker — mirrors the `resolve_build_action`
 /// / `abort_message` idiom in main.rs. Consumers format the message with
-/// `narrate(style, ">> ERROR:", message)` and return `ExitCode::from(code)`.
+/// `narrate(style, "» ERROR:", message)` and return `ExitCode::from(code)`.
 pub fn classify_probe(err: &ProbeError) -> (u8, &'static str) {
     match err {
         ProbeError::Spawn(_) => (1, "docker not found in PATH"),

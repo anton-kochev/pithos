@@ -181,11 +181,11 @@ fn main() -> ExitCode {
     if let Subcommand::Reject { kind, value } = &subcommand {
         match kind {
             RejectKind::Subcommand => {
-                narrate(style, ">> ERROR:", &format!("unknown subcommand: {value}"))
+                narrate(style, "» ERROR:", &format!("unknown subcommand: {value}"))
             }
-            RejectKind::Flag => narrate(style, ">> ERROR:", &format!("unknown flag: {value}")),
+            RejectKind::Flag => narrate(style, "» ERROR:", &format!("unknown flag: {value}")),
         }
-        narrate(style, ">>", USAGE);
+        narrate(style, "»", USAGE);
         return ExitCode::from(2);
     }
 
@@ -217,7 +217,7 @@ fn main() -> ExitCode {
     let cwd = match env::current_dir() {
         Ok(p) => p,
         Err(e) => {
-            narrate(style, ">> ERROR:", &format!("cannot read cwd: {e}"));
+            narrate(style, "» ERROR:", &format!("cannot read cwd: {e}"));
             return ExitCode::from(1);
         }
     };
@@ -228,7 +228,7 @@ fn main() -> ExitCode {
     let yaml = match pithos::config::load(&pithos_bytes) {
         Ok(y) => y,
         Err(e) => {
-            narrate(style, ">> ERROR:", &format!("{e}"));
+            narrate(style, "» ERROR:", &format!("{e}"));
             return ExitCode::from(2);
         }
     };
@@ -280,33 +280,33 @@ fn read_pithos(cwd: &Path, style: Style) -> Result<Vec<u8>, ExitCode> {
     match fs::read(&path) {
         Ok(b) => Ok(b),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            narrate(style, ">> ERROR:", ".pithos not found");
-            narrate(style, ">>", "Create a minimal .pithos here? It will contain:");
-            narrate(style, ">>", "");
-            narrate(style, ">>", "  toolchains: {}");
-            narrate(style, ">>", "");
+            narrate(style, "» ERROR:", ".pithos not found");
+            narrate(style, "»", "Create a minimal .pithos here? It will contain:");
+            narrate(style, "»", "");
+            narrate(style, "»", "  toolchains: {}");
+            narrate(style, "»", "");
             if prompt_confirm_default_yes("Create .pithos? [Y/n]:", style) {
                 match fs::write(&path, MINIMAL_PITHOS) {
                     Ok(()) => {
-                        narrate(style, ">>", &format!("Created {}.", path.display()));
+                        narrate(style, "»", &format!("Created {}.", path.display()));
                         Ok(MINIMAL_PITHOS.as_bytes().to_vec())
                     }
                     Err(e) => {
                         narrate(
                             style,
-                            ">> ERROR:",
+                            "» ERROR:",
                             &format!("cannot write {}: {e}", path.display()),
                         );
                         Err(ExitCode::from(1))
                     }
                 }
             } else {
-                narrate(style, ">>", "aborted; .pithos not created.");
+                narrate(style, "»", "aborted; .pithos not created.");
                 Err(ExitCode::from(2))
             }
         }
         Err(e) => {
-            narrate(style, ">> ERROR:", &format!("{}: {e}", path.display()));
+            narrate(style, "» ERROR:", &format!("{}: {e}", path.display()));
             Err(ExitCode::from(1))
         }
     }
@@ -317,7 +317,7 @@ fn write_dockerfile(path: &Path, content: &str, style: Style) -> Result<(), Exit
         if let Err(e) = fs::create_dir_all(parent) {
             narrate(
                 style,
-                ">> ERROR:",
+                "» ERROR:",
                 &format!("cannot create {}: {e}", parent.display()),
             );
             return Err(ExitCode::from(1));
@@ -326,7 +326,7 @@ fn write_dockerfile(path: &Path, content: &str, style: Style) -> Result<(), Exit
     if let Err(e) = fs::write(path, content) {
         narrate(
             style,
-            ">> ERROR:",
+            "» ERROR:",
             &format!("cannot write {}: {e}", path.display()),
         );
         return Err(ExitCode::from(1));
@@ -406,7 +406,7 @@ fn require_daemon(style: Style) -> Result<(), ExitCode> {
         Ok(()) => Ok(()),
         Err(e) => {
             let (code, message) = pithos::docker::classify_probe(&e);
-            narrate(style, ">> ERROR:", message);
+            narrate(style, "» ERROR:", message);
             Err(ExitCode::from(code))
         }
     }
@@ -419,7 +419,7 @@ struct EnsuredImage {
 
 /// Ensure `pithos:<project>` exists locally; build it if the fingerprint
 /// cache misses or `--rebuild` is set. On `Err(ExitCode)`, diagnostic
-/// output has already been narrated via `narrate(style, ">> ERROR:", ...)`
+/// output has already been narrated via `narrate(style, "» ERROR:", ...)`
 /// — callers should just propagate the code, not re-narrate.
 fn ensure_image(
     cwd: &Path,
@@ -435,7 +435,7 @@ fn ensure_image(
         None => {
             narrate(
                 style,
-                ">> ERROR:",
+                "» ERROR:",
                 &format!("cannot derive project name from {}", cwd.display()),
             );
             return Err(ExitCode::from(1));
@@ -448,7 +448,7 @@ fn ensure_image(
         let Some(bytes) = pithos::embed::installer_bytes(name) else {
             narrate(
                 style,
-                ">> ERROR:",
+                "» ERROR:",
                 &format!(
                     "no baked installer for toolchain {name:?} \
                      (config validator and embed bundle are out of sync)"
@@ -463,7 +463,7 @@ fn ensure_image(
     let cached = match pithos::docker::find_image_by_fingerprint(&hash) {
         Ok(opt) => opt,
         Err(e) => {
-            narrate(style, ">> ERROR:", &format!("{e}"));
+            narrate(style, "» ERROR:", &format!("{e}"));
             return Err(ExitCode::from(1));
         }
     };
@@ -472,13 +472,13 @@ fn ensure_image(
         BuildAction::Reuse(id) => {
             narrate(
                 style,
-                ">>",
+                "»",
                 &format!("cached image {id} matches fingerprint; skipping build"),
             );
             return Ok(EnsuredImage { tag, project });
         }
         BuildAction::Abort => {
-            narrate(style, ">> ERROR:", &abort_message(&project));
+            narrate(style, "» ERROR:", &abort_message(&project));
             return Err(ExitCode::from(4));
         }
         BuildAction::Build => {}
@@ -490,7 +490,7 @@ fn ensure_image(
         Err(e) => {
             narrate(
                 style,
-                ">> ERROR:",
+                "» ERROR:",
                 &format!("cannot create build-context tempdir: {e}"),
             );
             return Err(ExitCode::from(1));
@@ -499,7 +499,7 @@ fn ensure_image(
     if let Err(e) = pithos::embed::extract_to(context.path()) {
         narrate(
             style,
-            ">> ERROR:",
+            "» ERROR:",
             &format!("cannot extract build context: {e}"),
         );
         return Err(ExitCode::from(1));
@@ -517,7 +517,7 @@ fn ensure_image(
     ) {
         Ok(()) => {}
         Err(pithos::docker::BuildError::Spawn(e)) => {
-            narrate(style, ">> ERROR:", &format!("docker build: {e}"));
+            narrate(style, "» ERROR:", &format!("docker build: {e}"));
             return Err(ExitCode::from(1));
         }
         Err(pithos::docker::BuildError::NonZero { code, tail }) => {
@@ -526,7 +526,7 @@ fn ensure_image(
                 .unwrap_or_else(|| "signal".into());
             narrate(
                 style,
-                ">> ERROR:",
+                "» ERROR:",
                 &format!(
                     "docker build failed (exit {code_str}); last {} lines:",
                     tail.len()
@@ -579,7 +579,7 @@ fn rebuild_with_version_labels(
         Err(e) => {
             narrate(
                 style,
-                ">> ERROR:",
+                "» ERROR:",
                 &format!("internal: version extraction failed: {e}"),
             );
             return Err(ExitCode::from(1));
@@ -593,7 +593,7 @@ fn rebuild_with_version_labels(
         .collect();
     narrate(
         style,
-        ">>",
+        "»",
         &format!("resolved: {}", resolved.join(", ")),
     );
 
@@ -617,7 +617,7 @@ fn rebuild_with_version_labels(
         Err(pithos::docker::BuildError::Spawn(e)) => {
             narrate(
                 style,
-                ">> ERROR:",
+                "» ERROR:",
                 &format!("internal: metadata rebuild failed: {e}"),
             );
             Err(ExitCode::from(1))
@@ -628,7 +628,7 @@ fn rebuild_with_version_labels(
                 .unwrap_or_else(|| "signal".into());
             narrate(
                 style,
-                ">> ERROR:",
+                "» ERROR:",
                 &format!(
                     "internal: metadata rebuild failed (exit {code_str}); last {} lines:",
                     tail.len()
@@ -733,7 +733,7 @@ fn run_run(
     ) {
         Ok(status) => ExitCode::from(exit_code_from_status(status)),
         Err(pithos::docker::RunError::Spawn(e)) => {
-            narrate(style, ">> ERROR:", &format!("docker run: {e}"));
+            narrate(style, "» ERROR:", &format!("docker run: {e}"));
             ExitCode::from(1)
         }
     }
@@ -831,7 +831,7 @@ fn run_info(
         None => {
             narrate(
                 style,
-                ">> ERROR:",
+                "» ERROR:",
                 &format!("cannot derive project name from {}", cwd.display()),
             );
             return ExitCode::from(1);
@@ -844,7 +844,7 @@ fn run_info(
         let Some(bytes) = pithos::embed::installer_bytes(&name) else {
             narrate(
                 style,
-                ">> ERROR:",
+                "» ERROR:",
                 &format!(
                     "no baked installer for toolchain {name:?} \
                      (config validator and embed bundle are out of sync)"
@@ -864,7 +864,7 @@ fn run_info(
         Err(e) => {
             narrate(
                 style,
-                ">>",
+                "»",
                 &format!("docker unreachable; image status unavailable: {e}"),
             );
             (None, RebuildStatus::Unavailable)
@@ -889,7 +889,7 @@ fn parse_confirm_answer(line: &str) -> bool {
 /// read one line from stdin, classify with `parse_confirm_answer`. EOF maps
 /// to false — safer default for piped/non-interactive use.
 fn prompt_confirm(prompt_msg: &str, style: Style) -> bool {
-    narrate(style, ">>", prompt_msg);
+    narrate(style, "»", prompt_msg);
     let mut buf = String::new();
     match std::io::stdin().read_line(&mut buf) {
         Ok(0) => false,
@@ -911,7 +911,7 @@ fn parse_confirm_answer_default_yes(line: &str) -> bool {
 /// to false so non-interactive callers (closed stdin under `assert_cmd`,
 /// CI without redirect) don't silently mutate the filesystem.
 fn prompt_confirm_default_yes(prompt_msg: &str, style: Style) -> bool {
-    narrate(style, ">>", prompt_msg);
+    narrate(style, "»", prompt_msg);
     let mut buf = String::new();
     match std::io::stdin().read_line(&mut buf) {
         Ok(0) => false,
@@ -922,7 +922,7 @@ fn prompt_confirm_default_yes(prompt_msg: &str, style: Style) -> bool {
 
 /// Pure: render one indented row per image for the candidate list narration.
 /// Format: `<tag-or-none>  <id-12>  <created>` — single spaces between fields,
-/// the caller adds the `>>   ` prefix when narrating each row.
+/// the caller adds the `»   ` prefix when narrating each row.
 fn render_candidate_lines(images: &[pithos::docker::PithosImage]) -> Vec<String> {
     images
         .iter()
@@ -1007,7 +1007,7 @@ fn run_clean(all: bool, style: Style) -> ExitCode {
     let dangling = match pithos::docker::list_dangling_pithos_images() {
         Ok(v) => v,
         Err(e) => {
-            narrate(style, ">> ERROR:", &format!("{e}"));
+            narrate(style, "» ERROR:", &format!("{e}"));
             return ExitCode::from(1);
         }
     };
@@ -1015,7 +1015,7 @@ fn run_clean(all: bool, style: Style) -> ExitCode {
         match pithos::docker::list_tagged_pithos_images() {
             Ok(v) => v,
             Err(e) => {
-                narrate(style, ">> ERROR:", &format!("{e}"));
+                narrate(style, "» ERROR:", &format!("{e}"));
                 return ExitCode::from(1);
             }
         }
@@ -1026,20 +1026,20 @@ fn run_clean(all: bool, style: Style) -> ExitCode {
     let decision = decide_clean(all, dangling, tagged);
     let candidates = match decision {
         CleanDecision::Nothing => {
-            narrate(style, ">>", "No images to clean.");
+            narrate(style, "»", "No images to clean.");
             return ExitCode::SUCCESS;
         }
         CleanDecision::Prompt(c) => c,
     };
 
-    narrate(style, ">>", &format!("Found {} image(s):", candidates.len()));
+    narrate(style, "»", &format!("Found {} image(s):", candidates.len()));
     for line in render_candidate_lines(&candidates) {
-        narrate(style, ">>", &format!("  {line}"));
+        narrate(style, "»", &format!("  {line}"));
     }
 
     let prompt = format!("Remove {} image(s)? [y/N]:", candidates.len());
     if !prompt_confirm(&prompt, style) {
-        narrate(style, ">>", "aborted.");
+        narrate(style, "»", "aborted.");
         return ExitCode::SUCCESS;
     }
 
@@ -1057,7 +1057,7 @@ fn run_clean(all: bool, style: Style) -> ExitCode {
 
     let (code, lines) = summarize_removal_outcome(&results);
     for line in lines {
-        narrate(style, ">>", &line);
+        narrate(style, "»", &line);
     }
     ExitCode::from(code)
 }
