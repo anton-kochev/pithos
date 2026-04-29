@@ -43,3 +43,5 @@ pithos help         # full command reference
 ```
 
 Run `pithos help` for the full flag reference (`--rebuild`, `--no-build`, etc.).
+
+If you need GitHub access (`gh`, git push over HTTPS) inside the container, run `bootstrap.sh` from the shell — it sets your git identity and walks through the `gh auth login` device flow. The token persists in the project's named volume, so this is a one-time step per project.

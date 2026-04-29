@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# bootstrap.sh — manually (re-)bootstrap git identity and gh auth inside a container.
+# bootstrap.sh — set git identity and authenticate gh inside a container.
 #
 # When to use this:
+#   - First time you need `gh` (or git push over HTTPS) in this project's
+#     container — the entrypoint no longer auto-runs `gh auth login`
 #   - Your gh token expired or got revoked
 #   - You're switching GitHub accounts in this project's volume
 #   - You want a clean re-auth without destroying the volume
 #
-# The entrypoint script handles first-run auth automatically on fresh volumes.
-# This script is for the rare case when you need to *force* re-auth on a
-# volume that already has a token.
+# Token persists in the project's named volume, so this only needs to run
+# once per project (until something invalidates the token).
 #
 # Usage:
-#   pithos bash -c bootstrap.sh           # from the host
+#   pithos run -- bootstrap.sh             # from the host
 #   bootstrap.sh                           # from inside a running container
 
 set -euo pipefail
