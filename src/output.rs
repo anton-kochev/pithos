@@ -80,6 +80,32 @@ pub fn format_docker_line(line: &str, style: Style) -> String {
     }
 }
 
+/// Detect a BuildKit `--progress=plain` per-layer download-progress tick:
+///
+/// ```text
+/// #<step> sha256:<hex> <amt><unit> / <total><unit> <elapsed>s
+/// ```
+///
+/// BuildKit emits one such line per ~MB downloaded, drowning out step
+/// boundaries. Returns `true` only for the intermediate ticks; the terminal
+/// emission has a trailing ` done` and is preserved. Step-finish lines
+/// (`#5 DONE 0.4s`), resolve lines, extracting lines, and step-start lines
+/// don't match the 6-token shape and pass through.
+fn is_progress_update(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if trimmed.ends_with(" done") {
+        return false;
+    }
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    matches!(
+        parts.as_slice(),
+        [step, sha, _amt, "/", _total, time]
+            if step.starts_with('#')
+                && sha.starts_with("sha256:")
+                && time.ends_with('s')
+    )
+}
+
 /// Read `reader` line by line, write styled docker output to `writer`,
 /// and return a ring buffer of the last `tail_cap` raw (unstyled) lines.
 /// Generic over `W: Write` so tests inject `Vec<u8>`.
@@ -87,6 +113,11 @@ pub fn format_docker_line(line: &str, style: Style) -> String {
 /// `tail_cap == 0` means "stream and drop" — nothing is retained, returned
 /// Vec is empty. Use when the caller only needs the side-effect of writing
 /// to the sink (e.g. happy-path docker stdout where the tail is unused).
+///
+/// Lines matching [`is_progress_update`] are dropped from both the sink
+/// and the tail — the user sees one line per download (the terminal `done`
+/// emission), and a build that dies mid-pull surfaces step boundaries in
+/// its tail rather than a wall of percentages.
 ///
 /// Errors writing to the sink are dropped — stderr failure has no recovery
 /// path.
@@ -100,6 +131,9 @@ pub fn stream_lines<R: Read, W: Write>(
     let br = io::BufReader::new(reader);
     let mut tail: VecDeque<String> = VecDeque::with_capacity(tail_cap);
     for line in br.lines().map_while(Result::ok) {
+        if is_progress_update(&line) {
+            continue;
+        }
         let _ = writeln!(writer, "{}", format_docker_line(&line, style));
         if tail_cap > 0 {
             if tail.len() == tail_cap {
@@ -306,6 +340,80 @@ mod tests {
             tail,
             vec!["x".to_string()],
             "tail must carry raw unstyled line"
+        );
+    }
+
+    // is_progress_update — narrow filter for BuildKit plain download ticks
+
+    #[test]
+    fn is_progress_update_drops_intermediate_download_line() {
+        assert!(is_progress_update(
+            "#5 sha256:78b07793 109.05MB / 162.32MB 24.5s"
+        ));
+    }
+
+    #[test]
+    fn is_progress_update_keeps_done_download_line() {
+        assert!(!is_progress_update(
+            "#5 sha256:78b07793 162.32MB / 162.32MB 27.2s done"
+        ));
+    }
+
+    #[test]
+    fn is_progress_update_keeps_step_done_line() {
+        // Only 3 tokens, no `/`. Step-finish lines must pass through.
+        assert!(!is_progress_update("#5 DONE 0.4s"));
+    }
+
+    #[test]
+    fn is_progress_update_keeps_resolve_line() {
+        assert!(!is_progress_update(
+            "#7 resolve docker.io/library/rust:1.85-slim@sha256:abcdef 0.4s"
+        ));
+    }
+
+    #[test]
+    fn is_progress_update_keeps_step_start_line() {
+        // Has `sha256:` embedded in the @-pinned image ref but no isolated `/` token.
+        assert!(!is_progress_update(
+            "#5 [stage-0 1/12] FROM docker.io/library/rust:1.85-slim@sha256:abc"
+        ));
+    }
+
+    #[test]
+    fn is_progress_update_keeps_extracting_line() {
+        // 4 tokens: "#7 extracting sha256:abc 0.5s" — wrong shape for the 6-token match.
+        assert!(!is_progress_update("#7 extracting sha256:abc 0.5s"));
+    }
+
+    #[test]
+    fn stream_lines_filters_progress_updates_from_sink_and_tail() {
+        let input: &[u8] = b"\
+#5 [stage-0 1/12] FROM rust:slim\n\
+#5 sha256:abc 50MB / 200MB 5.0s\n\
+#5 sha256:abc 100MB / 200MB 10.0s\n\
+#5 sha256:abc 150MB / 200MB 15.0s\n\
+#5 sha256:abc 200MB / 200MB 20.0s done\n\
+#5 DONE 20.5s\n";
+        let mut sink: Vec<u8> = Vec::new();
+        let tail = stream_lines(input, &mut sink, Style::plain(), 20);
+        let sink_text = String::from_utf8(sink).unwrap();
+        // Three intermediate `MB / MB Xs` lines must be dropped.
+        assert!(!sink_text.contains("50MB"));
+        assert!(!sink_text.contains("100MB"));
+        assert!(!sink_text.contains("150MB"));
+        // Done line, step-start, and step-finish must remain.
+        assert!(sink_text.contains("200MB / 200MB 20.0s done"));
+        assert!(sink_text.contains("[stage-0 1/12]"));
+        assert!(sink_text.contains("DONE 20.5s"));
+        // Tail mirrors the same filtering — exactly the 3 kept lines, in order.
+        assert_eq!(
+            tail,
+            vec![
+                "#5 [stage-0 1/12] FROM rust:slim".to_string(),
+                "#5 sha256:abc 200MB / 200MB 20.0s done".to_string(),
+                "#5 DONE 20.5s".to_string(),
+            ]
         );
     }
 }
