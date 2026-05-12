@@ -598,7 +598,7 @@ pub enum RunError {
 /// slice means docker falls through to the Dockerfile's `CMD` (FR-502).
 ///
 /// Shells out to:
-///   docker run --rm -it --init --name ... --hostname ... --user 501:20
+///   docker run --rm -it --name ... --hostname ... --user 501:20
 ///              -v <PWD>:/workspace/<project>:cached
 ///              -v pithos-home-<project>:/home/pi
 ///              [-v <PITHOS_REPO>/pi-config/... per Layer 3 item, if exists]
@@ -653,7 +653,6 @@ fn assemble_run_args(
         "run".into(),
         "--rm".into(),
         "-it".into(),
-        "--init".into(),
         "--name".into(),
         container_name.into(),
         "--hostname".into(),
@@ -800,7 +799,7 @@ mod tests {
         );
         assert!(args.contains(&OsString::from("--rm")));
         assert!(args.contains(&OsString::from("-it")));
-        assert!(args.contains(&OsString::from("--init")));
+        assert!(!args.contains(&OsString::from("--init")));
         assert!(
             args.windows(2)
                 .any(|w| w[0] == "--user" && w[1] == "501:20")
