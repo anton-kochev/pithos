@@ -39,6 +39,33 @@ pub fn find_image_by_fingerprint(hash: &str) -> std::io::Result<Option<String>> 
     Ok(parse_image_ids(&stdout).into_iter().next())
 }
 
+/// Attach `target_tag` to the image referenced by `source` (an image ID or
+/// an existing tag). Used after a fingerprint cache hit so that
+/// `docker run pithos:<project>` resolves locally — the fingerprint lookup
+/// finds the image by label and may return an ID whose only tag belongs to
+/// a different project. `docker tag` is idempotent: re-tagging an image
+/// that already carries the same tag is a no-op.
+///
+/// Shells out to:
+///   `docker tag <source> <target_tag>`
+///
+/// Errors surface as `io::Error`:
+/// - `docker` not in PATH → spawn error propagates
+/// - daemon unreachable / non-zero exit → wrapped with stderr in the message
+pub fn tag_image(source: &str, target_tag: &str) -> std::io::Result<()> {
+    let output = Command::new("docker")
+        .args(["tag", source, target_tag])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "docker tag failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        )));
+    }
+    Ok(())
+}
+
 /// Parse `docker image ls --format "{{.ID}}"` stdout into a vec of image IDs.
 /// One non-empty line = one ID; blank lines (including the trailing newline
 /// docker always emits) are ignored. Split out from the shellout so the only

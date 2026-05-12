@@ -514,10 +514,14 @@ fn ensure_image(
     let tag = format!("pithos:{project}");
     match resolve_build_action(mode, cached.as_deref()) {
         BuildAction::Reuse(id) => {
+            if let Err(e) = pithos::docker::tag_image(&id, &tag) {
+                narrate(style, "» ERROR:", &format!("{e}"));
+                return Err(ExitCode::from(1));
+            }
             narrate(
                 style,
                 "»",
-                &format!("cached image {id} matches fingerprint; skipping build"),
+                &format!("cached image {id} matches fingerprint; reusing as {tag}"),
             );
             return Ok(EnsuredImage { tag, project });
         }
