@@ -1,5 +1,8 @@
 # pithos
 
+[![Release](https://github.com/anton-kochev/pithos/actions/workflows/release.yml/badge.svg)](https://github.com/anton-kochev/pithos/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/anton-kochev/pithos?color=blue)](https://github.com/anton-kochev/pithos/releases/latest)
+
 Declarative Docker development containers.
 
 Describe your project's toolchain in a `.pithos` YAML file; `pithos` builds a
@@ -39,7 +42,9 @@ pithos              # build (if needed) and launch a shell in the container
 pithos build        # build the image without launching
 pithos info         # show project, fingerprint, and image status
 pithos clean        # remove dangling pithos images (--all for tagged too)
+pithos rebuild-base # build Dockerfile.base locally for dev iteration
 pithos help         # full command reference
+pithos version      # print the pithos version
 ```
 
 Run `pithos help` for the full flag reference (`--rebuild`, `--no-build`, etc.).
