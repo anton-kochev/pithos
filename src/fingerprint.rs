@@ -2,25 +2,42 @@ use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 
-/// Compute the SHA-256 fingerprint over (Dockerfile || .pithos || installers).
+/// Compute the SHA-256 fingerprint over
+/// (Dockerfile || .pithos || installers || base_image_id).
 /// Returns a 64-char lowercase hex digest.
 ///
 /// Installers are hashed in alphabetical order of `name` (BTreeMap iteration
 /// is sort-by-key), matching the emitter's layer order (FR-303). Pi-config is
 /// intentionally absent per FR-204 (bind-mounted at runtime, not baked).
 ///
+/// `base_image_id` is the resolved Image ID (`sha256:...`) of the local
+/// `ghcr.io/anton-kochev/pithos:base` image, as emitted by
+/// `docker inspect --format '{{.Id}}'`. Hashing it ties the per-project
+/// cache key to the actual base layer, so any base change (local rebuild via
+/// `pithos rebuild-base`, CI publish, `docker pull`) invalidates the
+/// per-project cache and forces a rebuild. Without this input, edits to
+/// `Dockerfile.base` / `entrypoint.sh` are invisible to per-project cache
+/// hits.
+///
 /// No separator or length-prefix between blobs: input boundaries are
 /// unambiguous because the Dockerfile is emitter-controlled and ends with
-/// `\n`, `.pithos` is validated UTF-8 YAML, and installer bodies are
-/// repo-controlled scripts. Length-extension attacks are out of scope
-/// (inputs are not adversarial).
-pub fn compute(dockerfile: &str, pithos: &[u8], installers: &BTreeMap<String, Vec<u8>>) -> String {
+/// `\n`, `.pithos` is validated UTF-8 YAML, installer bodies are
+/// repo-controlled scripts, and `base_image_id` is a fixed-shape docker
+/// digest. Length-extension attacks are out of scope (inputs are not
+/// adversarial).
+pub fn compute(
+    dockerfile: &str,
+    pithos: &[u8],
+    installers: &BTreeMap<String, Vec<u8>>,
+    base_image_id: &str,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(dockerfile.as_bytes());
     hasher.update(pithos);
     for content in installers.values() {
         hasher.update(content);
     }
+    hasher.update(base_image_id.as_bytes());
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(64);
     for byte in digest.iter() {
@@ -74,36 +91,79 @@ mod tests {
         m
     }
 
+    // Fixture base image ID, kept stable across tests so changing it is a
+    // deliberate, easy-to-spot diff. Mirrors the shape emitted by
+    // `docker inspect --format '{{.Id}}'`.
+    const FIXTURE_BASE: &str = "sha256:test";
+
     #[test]
     fn compute_returns_known_sha256_for_fixed_input() {
         // Anti-drift: pre-computed via
         //   { printf 'FROM base\n'; printf 'toolchains: {}\n';
-        //     printf '#!dotnet\n'; printf '#!rust\n'; } | sha256sum
-        let out = compute("FROM base\n", b"toolchains: {}\n", &fixture_installers());
+        //     printf '#!dotnet\n'; printf '#!rust\n';
+        //     printf 'sha256:test'; } | sha256sum
+        // Note: no trailing \n on `sha256:test` — `compute` hashes the raw
+        // bytes of `base_image_id`, and FIXTURE_BASE has no embedded newline.
+        let out = compute(
+            "FROM base\n",
+            b"toolchains: {}\n",
+            &fixture_installers(),
+            FIXTURE_BASE,
+        );
         assert_eq!(
             out,
-            "470fd1b2c8f7daa92b6aa1adde442a3cbfef5b1c07432052b2fd66c6cbaad603"
+            "b0b96de5039c081a096df40a178ab4a5a85165f41d3d94a428c0fc7791612066"
         );
     }
 
     #[test]
     fn compute_is_deterministic_across_two_calls() {
-        let a = compute("FROM base\n", b"x: 1\n", &fixture_installers());
-        let b = compute("FROM base\n", b"x: 1\n", &fixture_installers());
+        let a = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_BASE,
+        );
+        let b = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_BASE,
+        );
         assert_eq!(a, b);
     }
 
     #[test]
     fn compute_changes_when_dockerfile_changes() {
-        let a = compute("FROM base\n", b"x: 1\n", &fixture_installers());
-        let b = compute("FROM base2\n", b"x: 1\n", &fixture_installers());
+        let a = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_BASE,
+        );
+        let b = compute(
+            "FROM base2\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_BASE,
+        );
         assert_ne!(a, b);
     }
 
     #[test]
     fn compute_changes_when_pithos_changes() {
-        let a = compute("FROM base\n", b"x: 1\n", &fixture_installers());
-        let b = compute("FROM base\n", b"x: 2\n", &fixture_installers());
+        let a = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_BASE,
+        );
+        let b = compute(
+            "FROM base\n",
+            b"x: 2\n",
+            &fixture_installers(),
+            FIXTURE_BASE,
+        );
         assert_ne!(a, b);
     }
 
@@ -111,8 +171,13 @@ mod tests {
     fn compute_changes_when_installer_content_changes() {
         let mut tweaked = fixture_installers();
         tweaked.insert("rust".to_string(), b"#!rust-2\n".to_vec());
-        let a = compute("FROM base\n", b"x: 1\n", &fixture_installers());
-        let b = compute("FROM base\n", b"x: 1\n", &tweaked);
+        let a = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_BASE,
+        );
+        let b = compute("FROM base\n", b"x: 1\n", &tweaked, FIXTURE_BASE);
         assert_ne!(a, b);
     }
 
@@ -120,8 +185,32 @@ mod tests {
     fn compute_changes_when_installer_set_changes() {
         let mut extra = fixture_installers();
         extra.insert("go".to_string(), b"#!go\n".to_vec());
-        let a = compute("FROM base\n", b"x: 1\n", &fixture_installers());
-        let b = compute("FROM base\n", b"x: 1\n", &extra);
+        let a = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_BASE,
+        );
+        let b = compute("FROM base\n", b"x: 1\n", &extra, FIXTURE_BASE);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn compute_changes_when_base_image_id_changes() {
+        // The whole point of plumbing base_image_id through `compute`: a
+        // changed base layer must invalidate every per-project cache key.
+        let a = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_BASE,
+        );
+        let b = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            "sha256:other",
+        );
         assert_ne!(a, b);
     }
 
@@ -135,8 +224,8 @@ mod tests {
         let mut b_map = BTreeMap::new();
         b_map.insert("rust".to_string(), b"#!rust\n".to_vec());
         b_map.insert("dotnet".to_string(), b"#!dotnet\n".to_vec());
-        let a = compute("FROM base\n", b"x: 1\n", &a_map);
-        let b = compute("FROM base\n", b"x: 1\n", &b_map);
+        let a = compute("FROM base\n", b"x: 1\n", &a_map, FIXTURE_BASE);
+        let b = compute("FROM base\n", b"x: 1\n", &b_map, FIXTURE_BASE);
         assert_eq!(a, b);
     }
 

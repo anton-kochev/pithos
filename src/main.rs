@@ -28,7 +28,8 @@ enum RunMode {
 }
 
 // Short usage line for fail-fast reject paths. `pithos help` prints the full usage.
-const USAGE: &str = "usage: pithos [run | build | info | clean | help | version] [options]";
+const USAGE: &str =
+    "usage: pithos [run | build | info | clean | rebuild-base | help | version] [options]";
 
 // Content written when the user accepts the prompt to create a missing `.pithos`.
 // Mirrors the example in the prompt narration; validates cleanly through `pithos::config::load`.
@@ -40,6 +41,7 @@ enum Subcommand {
     Run { mode: RunMode, cmd: Vec<String> },
     Info,
     Clean { all: bool },
+    RebuildBase,
     Help,
     Version,
     Reject { kind: RejectKind, value: String },
@@ -149,6 +151,13 @@ impl Subcommand {
                 }
                 Self::Clean { all }
             }
+            Some("rebuild-base") => match args.get(2) {
+                None => Self::RebuildBase,
+                Some(extra) => Self::Reject {
+                    kind: RejectKind::Flag,
+                    value: extra.clone(),
+                },
+            },
             Some(other) => Self::Reject {
                 kind: RejectKind::Subcommand,
                 value: other.to_string(),
@@ -157,7 +166,10 @@ impl Subcommand {
     }
 
     fn requires_daemon(&self) -> bool {
-        matches!(self, Self::Build { .. } | Self::Run { .. } | Self::Clean { .. })
+        matches!(
+            self,
+            Self::Build { .. } | Self::Run { .. } | Self::Clean { .. } | Self::RebuildBase
+        )
     }
 
     fn writes_dockerfile(&self) -> bool {
@@ -214,6 +226,23 @@ fn main() -> ExitCode {
         return run_clean(all, style);
     }
 
+    // RebuildBase short-circuits like Clean: needs the daemon, but does not
+    // touch `.pithos`, does not emit a per-project Dockerfile, and resolves
+    // its context from the cwd of the pithos source tree (not a project dir).
+    if matches!(subcommand, Subcommand::RebuildBase) {
+        if let Err(code) = require_daemon(style) {
+            return code;
+        }
+        let cwd = match env::current_dir() {
+            Ok(p) => p,
+            Err(e) => {
+                narrate(style, "» ERROR:", &format!("cannot read cwd: {e}"));
+                return ExitCode::from(1);
+            }
+        };
+        return run_rebuild_base(&cwd, style);
+    }
+
     let cwd = match env::current_dir() {
         Ok(p) => p,
         Err(e) => {
@@ -267,7 +296,9 @@ fn main() -> ExitCode {
             style,
         ),
         Subcommand::Info => run_info(&cwd, &yaml, &pithos_bytes, &dockerfile_content, style),
-        Subcommand::Clean { .. } => unreachable!("handled by short-circuit above"),
+        Subcommand::Clean { .. } | Subcommand::RebuildBase => {
+            unreachable!("handled by short-circuit above")
+        }
         Subcommand::Help | Subcommand::Version => {
             unreachable!("handled by fail-fast guard above")
         }
@@ -386,6 +417,7 @@ fn help_text() -> String {
            build          Build the image without launching\n  \
            info           Print project config, fingerprint, and image status\n  \
            clean          Remove dangling pithos images (or all with --all)\n  \
+           rebuild-base   Build Dockerfile.base into local :base for dev iteration\n  \
            help           Print this help\n  \
            version        Print the pithos version\n\
          \n\
@@ -458,7 +490,19 @@ fn ensure_image(
         };
         installers.insert(name.clone(), bytes.to_vec());
     }
-    let hash = pithos::fingerprint::compute(dockerfile_content, pithos_bytes, &installers);
+    let base_image_id = match pithos::docker::inspect_image_id(pithos::docker::BASE_IMAGE_REF) {
+        Ok(id) => id,
+        Err(e) => {
+            narrate(style, "» ERROR:", &format!("{e}"));
+            return Err(ExitCode::from(1));
+        }
+    };
+    let hash = pithos::fingerprint::compute(
+        dockerfile_content,
+        pithos_bytes,
+        &installers,
+        &base_image_id,
+    );
 
     let cached = match pithos::docker::find_image_by_fingerprint(&hash) {
         Ok(opt) => opt,
@@ -854,7 +898,19 @@ fn run_info(
         };
         installers.insert(name, bytes.to_vec());
     }
-    let fingerprint = pithos::fingerprint::compute(dockerfile_content, pithos_bytes, &installers);
+    let base_image_id = match pithos::docker::inspect_image_id(pithos::docker::BASE_IMAGE_REF) {
+        Ok(id) => id,
+        Err(e) => {
+            narrate(style, "» ERROR:", &format!("{e}"));
+            return ExitCode::from(1);
+        }
+    };
+    let fingerprint = pithos::fingerprint::compute(
+        dockerfile_content,
+        pithos_bytes,
+        &installers,
+        &base_image_id,
+    );
 
     let (image, status) = match pithos::docker::inspect_image(&tag) {
         Ok(img_opt) => {
@@ -1060,6 +1116,80 @@ fn run_clean(all: bool, style: Style) -> ExitCode {
         narrate(style, "»", &line);
     }
     ExitCode::from(code)
+}
+
+/// Build `Dockerfile.base` in `cwd` into the local `ghcr.io/anton-kochev/pithos:base`
+/// tag, for dev-iteration use. `cwd` must be the pithos source tree (the
+/// repository checkout where `Dockerfile.base` lives at the root).
+///
+/// Exit codes:
+/// - 2 if `Dockerfile.base` is not found in `cwd` (wrong directory).
+/// - 1 if `docker build` fails to spawn or returns non-zero.
+/// - 0 on success, after narrating the newly-resolved Image ID.
+fn run_rebuild_base(cwd: &Path, style: Style) -> ExitCode {
+    let dockerfile_base = cwd.join("Dockerfile.base");
+    if !dockerfile_base.exists() {
+        narrate(
+            style,
+            "» ERROR:",
+            &format!(
+                "must be run from the pithos source tree (Dockerfile.base not found in {})",
+                cwd.display()
+            ),
+        );
+        return ExitCode::from(2);
+    }
+
+    narrate(
+        style,
+        "»",
+        &format!("building {} ...", pithos::docker::BASE_IMAGE_REF),
+    );
+    match pithos::docker::build_base(cwd, style) {
+        Ok(()) => {}
+        Err(pithos::docker::BuildError::Spawn(e)) => {
+            narrate(style, "» ERROR:", &format!("docker build: {e}"));
+            return ExitCode::from(1);
+        }
+        Err(pithos::docker::BuildError::NonZero { code, tail }) => {
+            let code_str = code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into());
+            narrate(
+                style,
+                "» ERROR:",
+                &format!(
+                    "docker build failed (exit {code_str}); last {} lines:",
+                    tail.len()
+                ),
+            );
+            for line in &tail {
+                eprintln!("{}", pithos::output::format_docker_line(line, style));
+            }
+            return ExitCode::from(1);
+        }
+    }
+
+    match pithos::docker::inspect_image_id(pithos::docker::BASE_IMAGE_REF) {
+        Ok(id) => {
+            narrate(
+                style,
+                "»",
+                &format!("rebuilt {} -> {id}", pithos::docker::BASE_IMAGE_REF),
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            // Build succeeded but inspect failed — unusual, but report rather
+            // than masking with a success exit.
+            narrate(
+                style,
+                "» ERROR:",
+                &format!("build succeeded but inspect failed: {e}"),
+            );
+            ExitCode::from(1)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1497,7 +1627,7 @@ mod tests {
     #[test]
     fn help_text_lists_all_wired_subcommands() {
         let t = help_text();
-        for name in ["run", "build", "info", "clean", "help", "version"] {
+        for name in ["run", "build", "info", "clean", "rebuild-base", "help", "version"] {
             assert!(t.contains(name), "help missing subcommand {name:?}: {t}");
         }
     }
@@ -1759,6 +1889,58 @@ mod tests {
     fn subcommand_clean_requires_daemon() {
         assert!(Subcommand::Clean { all: false }.requires_daemon());
         assert!(Subcommand::Clean { all: true }.requires_daemon());
+    }
+
+    #[test]
+    fn from_args_rebuild_base_bare() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "rebuild-base"])),
+            Subcommand::RebuildBase
+        );
+    }
+
+    #[test]
+    fn from_args_rebuild_base_rejects_unknown_flag() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "rebuild-base", "--foo"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "--foo".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_rebuild_base_rejects_trailing_positional() {
+        // Mirrors `help extra` / `version extra` / `info extra` — a positional
+        // after a zero-arg subcommand is a Flag-kind reject.
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "rebuild-base", "extra"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "extra".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn subcommand_rebuild_base_requires_daemon() {
+        assert!(Subcommand::RebuildBase.requires_daemon());
+    }
+
+    #[test]
+    fn subcommand_rebuild_base_does_not_write_dockerfile() {
+        // The per-project Dockerfile under .pithos.d/ is never emitted by
+        // rebuild-base — locks the short-circuit in main().
+        assert!(!Subcommand::RebuildBase.writes_dockerfile());
+    }
+
+    #[test]
+    fn help_text_lists_rebuild_base() {
+        // Lock the rebuild-base entry in `pithos help` so a refactor that
+        // drops it from the prose still fails CI.
+        let t = help_text();
+        assert!(t.contains("rebuild-base"), "help missing rebuild-base: {t}");
     }
 
     #[test]

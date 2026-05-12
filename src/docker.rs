@@ -51,6 +51,87 @@ fn parse_image_ids(stdout: &str) -> Vec<String> {
         .collect()
 }
 
+/// Image reference for the local base image. Used by [`inspect_image_id`]
+/// bootstrap pull and by callers feeding the fingerprint pipeline.
+pub const BASE_IMAGE_REF: &str = "ghcr.io/anton-kochev/pithos:base";
+
+/// Resolve `image_ref` to its full content-addressed Image ID
+/// (`sha256:...`) via `docker inspect --format '{{.Id}}'`.
+///
+/// On a first-time machine the base image may not be present locally; if
+/// the initial inspect fails, this falls back to `docker pull <BASE_IMAGE_REF>`
+/// once and retries the inspect. The pull is gated to the base ref —
+/// arbitrary refs are NOT pulled — because this is the launcher's
+/// bootstrap path, not a generic image resolver.
+///
+/// Errors carry guidance for the user: rebuild the base via
+/// `pithos rebuild-base` or check network/auth for the GHCR pull.
+///
+/// Shells out to:
+///   `docker inspect --format '{{.Id}}' <image_ref>`
+/// (and, on miss, `docker pull <BASE_IMAGE_REF>`).
+pub fn inspect_image_id(image_ref: &str) -> std::io::Result<String> {
+    match inspect_image_id_once(image_ref) {
+        Ok(id) => Ok(id),
+        Err(_first_err) => {
+            let pull = Command::new("docker")
+                .args(["pull", BASE_IMAGE_REF])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()?;
+            if !pull.status.success() {
+                return Err(std::io::Error::other(format!(
+                    "docker pull {BASE_IMAGE_REF} failed (exit {:?}): {}\n\
+                     hint: run `pithos rebuild-base` from the pithos source tree, \
+                     or check network/auth for ghcr.io",
+                    pull.status.code(),
+                    String::from_utf8_lossy(&pull.stderr).trim_end()
+                )));
+            }
+            inspect_image_id_once(image_ref).map_err(|e| {
+                std::io::Error::other(format!(
+                    "{e}\nhint: run `pithos rebuild-base` from the pithos source tree, \
+                     or check network/auth for ghcr.io"
+                ))
+            })
+        }
+    }
+}
+
+/// One-shot `docker inspect --format '{{.Id}}' <image_ref>` with no
+/// fallback. Trims the trailing newline docker always emits. Split out so
+/// [`inspect_image_id`]'s pull-and-retry control flow is readable, and so
+/// the trim invariant is unit-testable via [`trim_inspect_id`].
+fn inspect_image_id_once(image_ref: &str) -> std::io::Result<String> {
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{.Id}}", image_ref])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "docker inspect {image_ref} failed (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim_end()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let trimmed = trim_inspect_id(&stdout);
+    if trimmed.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "docker inspect {image_ref} returned empty Id"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Trim helper for `docker inspect --format '{{.Id}}'` stdout: docker
+/// always emits exactly the value followed by `\n`, but defensively we
+/// strip ASCII whitespace from both ends so a future format tweak (CRLF
+/// on Windows, leading spaces) doesn't desync the fingerprint pipeline.
+/// Pure; trivially unit-testable without a daemon.
+fn trim_inspect_id(stdout: &str) -> &str {
+    stdout.trim()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ImageInfo {
     pub id: String,
@@ -315,6 +396,68 @@ pub fn build(
         return Err(BuildError::NonZero { code: status.code(), tail });
     }
     Ok(())
+}
+
+/// Build `Dockerfile.base` in `context` and tag it as [`BASE_IMAGE_REF`],
+/// for local-iteration use (`pithos rebuild-base`). Streams `docker build`
+/// output through the same dim/indented narration funnel as [`build`].
+///
+/// Distinct from [`build`] because the base image build:
+/// - takes no fingerprint label, no project tag, no extra version labels;
+/// - resolves the Dockerfile path relative to `context` (the pithos source
+///   tree, not a tempdir extracted from the embed bundle);
+/// - shares the per-project [`BuildError`] variants so callers funnel
+///   non-zero / spawn failures through one match arm.
+///
+/// Shells out to:
+///   `docker build --progress=plain -f Dockerfile.base -t <BASE_IMAGE_REF> <context>`
+pub fn build_base(context: &Path, style: Style) -> Result<(), BuildError> {
+    const TAIL_LINES: usize = 20;
+    let args = assemble_base_build_args(context);
+    let mut child = Command::new("docker")
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout = child.stdout.take().expect("stdout piped above");
+    let stderr = child.stderr.take().expect("stderr piped above");
+    let t_out = std::thread::spawn(move || {
+        crate::output::stream_lines(stdout, std::io::stderr(), style, TAIL_LINES)
+    });
+    let t_err = std::thread::spawn(move || {
+        crate::output::stream_lines(stderr, std::io::stderr(), style, TAIL_LINES)
+    });
+
+    let status = child.wait()?;
+    let stdout_tail = t_out.join().expect("stdout reader thread panicked");
+    let stderr_tail = t_err.join().expect("stderr reader thread panicked");
+
+    if !status.success() {
+        let tail = merge_tails(stderr_tail, stdout_tail, TAIL_LINES);
+        return Err(BuildError::NonZero {
+            code: status.code(),
+            tail,
+        });
+    }
+    Ok(())
+}
+
+/// Assemble the argv for the base-image `docker build`. Pure — split from
+/// [`build_base`] so the arg shape is unit-testable without a daemon.
+/// `Dockerfile.base` is referenced relative to the context dir; the caller
+/// guarantees the file exists (checked in `run_rebuild_base` before this
+/// path is even reached).
+fn assemble_base_build_args(context: &Path) -> Vec<OsString> {
+    vec![
+        "build".into(),
+        "--progress=plain".into(),
+        "-f".into(),
+        "Dockerfile.base".into(),
+        "-t".into(),
+        BASE_IMAGE_REF.into(),
+        context.into(),
+    ]
 }
 
 /// Assemble the argv for `docker build` per FR-401/402 plus resolved
@@ -706,6 +849,40 @@ mod tests {
     }
 
     #[test]
+    fn trim_inspect_id_strips_trailing_newline() {
+        // Real docker output: exactly one line, terminated by `\n`.
+        assert_eq!(trim_inspect_id("sha256:abc123\n"), "sha256:abc123");
+    }
+
+    #[test]
+    fn trim_inspect_id_strips_crlf() {
+        // Forward compat: defensive against future Windows / Git Bash quirks.
+        assert_eq!(trim_inspect_id("sha256:abc123\r\n"), "sha256:abc123");
+    }
+
+    #[test]
+    fn trim_inspect_id_strips_leading_and_trailing_whitespace() {
+        assert_eq!(trim_inspect_id("  sha256:abc\n"), "sha256:abc");
+    }
+
+    #[test]
+    fn trim_inspect_id_returns_empty_for_blank_input() {
+        // The caller (`inspect_image_id_once`) maps this to an explicit
+        // "empty Id" error — lock the precursor invariant here.
+        assert_eq!(trim_inspect_id("\n"), "");
+        assert_eq!(trim_inspect_id(""), "");
+    }
+
+    #[test]
+    fn base_image_ref_points_at_ghcr_pithos_base() {
+        // The bootstrap pull path keys on this constant; if it ever drifts
+        // away from the per-project Dockerfile FROM, cache invalidation
+        // silently desyncs. Lock both segments.
+        assert!(BASE_IMAGE_REF.starts_with("ghcr.io/"), "{BASE_IMAGE_REF}");
+        assert!(BASE_IMAGE_REF.ends_with(":base"), "{BASE_IMAGE_REF}");
+    }
+
+    #[test]
     fn parse_inspect_line_parses_full_record() {
         let line = "sha256:abc123|12345678|2026-04-24T10:30:00.123456789Z|deadbeef";
         let info = parse_inspect_line(line).unwrap();
@@ -1073,6 +1250,35 @@ mod tests {
         );
         // Context path is the final positional.
         assert_eq!(args.last(), Some(&OsString::from("/ctx")));
+    }
+
+    #[test]
+    fn assemble_base_build_args_uses_dockerfile_base_and_base_tag() {
+        let args = assemble_base_build_args(Path::new("/srv/pithos"));
+        assert_eq!(args.first(), Some(&OsString::from("build")));
+        assert!(args.contains(&OsString::from("--progress=plain")));
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-f" && w[1] == "Dockerfile.base"),
+            "missing -f Dockerfile.base pair in {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-t" && w[1] == BASE_IMAGE_REF),
+            "missing -t <BASE_IMAGE_REF> pair in {args:?}"
+        );
+        // Context path is the final positional.
+        assert_eq!(args.last(), Some(&OsString::from("/srv/pithos")));
+    }
+
+    #[test]
+    fn assemble_base_build_args_emits_no_labels() {
+        // The base image carries no pithos labels — those are per-project.
+        let args = assemble_base_build_args(Path::new("/srv/pithos"));
+        assert!(
+            !args.contains(&OsString::from("--label")),
+            "base build should not emit --label, got {args:?}"
+        );
     }
 
     #[test]
