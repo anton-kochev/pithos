@@ -63,7 +63,7 @@ pub fn emit(yaml: &YamlOwned) -> String {
         .unwrap();
         writeln!(
             out,
-            "RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@{version} && chown -R pi:pi /opt/pi-npm"
+            "RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@{version} && chown -R pi: /opt/pi-npm"
         )
         .unwrap();
     }
@@ -714,7 +714,7 @@ FROM ghcr.io/anton-kochev/pithos:base AS base
 USER root
 
 # Pi: pinned version from .pithos overrides the base image's floor. Ownership is reset so the pi user can read the install tree.
-RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@0.75.3 && chown -R pi:pi /opt/pi-npm
+RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@0.75.3 && chown -R pi: /opt/pi-npm
 
 # Pi-config defaults baked into /opt/pi-defaults/; entrypoint seeds them into the user's volume on first run. Tini handles PID 1 signal forwarding.
 COPY pi-config/ /opt/pi-defaults/
@@ -757,7 +757,7 @@ RUN /usr/local/bin/dotnet-install.sh 10.0.102
 RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 
 # Pi: pinned version from .pithos overrides the base image's floor. Ownership is reset so the pi user can read the install tree.
-RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@0.75.3 && chown -R pi:pi /opt/pi-npm
+RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@0.75.3 && chown -R pi: /opt/pi-npm
 
 # Pi-config defaults baked into /opt/pi-defaults/; entrypoint seeds them into the user's volume on first run. Tini handles PID 1 signal forwarding.
 COPY pi-config/ /opt/pi-defaults/
