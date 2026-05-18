@@ -673,3 +673,298 @@ fn first_invalid_toolchain_wins() {
         "first offender should win, got {err:?}"
     );
 }
+
+#[test]
+fn pi_absent_parses() {
+    // Arrange
+    let bytes = b"toolchains: {}\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn pi_valid_three_segment_version_parses() {
+    // Arrange
+    let bytes = include_bytes!("fixtures/valid_with_pi.pithos");
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn pi_valid_two_segment_version_parses() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75\"\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn pi_valid_one_segment_version_parses() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"1\"\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn pi_scalar_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi: \"0.75.3\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected pi-not-mapping error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::PiNotMapping), "got {err:?}");
+}
+
+#[test]
+fn pi_sequence_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  - version\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected pi-not-mapping error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::PiNotMapping), "got {err:?}");
+}
+
+#[test]
+fn pi_missing_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi: {}\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected missing-pi-version error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::MissingPiVersion), "got {err:?}");
+}
+
+#[test]
+fn pi_unknown_nested_key_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  release: \"0.75.3\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected unknown-pi-key error");
+
+    // Assert
+    let msg = err.to_string();
+    let ConfigError::UnknownPiKey { key } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(key, "release");
+    assert!(
+        msg.contains("version"),
+        "error message should list valid key `version`: {msg}"
+    );
+}
+
+#[test]
+fn pi_non_string_nested_key_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  42: \"0.75.3\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-pi-key error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::NonStringPiKey), "got {err:?}");
+}
+
+#[test]
+fn pi_floating_latest_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"latest\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected floating-pi-version error");
+
+    // Assert
+    let ConfigError::FloatingPiVersionRejected { value } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(value, "latest");
+}
+
+#[test]
+fn pi_floating_stable_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"stable\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected floating-pi-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::FloatingPiVersionRejected { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn pi_floating_nightly_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"nightly\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected floating-pi-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::FloatingPiVersionRejected { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn pi_non_string_version_rejected() {
+    // Arrange — unquoted float
+    let bytes = b"toolchains: {}\npi:\n  version: 0.75\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-pi-version error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::NonStringPiVersion), "got {err:?}");
+}
+
+#[test]
+fn pi_invalid_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.x\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-pi-version error");
+
+    // Assert
+    let ConfigError::InvalidPiVersion { value } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(value, "0.75.x");
+}
+
+#[test]
+fn pi_four_segment_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3.1\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-pi-version error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::InvalidPiVersion { .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn pi_floating_version_message_suggests_exact_version() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"latest\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected floating-pi-version error");
+
+    // Assert
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("exact"),
+        "error message should suggest an exact version: {msg}"
+    );
+}
+
+#[test]
+fn pi_non_string_version_message_instructs_quoting() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: 0.75\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-pi-version error");
+
+    // Assert
+    let msg = err.to_string();
+    let msg_lower = msg.to_lowercase();
+    assert!(
+        msg_lower.contains("pi.version"),
+        "message should name key path: {msg}"
+    );
+    assert!(
+        msg_lower.contains("quote"),
+        "message should tell user to quote: {msg}"
+    );
+    assert!(
+        msg.contains('"'),
+        "message should include a quoted example: {msg}"
+    );
+}
+
+#[test]
+fn pi_explicit_true_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: true\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-pi-version error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::NonStringPiVersion), "got {err:?}");
+}
+
+#[test]
+fn pi_explicit_false_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: false\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-pi-version error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::NonStringPiVersion), "got {err:?}");
+}
+
+#[test]
+fn pi_explicit_null_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi: ~\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected pi-not-mapping error");
+
+    // Assert
+    assert!(matches!(err, ConfigError::PiNotMapping), "got {err:?}");
+}
+
+#[test]
+fn pi_empty_string_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-pi-version error");
+
+    // Assert
+    let ConfigError::InvalidPiVersion { value } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(value, "");
+}

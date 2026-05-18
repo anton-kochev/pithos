@@ -1,7 +1,8 @@
 use std::fmt;
 
-pub(super) const VALID_TOP_LEVEL: &[&str] = &["toolchains", "extras"];
+pub(super) const VALID_TOP_LEVEL: &[&str] = &["toolchains", "extras", "pi"];
 pub(super) const VALID_EXTRAS: &[&str] = &["apt"];
+pub(super) const VALID_PI: &[&str] = &["version"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -69,6 +70,30 @@ pub enum ConfigError {
 
     #[error(".pithos extras.apt: invalid package name `{entry}`; must match `^[a-z0-9][a-z0-9.+-]+$`")]
     InvalidAptPackageName { entry: String },
+
+    #[error(".pithos: `pi` must be a mapping")]
+    PiNotMapping,
+
+    #[error(".pithos: `pi` keys must be strings")]
+    NonStringPiKey,
+
+    #[error(
+        ".pithos pi.{key}: unknown key; valid: {}",
+        ListBackticked(VALID_PI)
+    )]
+    UnknownPiKey { key: String },
+
+    #[error(".pithos pi: missing required key `version`")]
+    MissingPiVersion,
+
+    #[error(".pithos pi.version: must be a quoted string; wrap the value in quotes, e.g. `version: \"0.75.3\"`")]
+    NonStringPiVersion,
+
+    #[error(".pithos pi.version: version `{value}` must match `N`, `N.N`, or `N.N.N` (digits only)")]
+    InvalidPiVersion { value: String },
+
+    #[error(".pithos pi.version: version `{value}` is not accepted; specify an exact version like `0.75.3`")]
+    FloatingPiVersionRejected { value: String },
 }
 
 struct ListBackticked(&'static [&'static str]);

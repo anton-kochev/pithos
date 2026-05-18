@@ -1,6 +1,7 @@
 use saphyr::YamlOwned;
 
 use super::error::ConfigError;
+use super::version::is_valid_version;
 
 pub(super) fn validate(toolchains: &YamlOwned) -> Result<(), ConfigError> {
     let Some(mapping) = toolchains.as_mapping() else {
@@ -43,38 +44,3 @@ fn validate_version(toolchain: &str, value: &YamlOwned) -> Result<(), ConfigErro
     Ok(())
 }
 
-fn is_valid_version(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('.').collect();
-    (1..=3).contains(&parts.len())
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_valid_version;
-
-    #[test]
-    fn accepts_one_two_three_segment_numeric_versions() {
-        assert!(is_valid_version("1"));
-        assert!(is_valid_version("10"));
-        assert!(is_valid_version("1.85"));
-        assert!(is_valid_version("10.0.102"));
-    }
-
-    #[test]
-    fn rejects_four_segment_versions() {
-        assert!(!is_valid_version("1.2.3.4"));
-    }
-
-    #[test]
-    fn rejects_non_digit_segments() {
-        assert!(!is_valid_version("1.85-beta"));
-        assert!(!is_valid_version("v1.2"));
-        assert!(!is_valid_version("1..2"));
-        assert!(!is_valid_version(""));
-        assert!(!is_valid_version(".1"));
-        assert!(!is_valid_version("1."));
-    }
-}

@@ -1,6 +1,8 @@
 mod error;
 mod extras;
+mod pi;
 mod toolchains;
+mod version;
 
 use saphyr::{LoadableYamlNode, ScalarOwned, YamlOwned};
 
@@ -13,10 +15,11 @@ fn first_or_empty(docs: Vec<YamlOwned>) -> YamlOwned {
         .unwrap_or(YamlOwned::Value(ScalarOwned::Null))
 }
 
-/// Returns `(toolchains, extras)` — `extras` is `None` when the key is absent.
+/// Returns `(toolchains, extras, pi)` — `extras` and `pi` are `None` when their
+/// keys are absent.
 fn validate_top_level(
     doc: &YamlOwned,
-) -> Result<(&YamlOwned, Option<&YamlOwned>), ConfigError> {
+) -> Result<(&YamlOwned, Option<&YamlOwned>, Option<&YamlOwned>), ConfigError> {
     let Some(mapping) = doc.as_mapping() else {
         // Null, scalar, or sequence — none of these carry a `toolchains` key.
         return Err(ConfigError::MissingToolchains);
@@ -24,6 +27,7 @@ fn validate_top_level(
 
     let mut toolchains: Option<&YamlOwned> = None;
     let mut extras: Option<&YamlOwned> = None;
+    let mut pi: Option<&YamlOwned> = None;
     for (key, value) in mapping {
         let Some(name) = key.as_str() else {
             return Err(ConfigError::NonStringTopLevelKey);
@@ -36,12 +40,13 @@ fn validate_top_level(
         match name {
             "toolchains" => toolchains = Some(value),
             "extras" => extras = Some(value),
+            "pi" => pi = Some(value),
             _ => {}
         }
     }
 
     let toolchains = toolchains.ok_or(ConfigError::MissingToolchains)?;
-    Ok((toolchains, extras))
+    Ok((toolchains, extras, pi))
 }
 
 pub fn load(bytes: &[u8]) -> Result<YamlOwned, ConfigError> {
@@ -56,10 +61,13 @@ pub fn load(bytes: &[u8]) -> Result<YamlOwned, ConfigError> {
     })?;
     // Multi-doc rejection is deferred per the 1.1 plan — take the first.
     let doc = first_or_empty(docs);
-    let (toolchains, extras) = validate_top_level(&doc)?;
+    let (toolchains, extras, pi) = validate_top_level(&doc)?;
     toolchains::validate(toolchains)?;
     if let Some(extras) = extras {
         extras::validate(extras)?;
+    }
+    if let Some(pi) = pi {
+        pi::validate(pi)?;
     }
     Ok(doc)
 }

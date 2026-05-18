@@ -47,12 +47,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin UV_UNMANAGED_INSTALL=1 sh
 
 # --- Pi coding agent (global npm install to /opt/pi-npm) ---
-# Prefix is owned by the pi user (UID/GID from build ARGs) so the entrypoint
-# can run `npm install -g ... @latest` at runtime without sudo. The image
-# ships a known floor (0.73.1); the entrypoint auto-upgrades on startup
-# when the network is reachable, otherwise the baked version stays.
+# Prefix is owned by the pi user (UID/GID from build ARGs) so per-project
+# Dockerfiles can re-install pi at build time without sudo. This is the
+# floor used when `.pithos` does not pin `pi.version`; rebuild the base
+# image to bump the floor.
 RUN mkdir -p /opt/pi-npm \
-  && npm install --prefix=/opt/pi-npm -g @mariozechner/pi-coding-agent@0.73.1 \
+  && npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@0.75.3 \
   && chown -R ${HOST_UID}:${HOST_GID} /opt/pi-npm
 
 # --- Create the pi user (UID-matched to macOS default 501:20) ---
