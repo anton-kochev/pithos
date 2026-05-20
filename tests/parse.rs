@@ -968,3 +968,282 @@ fn pi_empty_string_version_rejected() {
     };
     assert_eq!(value, "");
 }
+
+#[test]
+fn pi_extensions_empty_mapping_parses() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions: {}\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn pi_extensions_valid_npm_parses() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    pi-web-access: \"npm:0.10.7\"\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn pi_extensions_valid_git_parses() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    agent-stuff: \"git:https://github.com/mitsuhiko/agent-stuff#v1.0.0\"\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn pi_extensions_mixed_npm_and_git_parses() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    pi-web-access: \"npm:0.10.7\"\n    agent-stuff: \"git:https://github.com/mitsuhiko/agent-stuff#main\"\n";
+
+    // Act
+    let result = load(bytes);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
+fn pi_extensions_scalar_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions: \"npm:0.10.7\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected extensions-not-mapping error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::ExtensionsNotMapping),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn pi_extensions_sequence_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    - foo\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected extensions-not-mapping error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::ExtensionsNotMapping),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn pi_extensions_non_string_key_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    42: \"npm:0.10.7\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-extension-name error");
+
+    // Assert
+    assert!(
+        matches!(err, ConfigError::NonStringExtensionName),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn pi_extensions_non_string_value_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: 42\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected non-string-extension-spec error");
+
+    // Assert
+    let ConfigError::NonStringExtensionSpec { name } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(name, "foo");
+}
+
+#[test]
+fn pi_extensions_missing_prefix_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"0.10.7\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-extension-prefix error");
+
+    // Assert
+    let ConfigError::InvalidExtensionPrefix { name, value } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(name, "foo");
+    assert_eq!(value, "0.10.7");
+}
+
+#[test]
+fn pi_extensions_unknown_prefix_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"http:example.com\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-extension-prefix error");
+
+    // Assert
+    let ConfigError::InvalidExtensionPrefix { name, value } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(name, "foo");
+    assert_eq!(value, "http:example.com");
+}
+
+#[test]
+fn pi_extensions_floating_npm_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"npm:latest\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected floating-extension-version error");
+
+    // Assert
+    let ConfigError::FloatingExtensionVersionRejected { name, value } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(name, "foo");
+    assert_eq!(value, "latest");
+}
+
+#[test]
+fn pi_extensions_malformed_npm_version_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"npm:1.x\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-extension-version error");
+
+    // Assert
+    let ConfigError::InvalidExtensionVersion { name, value } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(name, "foo");
+    assert_eq!(value, "1.x");
+}
+
+#[test]
+fn pi_extensions_git_missing_ref_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"git:https://example.com/repo\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected missing-git-ref error");
+
+    // Assert
+    let ConfigError::MissingExtensionGitRef { name, value } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(name, "foo");
+    assert_eq!(value, "git:https://example.com/repo");
+}
+
+#[test]
+fn pi_extensions_git_empty_url_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"git:#main\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected empty-git-url error");
+
+    // Assert
+    let ConfigError::EmptyExtensionGitUrl { name } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(name, "foo");
+}
+
+#[test]
+fn pi_extensions_git_empty_ref_rejected() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"git:https://example.com/repo#\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected empty-git-ref error");
+
+    // Assert
+    let ConfigError::EmptyExtensionGitRef { name } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(name, "foo");
+}
+
+#[test]
+fn pi_extensions_unknown_pi_key_still_rejected() {
+    // Arrange — extensions present alongside an unknown key — still errors on the unknown
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions: {}\n  bogus: x\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected unknown-pi-key error");
+
+    // Assert
+    let ConfigError::UnknownPiKey { key } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(key, "bogus");
+}
+
+#[test]
+fn pi_extensions_invalid_prefix_message_lists_valid_prefixes() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"0.10.7\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected invalid-extension-prefix error");
+
+    // Assert — message names both prefixes so users can self-correct
+    let msg = err.to_string();
+    assert!(msg.contains("npm:"), "message should name npm prefix: {msg}");
+    assert!(msg.contains("git:"), "message should name git prefix: {msg}");
+}
+
+#[test]
+fn pi_extensions_floating_message_suggests_exact_version() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"npm:latest\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected floating-extension-version error");
+
+    // Assert
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("exact"),
+        "error message should suggest an exact version: {msg}"
+    );
+}
+
+#[test]
+fn pi_extensions_git_missing_ref_message_suggests_fragment() {
+    // Arrange
+    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"git:https://example.com/repo\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected missing-git-ref error");
+
+    // Assert
+    let msg = err.to_string();
+    assert!(
+        msg.contains('#'),
+        "error message should show the # ref syntax: {msg}"
+    );
+}

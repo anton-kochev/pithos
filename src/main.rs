@@ -263,8 +263,17 @@ fn main() -> ExitCode {
     };
     let dockerfile_path = cwd.join(".pithos.d").join("Dockerfile");
     let dockerfile_content = pithos::dockerfile::emit(&yaml);
+    let extensions_manifest_path = cwd.join(".pithos.d").join("extensions.list");
+    let extensions_manifest_content = pithos::extensions::manifest(&yaml);
     if subcommand.writes_dockerfile() {
         if let Err(code) = write_dockerfile(&dockerfile_path, &dockerfile_content, style) {
+            return code;
+        }
+        if let Err(code) = write_dockerfile(
+            &extensions_manifest_path,
+            &extensions_manifest_content,
+            style,
+        ) {
             return code;
         }
     }
@@ -770,12 +779,14 @@ fn run_run(
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from);
     let env_file = discover_env_file(cwd);
+    let extensions_manifest_path = cwd.join(".pithos.d").join("extensions.list");
 
     match pithos::docker::run(
         &ensured.tag,
         &ensured.project,
         cwd,
         pithos_repo.as_deref(),
+        Some(&extensions_manifest_path),
         env_file.as_deref(),
         cmd,
     ) {

@@ -32,6 +32,50 @@ if [[ -d "$DEFAULTS_DIR" ]]; then
   cp -rn "$DEFAULTS_DIR"/. "$PI_AGENT_DIR"/ 2>/dev/null || true
 fi
 
+# ─── Job 1b: reconcile pi.extensions from /etc/pithos/extensions.list ─
+# Pithos mounts this manifest read-only when `.pithos` declares
+# `pi.extensions`. Each line is `<name>\t<spec>` where `<spec>` is
+# `npm:<version>` or `git:<url>#<ref>`. Additive only — never touches
+# extensions already present at ~/.pi/agent/extensions/<name>/. Per-line
+# failures are warned and skipped so one bad spec doesn't break startup.
+MANIFEST="/etc/pithos/extensions.list"
+EXT_ROOT="$PI_AGENT_DIR/extensions"
+if [[ -r "$MANIFEST" ]]; then
+  mkdir -p "$EXT_ROOT"
+  while IFS=$'\t' read -r ext_name ext_spec; do
+    [[ -z "$ext_name" ]] && continue
+    dest="$EXT_ROOT/$ext_name"
+    if [[ -e "$dest" ]]; then
+      continue
+    fi
+    case "$ext_spec" in
+      npm:*)
+        ext_version="${ext_spec#npm:}"
+        if ! pi install "npm:${ext_name}@${ext_version}" >&2; then
+          echo "pithos: warning: failed to install npm extension ${ext_name}@${ext_version}" >&2
+        fi
+        ;;
+      git:*)
+        rest="${ext_spec#git:}"
+        ext_url="${rest%#*}"
+        ext_ref="${rest##*#}"
+        if git clone --branch "$ext_ref" --depth 1 "$ext_url" "$dest" >&2; then
+          if [[ -f "$dest/package.json" ]]; then
+            (cd "$dest" && npm install --no-audit --no-fund >&2) \
+              || echo "pithos: warning: npm install failed for ${ext_name}; extension may not load" >&2
+          fi
+        else
+          echo "pithos: warning: failed to clone git extension ${ext_name} from ${ext_url}#${ext_ref}" >&2
+          rm -rf "$dest"
+        fi
+        ;;
+      *)
+        echo "pithos: warning: ignoring extension ${ext_name} with unknown spec ${ext_spec}" >&2
+        ;;
+    esac
+  done < "$MANIFEST"
+fi
+
 # ─── Job 2: set git identity from env vars ───────────────────────────
 # Values come from .env via the pithos launcher's --env-file flag.
 # If unset, skip silently — allows the image to work without them too.

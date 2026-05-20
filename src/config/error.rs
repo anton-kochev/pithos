@@ -2,7 +2,7 @@ use std::fmt;
 
 pub(super) const VALID_TOP_LEVEL: &[&str] = &["toolchains", "extras", "pi"];
 pub(super) const VALID_EXTRAS: &[&str] = &["apt"];
-pub(super) const VALID_PI: &[&str] = &["version"];
+pub(super) const VALID_PI: &[&str] = &["version", "extensions"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -94,6 +94,33 @@ pub enum ConfigError {
 
     #[error(".pithos pi.version: version `{value}` is not accepted; specify an exact version like `0.75.3`")]
     FloatingPiVersionRejected { value: String },
+
+    #[error(".pithos pi.extensions: must be a mapping")]
+    ExtensionsNotMapping,
+
+    #[error(".pithos pi.extensions: keys must be strings")]
+    NonStringExtensionName,
+
+    #[error(".pithos pi.extensions.{name}: must be a quoted string with prefix `npm:` or `git:`, e.g. `\"npm:0.10.7\"` or `\"git:https://example.com/repo#v1.0.0\"`")]
+    NonStringExtensionSpec { name: String },
+
+    #[error(".pithos pi.extensions.{name}: spec `{value}` must start with `npm:` or `git:`")]
+    InvalidExtensionPrefix { name: String, value: String },
+
+    #[error(".pithos pi.extensions.{name}: npm version `{value}` is not accepted; specify an exact version like `npm:0.10.7`")]
+    FloatingExtensionVersionRejected { name: String, value: String },
+
+    #[error(".pithos pi.extensions.{name}: npm version `{value}` must match `N`, `N.N`, or `N.N.N` (digits only)")]
+    InvalidExtensionVersion { name: String, value: String },
+
+    #[error(".pithos pi.extensions.{name}: git spec `{value}` must include a ref, e.g. `git:https://example.com/repo#v1.0.0`")]
+    MissingExtensionGitRef { name: String, value: String },
+
+    #[error(".pithos pi.extensions.{name}: git URL is empty")]
+    EmptyExtensionGitUrl { name: String },
+
+    #[error(".pithos pi.extensions.{name}: git ref is empty")]
+    EmptyExtensionGitRef { name: String },
 }
 
 struct ListBackticked(&'static [&'static str]);

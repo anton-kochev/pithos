@@ -763,15 +763,20 @@ pub enum RunError {
 ///
 /// `pithos_repo` is the host path whose `pi-config/` subtree gets
 /// bind-mounted as Layer 3 (per-item if the path exists). `None` skips
-/// Layer 3 entirely. `env_file` is the path to `.env`; caller passes
-/// `None` when absent. `cmd` is appended after the image tag; an empty
-/// slice means docker falls through to the Dockerfile's `CMD` (FR-502).
+/// Layer 3 entirely. `extensions_manifest` is the host path to the
+/// generated `.pithos.d/extensions.list`; when present, it is bind-mounted
+/// read-only at `/etc/pithos/extensions.list` so the container entrypoint
+/// can reconcile declared Pi extensions on startup. Missing file is a
+/// silent skip. `env_file` is the path to `.env`; caller passes `None`
+/// when absent. `cmd` is appended after the image tag; an empty slice
+/// means docker falls through to the Dockerfile's `CMD` (FR-502).
 ///
 /// Shells out to:
 ///   docker run --rm -it --name ... --hostname ... --user 501:20
 ///              -v <PWD>:/workspace/<project>:cached
 ///              -v pithos-home-<project>:/home/pi
 ///              [-v <PITHOS_REPO>/pi-config/... per Layer 3 item, if exists]
+///              [-v <extensions_manifest>:/etc/pithos/extensions.list:ro, if file exists]
 ///              [--env-file <.env>, if Some]
 ///              -w /workspace/<project>  <image_tag> [<cmd>...]
 pub fn run(
@@ -779,10 +784,19 @@ pub fn run(
     project: &str,
     workspace: &Path,
     pithos_repo: Option<&Path>,
+    extensions_manifest: Option<&Path>,
     env_file: Option<&Path>,
     cmd: &[String],
 ) -> Result<std::process::ExitStatus, RunError> {
-    let args = assemble_run_args(image_tag, project, workspace, pithos_repo, env_file, cmd);
+    let args = assemble_run_args(
+        image_tag,
+        project,
+        workspace,
+        pithos_repo,
+        extensions_manifest,
+        env_file,
+        cmd,
+    );
     // Stdio::inherit is the default; be explicit so a future refactor
     // pulling in stream_lines for "consistency with build" doesn't
     // accidentally swallow the user's TTY.
@@ -804,6 +818,7 @@ fn assemble_run_args(
     project: &str,
     workspace: &Path,
     pithos_repo: Option<&Path>,
+    extensions_manifest: Option<&Path>,
     env_file: Option<&Path>,
     cmd: &[String],
 ) -> Vec<OsString> {
@@ -851,6 +866,16 @@ fn assemble_run_args(
                 args.push("-v".into());
                 args.push(bind);
             }
+        }
+    }
+    if let Some(manifest) = extensions_manifest {
+        if manifest.exists() {
+            let mut bind = OsString::from(manifest);
+            bind.push(":");
+            bind.push("/etc/pithos/extensions.list");
+            bind.push(":ro");
+            args.push("-v".into());
+            args.push(bind);
         }
     }
     if let Some(env_path) = env_file {
@@ -999,6 +1024,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
+            None,
             &[],
         );
         assert!(args.contains(&OsString::from("--rm")));
@@ -1018,6 +1044,7 @@ mod tests {
             "pithos:demo",
             "demo",
             Path::new("/tmp/x"),
+            None,
             None,
             None,
             &[],
@@ -1043,6 +1070,7 @@ mod tests {
             Path::new("/tmp/demo-ws"),
             None,
             None,
+            None,
             &[],
         );
         assert!(
@@ -1063,6 +1091,7 @@ mod tests {
             "pithos:demo",
             "demo",
             Path::new("/tmp/x"),
+            None,
             None,
             None,
             &[],
@@ -1090,6 +1119,7 @@ mod tests {
             Path::new("/tmp/x"),
             Some(td.path()),
             None,
+            None,
             &[],
         );
         for (i, arg) in args.iter().enumerate() {
@@ -1113,6 +1143,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
+            None,
             &[],
         );
         assert!(!args.contains(&OsString::from("--env-file")));
@@ -1124,6 +1155,7 @@ mod tests {
             "pithos:demo",
             "demo",
             Path::new("/tmp/x"),
+            None,
             None,
             Some(Path::new("/tmp/.env")),
             &[],
@@ -1147,6 +1179,7 @@ mod tests {
             "demo",
             Path::new("/tmp/x"),
             Some(td.path()),
+            None,
             None,
             &[],
         );
@@ -1188,6 +1221,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
+            None,
             &[],
         );
         assert!(
@@ -1207,6 +1241,7 @@ mod tests {
             Path::new("/work"),
             None,
             None,
+            None,
             &cmd,
         );
         let n = args.len();
@@ -1223,6 +1258,7 @@ mod tests {
             "pithos:proj",
             "proj",
             Path::new("/work"),
+            None,
             None,
             None,
             &[],
@@ -1642,5 +1678,65 @@ mod tests {
         // BTreeMap iterates sort-by-key regardless of insertion/stdout order.
         let keys: Vec<&String> = parsed.keys().collect();
         assert_eq!(keys, vec![&"dotnet".to_string(), &"rust".to_string()]);
+    }
+
+    #[test]
+    fn assemble_run_args_mounts_extensions_manifest_when_file_exists() {
+        // Arrange
+        let td = tempfile::tempdir().unwrap();
+        let manifest = td.path().join("extensions.list");
+        std::fs::write(&manifest, "dotnet\nrust\n").unwrap();
+
+        // Act
+        let args = assemble_run_args(
+            "pithos:demo",
+            "demo",
+            Path::new("/tmp/x"),
+            None,
+            Some(&manifest),
+            None,
+            &[],
+        );
+
+        // Assert
+        let expected_bind = {
+            let mut s = OsString::from(&manifest);
+            s.push(":/etc/pithos/extensions.list:ro");
+            s
+        };
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-v" && w[1] == expected_bind),
+            "missing extensions-manifest bind in {args:?}"
+        );
+    }
+
+    #[test]
+    fn assemble_run_args_omits_extensions_manifest_when_file_missing() {
+        // Arrange
+        // Path is well-formed but the file does not exist — probe must
+        // skip the mount silently (mirrors the pi-config item behavior).
+        let td = tempfile::tempdir().unwrap();
+        let manifest = td.path().join("nope.list");
+        assert!(!manifest.exists());
+
+        // Act
+        let args = assemble_run_args(
+            "pithos:demo",
+            "demo",
+            Path::new("/tmp/x"),
+            None,
+            Some(&manifest),
+            None,
+            &[],
+        );
+
+        // Assert
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.to_string_lossy().contains("/etc/pithos/extensions.list")),
+            "extensions-manifest bind should be absent when file does not exist: {args:?}"
+        );
     }
 }
