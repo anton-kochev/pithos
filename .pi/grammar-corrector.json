@@ -1,0 +1,5 @@
+{
+  "mode": "on",
+  "model": "openai-codex/gpt-5.4-mini",
+  "maxInputChars": 500
+}

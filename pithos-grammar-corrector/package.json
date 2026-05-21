@@ -1,0 +1,27 @@
+{
+  "name": "pithos-grammar-corrector",
+  "version": "0.1.0",
+  "description": "Automatic grammar correction extension for pithos/pi user prompts.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "grammar",
+    "writing"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "extensions",
+    "README.md"
+  ]
+}
