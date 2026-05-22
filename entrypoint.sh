@@ -59,15 +59,10 @@ if [[ -r "$MANIFEST" ]]; then
         rest="${ext_spec#git:}"
         ext_url="${rest%#*}"
         ext_ref="${rest##*#}"
-        if git clone --branch "$ext_ref" --depth 1 "$ext_url" "$dest" >&2; then
-          if [[ -f "$dest/package.json" ]]; then
-            (cd "$dest" && npm install --no-audit --no-fund >&2) \
-              || echo "pithos: warning: npm install failed for ${ext_name}; extension may not load" >&2
-          fi
-        else
-          echo "pithos: warning: failed to clone git extension ${ext_name} from ${ext_url}#${ext_ref}" >&2
-          rm -rf "$dest"
-        fi
+        pi_err=$(pi install "git:${ext_url}@${ext_ref}" 2>&1 >&2) || {
+          echo "pithos: warning: failed to install git extension ${ext_name} from ${ext_url}@${ext_ref}" >&2
+          [[ -n "$pi_err" ]] && echo "pithos:   pi stderr: ${pi_err}" >&2
+        }
         ;;
       *)
         echo "pithos: warning: ignoring extension ${ext_name} with unknown spec ${ext_spec}" >&2
