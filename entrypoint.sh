@@ -35,27 +35,54 @@ fi
 # ─── Job 1b: reconcile pi.extensions from /etc/pithos/extensions.list ─
 # Pithos mounts this manifest read-only when `.pithos` declares
 # `pi.extensions`. Each line is `<name>\t<spec>` where `<spec>` is
-# `npm:<version>` or `git:<url>#<ref>`. Additive only — never touches
-# extensions already present at ~/.pi/agent/extensions/<name>/. Per-line
-# failures are warned and skipped so one bad spec doesn't break startup.
+# `npm:<version>` or `git:<url>#<ref>`. Per-line failures are warned and
+# skipped so one bad spec doesn't break startup.
+#
+# npm: drift-aware. Reads the pinned version from ~/.pi/agent/settings.json
+# (via jq, baked into the base image). Matching version → no-op. Different
+# pinned version → `pi remove` then `pi install`. pi's own install command
+# strips the version from its match key, so without the explicit remove it
+# would silently leave the old pinned entry intact while updating the npm
+# cache — Pi would keep loading the old version on startup.
+#
+# git: still additive-only via the extensions-dir existence check (no drift
+# detection yet — same bug class on pi's side, but no concrete report).
 MANIFEST="/etc/pithos/extensions.list"
 EXT_ROOT="$PI_AGENT_DIR/extensions"
 if [[ -r "$MANIFEST" ]]; then
   mkdir -p "$EXT_ROOT"
   while IFS=$'\t' read -r ext_name ext_spec; do
     [[ -z "$ext_name" ]] && continue
-    dest="$EXT_ROOT/$ext_name"
-    if [[ -e "$dest" ]]; then
-      continue
-    fi
     case "$ext_spec" in
       npm:*)
         ext_version="${ext_spec#npm:}"
+        settings="$PI_AGENT_DIR/settings.json"
+        pinned=""
+        if [[ -r "$settings" ]]; then
+          pinned=$(jq -r --arg name "$ext_name" '
+            .packages // []
+            | map(if type == "string" then . else .source end)
+            | map(select(startswith("npm:" + $name + "@")))
+            | (.[0] // "")
+            | ltrimstr("npm:" + $name + "@")
+          ' "$settings" 2>/dev/null || echo "")
+        fi
+        if [[ "$pinned" == "$ext_version" ]]; then
+          continue
+        fi
+        if [[ -n "$pinned" ]]; then
+          if ! pi remove "npm:${ext_name}" >&2; then
+            echo "pithos: warning: failed to remove stale ${ext_name}@${pinned} before upgrade" >&2
+          fi
+        fi
         if ! pi install "npm:${ext_name}@${ext_version}" >&2; then
           echo "pithos: warning: failed to install npm extension ${ext_name}@${ext_version}" >&2
         fi
         ;;
       git:*)
+        if [[ -e "$EXT_ROOT/$ext_name" ]]; then
+          continue
+        fi
         rest="${ext_spec#git:}"
         ext_url="${rest%#*}"
         ext_ref="${rest##*#}"
