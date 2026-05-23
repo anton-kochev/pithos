@@ -96,6 +96,33 @@ if [[ -r "$MANIFEST" ]]; then
         ;;
     esac
   done < "$MANIFEST"
+
+  # ─── Job 1c: prune npm extensions absent from the manifest ──────────
+  # The reconcile loop above installs and upgrades but never removes.
+  # Without this pass, an npm extension dropped from .pithos lingers in
+  # ~/.pi/agent/settings.json forever (the project volume persists it)
+  # and keeps exporting commands on every startup — visible to the user
+  # as duplicated `/cmd:1, /cmd:2` entries.
+  #
+  # npm only. Git extensions stay additive-only (see lines 48-49).
+  settings="$PI_AGENT_DIR/settings.json"
+  if [[ -r "$settings" ]]; then
+    manifest_npm_names=$(awk -F'\t' '$2 ~ /^npm:/ { print $1 }' "$MANIFEST")
+    while IFS= read -r installed; do
+      [[ -z "$installed" ]] && continue
+      if ! printf '%s\n' "$manifest_npm_names" | grep -Fxq -- "$installed"; then
+        if ! pi remove "npm:${installed}" >&2; then
+          echo "pithos: warning: failed to prune stale ${installed}" >&2
+        fi
+      fi
+    done < <(jq -r '
+      .packages // []
+      | map(if type == "string" then . else .source end)
+      | map(select(startswith("npm:")))
+      | map(sub("^npm:"; "") | sub("@[^@]*$"; ""))
+      | .[]
+    ' "$settings" 2>/dev/null)
+  fi
 fi
 
 # ─── Job 2: set git identity from env vars ───────────────────────────
