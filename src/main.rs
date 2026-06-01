@@ -2066,13 +2066,11 @@ mod tests {
                 id: "sha256:abc123def456ghi".into(),
                 tag: Some("pithos:widgets".into()),
                 created: "2026-04-24".into(),
-                fingerprint: Some("fp".into()),
             },
             pithos::docker::PithosImage {
                 id: "sha256:zzz999".into(),
                 tag: None,
                 created: "2026-04-25".into(),
-                fingerprint: Some("fp2".into()),
             },
         ];
         let lines = render_candidate_lines(&imgs);
@@ -2086,13 +2084,11 @@ mod tests {
                 id: "sha256:first".into(),
                 tag: Some("pithos:a".into()),
                 created: "2026-04-24".into(),
-                fingerprint: None,
             },
             pithos::docker::PithosImage {
                 id: "sha256:second".into(),
                 tag: Some("pithos:b".into()),
                 created: "2026-04-25".into(),
-                fingerprint: None,
             },
         ];
         let lines = render_candidate_lines(&imgs);
@@ -2106,7 +2102,6 @@ mod tests {
             id: "sha256:abc".into(),
             tag: None,
             created: "2026-04-24".into(),
-            fingerprint: Some("fp".into()),
         }];
         let lines = render_candidate_lines(&imgs);
         assert!(lines[0].contains("<none>"), "{:?}", lines);
@@ -2117,7 +2112,6 @@ mod tests {
             id: id.to_string(),
             tag: tag.map(String::from),
             created: "2026-04-24".into(),
-            fingerprint: None,
         }
     }
 

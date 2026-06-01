@@ -216,19 +216,18 @@ fn parse_inspect_line(line: &str) -> Option<ImageInfo> {
 }
 
 /// One row of the `pithos clean` candidate list. `tag` is `None` for dangling
-/// images (no repository:tag pair); `fingerprint` is `None` when the
-/// `dev.pithos.fingerprint` label is absent or the docker template emitted
-/// `<no value>`.
+/// images (no repository:tag pair).
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PithosImage {
     pub id: String,
     pub tag: Option<String>,
     pub created: String,
-    pub fingerprint: Option<String>,
 }
 
-const PITHOS_IMAGE_TEMPLATE: &str =
-    r#"{{.ID}}|{{.Repository}}:{{.Tag}}|{{.CreatedAt}}|{{.Label "dev.pithos.fingerprint"}}"#;
+// `docker image ls --format` has no per-label accessor (its `imageContext`
+// exposes none of `.Label`/`.Labels`), so the fingerprint is filtered on via
+// the `--filter label=` arg rather than read out of the format here.
+const PITHOS_IMAGE_TEMPLATE: &str = r#"{{.ID}}|{{.Repository}}:{{.Tag}}|{{.CreatedAt}}"#;
 
 /// List dangling images carrying the `dev.pithos.fingerprint` label —
 /// previous-build leftovers from `pithos build` rebuilds.
@@ -314,16 +313,18 @@ fn parse_pithos_image_lines(stdout: &str) -> Vec<PithosImage> {
 }
 
 /// Parse one line of `docker image ls --format <TEMPLATE>` output into a
-/// `PithosImage`. Pure. `splitn(4, '|')` so a `|` embedded in a label value
-/// falls into the trailing field rather than desyncing columns. Tag literal
+/// `PithosImage`. Pure. The template emits 3 columns. `splitn(3, '|')` (mirroring
+/// `parse_inspect_line`'s `splitn(4)`) makes any stray trailing `|` — e.g. a
+/// stale 4-column line from an older template — collapse into `created` rather
+/// than desyncing columns or tripping the `len != 3` reject. Tag literal
 /// `<none>:<none>` (docker's dangling marker) maps to `tag: None`.
 fn parse_pithos_image_line(line: &str) -> Option<PithosImage> {
     let line = line.trim_end_matches('\r').trim();
     if line.is_empty() {
         return None;
     }
-    let parts: Vec<&str> = line.splitn(4, '|').collect();
-    if parts.len() != 4 {
+    let parts: Vec<&str> = line.splitn(3, '|').collect();
+    if parts.len() != 3 {
         return None;
     }
     let id = parts[0].to_string();
@@ -335,16 +336,7 @@ fn parse_pithos_image_line(line: &str) -> Option<PithosImage> {
         v => Some(v.to_string()),
     };
     let created = parts[2].to_string();
-    let fingerprint = match parts[3] {
-        "" | "<no value>" => None,
-        v => Some(v.to_string()),
-    };
-    Some(PithosImage {
-        id,
-        tag,
-        created,
-        fingerprint,
-    })
+    Some(PithosImage { id, tag, created })
 }
 
 /// Failure modes for [`build`]. `Spawn` covers the executable not being
@@ -1584,60 +1576,45 @@ mod tests {
 
     #[test]
     fn parse_pithos_image_line_parses_tagged_entry() {
-        let line = "sha256:abc123|pithos:widgets|2026-04-24 10:30:00 +0000 UTC|deadbeef";
+        let line = "sha256:abc123|pithos:widgets|2026-04-24 10:30:00 +0000 UTC";
         let img = parse_pithos_image_line(line).unwrap();
         assert_eq!(img.id, "sha256:abc123");
         assert_eq!(img.tag.as_deref(), Some("pithos:widgets"));
         assert_eq!(img.created, "2026-04-24 10:30:00 +0000 UTC");
-        assert_eq!(img.fingerprint.as_deref(), Some("deadbeef"));
     }
 
     #[test]
     fn parse_pithos_image_line_parses_dangling_entry() {
-        let line = "sha256:abc123|<none>:<none>|2026-04-24 10:30:00 +0000 UTC|deadbeef";
+        let line = "sha256:abc123|<none>:<none>|2026-04-24 10:30:00 +0000 UTC";
         let img = parse_pithos_image_line(line).unwrap();
         assert!(img.tag.is_none());
-        assert_eq!(img.fingerprint.as_deref(), Some("deadbeef"));
     }
 
     #[test]
-    fn parse_pithos_image_line_treats_no_value_label_as_absent_fingerprint() {
-        let line = "sha256:abc123|pithos:widgets|2026-04-24|<no value>";
+    fn parse_pithos_image_line_absorbs_trailing_pipes_into_created() {
+        // Pins the splitn(3) tolerance of stale 4-column lines: a leftover
+        // trailing field from an older template folds into `created` rather
+        // than desyncing columns or tripping the `len != 3` reject.
+        let line = "sha256:abc|pithos:widgets|2026-04-24|legacy-fp";
         let img = parse_pithos_image_line(line).unwrap();
-        assert!(img.fingerprint.is_none());
-    }
-
-    #[test]
-    fn parse_pithos_image_line_treats_empty_label_as_absent_fingerprint() {
-        let line = "sha256:abc123|pithos:widgets|2026-04-24|";
-        let img = parse_pithos_image_line(line).unwrap();
-        assert!(img.fingerprint.is_none());
-    }
-
-    #[test]
-    fn parse_pithos_image_line_preserves_pipe_in_label_via_splitn() {
-        // Even though pithos doesn't write pipes in labels today, the parser must
-        // not desync if a future label or a foreign label leaks through.
-        let line = "sha256:abc|pithos:widgets|2026-04-24|abc|123|extra";
-        let img = parse_pithos_image_line(line).unwrap();
-        assert_eq!(img.fingerprint.as_deref(), Some("abc|123|extra"));
+        assert_eq!(img.created, "2026-04-24|legacy-fp");
     }
 
     #[test]
     fn parse_pithos_image_line_tolerates_crlf() {
-        let line = "sha256:abc|pithos:demo|2026-04-24|fp\r";
+        let line = "sha256:abc|pithos:demo|2026-04-24\r";
         let img = parse_pithos_image_line(line).unwrap();
-        assert_eq!(img.fingerprint.as_deref(), Some("fp"));
+        assert_eq!(img.created, "2026-04-24");
     }
 
     #[test]
     fn parse_pithos_image_line_rejects_missing_fields() {
-        assert!(parse_pithos_image_line("sha256:abc|pithos:demo|2026-04-24").is_none());
+        assert!(parse_pithos_image_line("sha256:abc|pithos:demo").is_none());
     }
 
     #[test]
     fn parse_pithos_image_line_rejects_empty_id() {
-        assert!(parse_pithos_image_line("|pithos:demo|2026-04-24|fp").is_none());
+        assert!(parse_pithos_image_line("|pithos:demo|2026-04-24").is_none());
     }
 
     #[test]
@@ -1652,7 +1629,7 @@ mod tests {
 
     #[test]
     fn parse_pithos_image_lines_skips_blank_and_malformed_lines() {
-        let stdout = "\nsha256:a|pithos:x|now|fp\nmalformed\n\nsha256:b|<none>:<none>|now|fp2\n";
+        let stdout = "\nsha256:a|pithos:x|now\nmalformed\n\nsha256:b|<none>:<none>|now\n";
         let imgs = parse_pithos_image_lines(stdout);
         assert_eq!(imgs.len(), 2);
         assert_eq!(imgs[0].id, "sha256:a");
