@@ -49,4 +49,12 @@ pithos version      # print the pithos version
 
 Run `pithos help` for the full flag reference (`--rebuild`, `--no-build`, etc.).
 
+## What's in the container
+
+The base image bundles the pi coding agent, preconfigured with the
+[`/answer`](https://github.com/anton-kochev/pi-extensions/tree/main/answer)
+extension available out of the box — no per-project `.pithos` entry required.
+Declare additional extensions per project under `pi.extensions` in `.pithos`
+(`npm:<version>` or `git:<url>#<ref>`).
+
 If you need GitHub access (`gh`, git push over HTTPS) inside the container, run `bootstrap.sh` from the shell — it sets your git identity and walks through the `gh auth login` device flow. The token persists in the project's named volume, so this is a one-time step per project.
