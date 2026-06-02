@@ -72,6 +72,15 @@ COPY scripts/bootstrap.sh /usr/local/bin/bootstrap.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/bootstrap.sh
 
 USER pi
+
+# --- Bake default pi extensions into the seeded defaults ---
+# PI_CODING_AGENT_DIR redirects pi's agent dir to /opt/pi-defaults/, so the
+# install lands in the image-baked defaults. The entrypoint's `cp -rn` then
+# seeds it into every container's ~/.pi/agent/ and pi auto-loads it — no
+# per-project .pithos entry required. Pinned by version; bump here and rebuild
+# the base image to ship an update.
+RUN PI_CODING_AGENT_DIR=/opt/pi-defaults pi install npm:@anton-kochev/answer@0.1.0
+
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD ["sleep", "infinity"]
