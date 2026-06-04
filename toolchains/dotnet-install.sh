@@ -16,6 +16,13 @@ arg="$1"
 install_dir="/usr/share/dotnet"
 symlink="/usr/local/bin/dotnet"
 
+# .NET links against the system ICU for all globalization support and
+# fast-fails on startup without it; bookworm-slim strips it from the base
+# image. libicu72 is the bookworm package — revisit if the base moves distro.
+apt-get update
+apt-get install -y --no-install-recommends libicu72
+rm -rf /var/lib/apt/lists/*
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 

@@ -298,6 +298,9 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("toolchains/dotnet-install.sh");
         let body = std::fs::read_to_string(&p).expect("dotnet-install.sh must be readable");
         for marker in [
+            // .NET fast-fails without the system ICU library; the script must
+            // install it before invoking `dotnet`.
+            "libicu72",
             // Story 4.4: record resolved version under /opt/pithos-versions/<tc>.
             "mkdir -p /opt/pithos-versions",
             // Pin the full recording redirect, not just `--version`, so an
