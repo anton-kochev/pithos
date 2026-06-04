@@ -479,6 +479,49 @@ fn non_string_version_message_instructs_quoting() {
 }
 
 #[test]
+fn mapping_version_rejected() {
+    // Arrange — nested mapping form instead of the flat string form
+    let bytes = b"toolchains:\n  dotnet:\n    version: \"10.0.0\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected mapping-version error");
+
+    // Assert
+    let ConfigError::MappingVersion { toolchain } = err else {
+        panic!("got {err:?}")
+    };
+    assert_eq!(toolchain, "dotnet");
+}
+
+#[test]
+fn mapping_version_message_names_flat_form() {
+    // Arrange
+    let bytes = b"toolchains:\n  dotnet:\n    version: \"10.0.0\"\n";
+
+    // Act
+    let err = load(bytes).expect_err("expected mapping-version error");
+
+    // Assert
+    let msg = err.to_string();
+    assert!(
+        msg.contains("toolchains.dotnet"),
+        "message should name key path: {msg}"
+    );
+    assert!(
+        msg.contains("mapping"),
+        "message should name the offending shape: {msg}"
+    );
+    assert!(
+        msg.contains("dotnet: \"1.85.0\""),
+        "message should include a flat-form example: {msg}"
+    );
+    assert!(
+        !msg.contains("wrap the value in quotes"),
+        "message must not suggest quoting; the shape is the problem: {msg}"
+    );
+}
+
+#[test]
 fn non_string_toolchain_key_rejected() {
     // Arrange — numeric key inside toolchains mapping
     let bytes = b"toolchains:\n  42: \"1.0\"\n";

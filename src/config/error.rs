@@ -50,6 +50,9 @@ pub enum ConfigError {
     #[error(".pithos toolchains.{toolchain}: version must be a quoted string; wrap the value in quotes, e.g. `{toolchain}: \"1.85.0\"`")]
     NonStringVersion { toolchain: String },
 
+    #[error(".pithos toolchains.{toolchain}: expected a version string, got a mapping; use the flat form, e.g. `{toolchain}: \"1.85.0\"` (nested `version:` keys are not supported)")]
+    MappingVersion { toolchain: String },
+
     #[error(".pithos: `extras` must be a mapping")]
     ExtrasNotMapping,
 

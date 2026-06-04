@@ -25,6 +25,11 @@ pub(super) fn validate(toolchains: &YamlOwned) -> Result<(), ConfigError> {
 
 fn validate_version(toolchain: &str, value: &YamlOwned) -> Result<(), ConfigError> {
     let Some(version) = value.as_str() else {
+        if value.as_mapping().is_some() {
+            return Err(ConfigError::MappingVersion {
+                toolchain: toolchain.to_string(),
+            });
+        }
         return Err(ConfigError::NonStringVersion {
             toolchain: toolchain.to_string(),
         });

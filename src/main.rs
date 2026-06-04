@@ -434,6 +434,13 @@ fn help_text() -> String {
            run:    --rebuild, --no-build, -- <cmd...>\n  \
            build:  --rebuild\n\
          \n\
+         Config (.pithos):\n  \
+           Toolchains use the flat form — a quoted exact version per name; nested\n  \
+           `version:` keys are not supported:\n    \
+             toolchains:\n      \
+               dotnet: \"10.0.0\"\n      \
+               rust: \"1.85.0\"\n\
+         \n\
          All narration is written to stderr; stdout is reserved for container output and\n\
          for `pithos help` / `pithos version`.",
         env!("CARGO_PKG_VERSION")
@@ -1652,6 +1659,23 @@ mod tests {
         let t = help_text();
         assert!(t.contains("--rebuild"), "help missing --rebuild: {t}");
         assert!(t.contains("--no-build"), "help missing --no-build: {t}");
+    }
+
+    #[test]
+    fn help_text_documents_toolchain_flat_form() {
+        // Lock the .pithos toolchain-format section so a refactor that drops
+        // it from the prose still fails CI.
+        let t = help_text();
+        assert!(t.contains("Config (.pithos):"), "help missing config section: {t}");
+        assert!(t.contains("flat form"), "help missing flat-form note: {t}");
+        assert!(
+            t.contains("dotnet: \"10.0.0\""),
+            "help missing flat-form example: {t}"
+        );
+        assert!(
+            t.contains("`version:` keys are not supported"),
+            "help missing nested-form warning: {t}"
+        );
     }
 
     #[test]
