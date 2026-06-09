@@ -16,7 +16,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
 
 #[test]
@@ -413,7 +413,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
     assert_eq!(content, expected);
 }
@@ -462,7 +462,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
     assert_eq!(content, expected);
 }

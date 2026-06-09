@@ -81,7 +81,7 @@ pub fn emit(yaml: &YamlOwned) -> String {
         "ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]"
     )
     .unwrap();
-    writeln!(out, "CMD [\"pi\"]").unwrap();
+    writeln!(out, "CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]").unwrap();
     out
 }
 
@@ -396,7 +396,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -426,7 +426,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -459,7 +459,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -500,7 +500,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -547,7 +547,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -573,7 +573,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -599,7 +599,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -628,7 +628,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -666,7 +666,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -695,7 +695,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -724,7 +724,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
@@ -767,7 +767,7 @@ COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"pi\"]
+CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
 ";
         assert_eq!(output, expected);
     }
