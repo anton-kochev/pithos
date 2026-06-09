@@ -497,6 +497,10 @@ fn assemble_build_args(
     let fingerprint_label = fingerprint::label(hash);
     let mut args: Vec<OsString> = vec![
         "build".into(),
+        // Always check the registry for a newer `pithos:base` — without this,
+        // a locally cached base tag is used forever and base-image updates
+        // (new runtimes, CMD contract changes) never reach existing machines.
+        "--pull".into(),
         "--progress=plain".into(),
         "-f".into(),
         dockerfile.into(),
@@ -1292,6 +1296,7 @@ mod tests {
             Path::new("/ctx"),
         );
         assert_eq!(args.first(), Some(&OsString::from("build")));
+        assert!(args.contains(&OsString::from("--pull")));
         assert!(args.contains(&OsString::from("--progress=plain")));
         assert!(
             args.windows(2)
