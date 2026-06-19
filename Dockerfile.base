@@ -80,6 +80,19 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scripts/bootstrap.sh /usr/local/bin/bootstrap.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/bootstrap.sh
 
+# --- Bake + apply Pi patches (idempotent local edits to pi's install tree) ---
+# Each /opt/pi-patches/*.mjs is an idempotent patcher for changes that should
+# ship by default but get clobbered by a Pi (re)install — e.g. showing the
+# original slash-command invocation in the TUI/HTML-export/session-list while
+# still sending the expanded prompt template to the model. Runs as root before
+# USER pi so it can write the chowned install tree. `set -e` makes the build
+# hard-fail if any patch throws (a Pi update changed the internals it patches) —
+# a loud signal to update the patch, never a silent unpatched image. The same
+# loop is re-run by per-project Dockerfiles after a pinned-version Pi re-install
+# (see src/dockerfile.rs).
+COPY scripts/pi-patches/ /opt/pi-patches/
+RUN set -e; for p in /opt/pi-patches/*.mjs; do [ -e "$p" ] || continue; node "$p"; done
+
 USER pi
 
 # --- Bake default pi extensions into the seeded defaults ---

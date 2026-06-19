@@ -66,6 +66,12 @@ pub fn emit(yaml: &YamlOwned) -> String {
             "RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@{version} && chown -R pi: /opt/pi-npm"
         )
         .unwrap();
+        // Re-apply the image-baked Pi patches: the re-install above clobbers pi's patched dist/ files.
+        writeln!(
+            out,
+            "RUN set -e; for p in /opt/pi-patches/*.mjs; do [ -e \"$p\" ] || continue; node \"$p\"; done"
+        )
+        .unwrap();
     }
     writeln!(out).unwrap();
     writeln!(
@@ -718,6 +724,7 @@ USER root
 
 # Pi: pinned version from .pithos overrides the base image's floor. Ownership is reset so the pi user can read the install tree.
 RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@0.75.3 && chown -R pi: /opt/pi-npm
+RUN set -e; for p in /opt/pi-patches/*.mjs; do [ -e \"$p\" ] || continue; node \"$p\"; done
 
 # Pi-config defaults baked into /opt/pi-defaults/; entrypoint seeds them into the user's volume on first run. Tini handles PID 1 signal forwarding.
 COPY pi-config/ /opt/pi-defaults/
@@ -761,6 +768,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /
 
 # Pi: pinned version from .pithos overrides the base image's floor. Ownership is reset so the pi user can read the install tree.
 RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@0.75.3 && chown -R pi: /opt/pi-npm
+RUN set -e; for p in /opt/pi-patches/*.mjs; do [ -e \"$p\" ] || continue; node \"$p\"; done
 
 # Pi-config defaults baked into /opt/pi-defaults/; entrypoint seeds them into the user's volume on first run. Tini handles PID 1 signal forwarding.
 COPY pi-config/ /opt/pi-defaults/
