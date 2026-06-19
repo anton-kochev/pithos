@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "pithos"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "assert_cmd",
  "ctrlc",
