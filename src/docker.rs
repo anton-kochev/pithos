@@ -805,6 +805,27 @@ pub fn run(
     Ok(status)
 }
 
+/// Wrap an effective container command in a named tmux session so a second
+/// terminal can `docker exec ... tmux attach -t pithos` and observe/co-drive
+/// it live. When `cmd` is empty, the Pi launch argv (the per-project image
+/// CMD) is materialized explicitly, because the wrapper must pass a concrete
+/// command (it can't rely on the image's default CMD anymore).
+pub fn tmux_wrap(cmd: &[String]) -> Vec<String> {
+    let mut wrapped = vec![
+        "tmux".to_string(),
+        "new-session".to_string(),
+        "-A".to_string(),
+        "-s".to_string(),
+        "pithos".to_string(),
+    ];
+    if cmd.is_empty() {
+        wrapped.extend(crate::dockerfile::PI_LAUNCH_ARGV.iter().map(|s| s.to_string()));
+    } else {
+        wrapped.extend_from_slice(cmd);
+    }
+    wrapped
+}
+
 /// Assemble the argv for `docker run` per FR-501/502/503. Pure — no I/O
 /// beyond `Path::exists()` probes for Layer 3 items. Split from `run` so
 /// the arg shape is unit-testable without a daemon. Stdio::inherit is
@@ -1260,6 +1281,77 @@ mod tests {
             &[],
         );
         assert_eq!(args.last(), Some(&OsString::from("pithos:proj")));
+    }
+
+    // tmux_wrap — named-session observability wrapper
+
+    #[test]
+    fn tmux_wrap_empty_cmd_materializes_pi_launch_argv() {
+        // Arrange
+        let cmd: Vec<String> = vec![];
+
+        // Act
+        let wrapped = tmux_wrap(&cmd);
+
+        // Assert
+        assert_eq!(
+            wrapped,
+            vec![
+                "tmux".to_string(),
+                "new-session".to_string(),
+                "-A".to_string(),
+                "-s".to_string(),
+                "pithos".to_string(),
+                "bun".to_string(),
+                "/opt/pi-npm/bin/pi".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tmux_wrap_single_cmd_appends_verbatim() {
+        // Arrange
+        let cmd: Vec<String> = vec!["bash".into()];
+
+        // Act
+        let wrapped = tmux_wrap(&cmd);
+
+        // Assert
+        assert_eq!(
+            wrapped,
+            vec![
+                "tmux".to_string(),
+                "new-session".to_string(),
+                "-A".to_string(),
+                "-s".to_string(),
+                "pithos".to_string(),
+                "bash".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tmux_wrap_multi_arg_cmd_appends_all_verbatim() {
+        // Arrange
+        let cmd: Vec<String> = vec!["bash".into(), "-lc".into(), "echo hi".into()];
+
+        // Act
+        let wrapped = tmux_wrap(&cmd);
+
+        // Assert
+        assert_eq!(
+            wrapped,
+            vec![
+                "tmux".to_string(),
+                "new-session".to_string(),
+                "-A".to_string(),
+                "-s".to_string(),
+                "pithos".to_string(),
+                "bash".to_string(),
+                "-lc".to_string(),
+                "echo hi".to_string(),
+            ]
+        );
     }
 
     // assemble_build_args — argv shape for `docker build`

@@ -38,7 +38,7 @@ const MINIMAL_PITHOS: &str = "toolchains: {}\n";
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand {
     Build { rebuild: bool },
-    Run { mode: RunMode, cmd: Vec<String> },
+    Run { mode: RunMode, cmd: Vec<String>, tmux: bool },
     Info,
     Clean { all: bool },
     RebuildBase,
@@ -54,6 +54,7 @@ impl Subcommand {
             None => Self::Run {
                 mode: RunMode::Default,
                 cmd: Vec::new(),
+                tmux: false,
             },
             Some("build") => {
                 let mut rebuild = false;
@@ -73,6 +74,7 @@ impl Subcommand {
             Some("run") => {
                 let mut mode = RunMode::Default;
                 let mut cmd: Vec<String> = Vec::new();
+                let mut tmux = false;
                 let mut iter = args.iter().skip(2);
                 while let Some(arg) = iter.next() {
                     match arg.as_str() {
@@ -80,6 +82,7 @@ impl Subcommand {
                             cmd.extend(iter.by_ref().cloned());
                             break;
                         }
+                        "--tmux" => tmux = true,
                         "--rebuild" => match mode {
                             RunMode::NoBuild => {
                                 return Self::Reject {
@@ -113,7 +116,7 @@ impl Subcommand {
                         }
                     }
                 }
-                Self::Run { mode, cmd }
+                Self::Run { mode, cmd, tmux }
             }
             Some("help") => match args.get(2) {
                 None => Self::Help,
@@ -294,7 +297,7 @@ fn main() -> ExitCode {
             rebuild,
             style,
         ),
-        Subcommand::Run { mode, cmd } => run_run(
+        Subcommand::Run { mode, cmd, tmux } => run_run(
             &cwd,
             &yaml,
             &pithos_bytes,
@@ -302,6 +305,7 @@ fn main() -> ExitCode {
             &dockerfile_content,
             mode,
             &cmd,
+            tmux,
             style,
         ),
         Subcommand::Info => run_info(&cwd, &yaml, &pithos_bytes, &dockerfile_content, style),
@@ -431,7 +435,7 @@ fn help_text() -> String {
            version        Print the pithos version\n\
          \n\
          Options:\n  \
-           run:    --rebuild, --no-build, -- <cmd...>\n  \
+           run:    --rebuild, --no-build, --tmux, -- <cmd...>\n  \
            build:  --rebuild\n\
          \n\
          Config (.pithos):\n  \
@@ -766,6 +770,7 @@ fn run_run(
     dockerfile_content: &str,
     mode: RunMode,
     cmd: &[String],
+    tmux: bool,
     style: Style,
 ) -> ExitCode {
     let ensured = match ensure_image(
@@ -788,6 +793,27 @@ fn run_run(
     let env_file = discover_env_file(cwd);
     let extensions_manifest_path = cwd.join(".pithos.d").join("extensions.list");
 
+    // When --tmux is set, run the effective command inside a named tmux
+    // session so a second terminal can attach and co-drive it. The wrapper
+    // must pass a concrete command, so an empty `cmd` is materialized to the
+    // Pi launch argv inside `tmux_wrap`.
+    let wrapped;
+    let effective_cmd: &[String] = if tmux {
+        narrate(
+            style,
+            "» tmux:",
+            &format!(
+                "observe from another terminal: docker exec -it pithos-{}-{} tmux attach -t pithos",
+                ensured.project,
+                std::process::id()
+            ),
+        );
+        wrapped = pithos::docker::tmux_wrap(cmd);
+        &wrapped
+    } else {
+        cmd
+    };
+
     match pithos::docker::run(
         &ensured.tag,
         &ensured.project,
@@ -795,7 +821,7 @@ fn run_run(
         pithos_repo.as_deref(),
         Some(&extensions_manifest_path),
         env_file.as_deref(),
-        cmd,
+        effective_cmd,
     ) {
         Ok(status) => ExitCode::from(exit_code_from_status(status)),
         Err(pithos::docker::RunError::Spawn(e)) => {
@@ -1366,6 +1392,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Default,
                 cmd: vec![],
+                tmux: false,
             }
         );
     }
@@ -1388,6 +1415,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Default,
                 cmd: vec![],
+                tmux: false,
             }
         );
     }
@@ -1399,6 +1427,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Rebuild,
                 cmd: vec![],
+                tmux: false,
             }
         );
     }
@@ -1421,6 +1450,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Rebuild,
                 cmd: vec!["extra".to_string()],
+                tmux: false,
             }
         );
     }
@@ -1432,6 +1462,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Default,
                 cmd: vec!["bash".to_string()],
+                tmux: false,
             }
         );
     }
@@ -1443,6 +1474,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "-c".to_string(), "echo".to_string()],
+                tmux: false,
             }
         );
     }
@@ -1454,6 +1486,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "-c".to_string(), "echo".to_string()],
+                tmux: false,
             }
         );
     }
@@ -1465,6 +1498,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Rebuild,
                 cmd: vec!["bash".to_string()],
+                tmux: false,
             }
         );
     }
@@ -1476,6 +1510,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Rebuild,
                 cmd: vec![],
+                tmux: false,
             }
         );
     }
@@ -1490,6 +1525,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "--rebuild".to_string()],
+                tmux: false,
             }
         );
     }
@@ -1501,6 +1537,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::NoBuild,
                 cmd: vec![],
+                tmux: false,
             }
         );
     }
@@ -1512,6 +1549,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::NoBuild,
                 cmd: vec!["bash".to_string()],
+                tmux: false,
             }
         );
     }
@@ -1545,6 +1583,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Default,
                 cmd: vec!["--no-build".to_string()],
+                tmux: false,
             }
         );
     }
@@ -1556,6 +1595,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "--no-build".to_string()],
+                tmux: false,
             }
         );
     }
@@ -1570,6 +1610,7 @@ mod tests {
             Subcommand::Run {
                 mode: RunMode::NoBuild,
                 cmd: vec![],
+                tmux: false,
             }
         );
     }
@@ -1590,6 +1631,63 @@ mod tests {
             Subcommand::Reject {
                 kind: RejectKind::Flag,
                 value: "--rebuild and --no-build are mutually exclusive".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_tmux_sets_flag() {
+        // Arrange
+        let argv = args(&["pithos", "run", "--tmux"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec![],
+                tmux: true,
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_tmux_combines_with_rebuild_and_cmd() {
+        // Arrange
+        let argv = args(&["pithos", "run", "--tmux", "--rebuild", "--", "bash"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Rebuild,
+                cmd: vec!["bash".to_string()],
+                tmux: true,
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_run_tmux_after_double_dash_is_cmd_arg() {
+        // Arrange
+        let argv = args(&["pithos", "run", "--", "--tmux"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec!["--tmux".to_string()],
+                tmux: false,
             }
         );
     }

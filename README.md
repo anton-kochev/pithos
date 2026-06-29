@@ -49,6 +49,20 @@ pithos version      # print the pithos version
 
 Run `pithos help` for the full flag reference (`--rebuild`, `--no-build`, etc.).
 
+### Observing the agent (`--tmux`)
+
+`pithos --tmux` launches pi inside a named tmux session (`pithos`) in the
+container. From a second terminal you can then attach and co-debug live:
+
+```sh
+docker exec -it pithos-<project>-<pid> tmux attach -t pithos
+```
+
+pithos prints the exact command on launch. The primary terminal owns the session
+lifecycle (detaching it ends the run, since the container is `--rm`); additional
+observers may attach and detach freely. The flag also wraps an explicit command —
+`pithos --tmux -- bash` runs `bash` inside the session instead of pi.
+
 ## What's in the container
 
 The base image bundles the pi coding agent, preconfigured with the

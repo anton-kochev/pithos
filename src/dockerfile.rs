@@ -10,6 +10,12 @@ FROM ghcr.io/anton-kochev/pithos:base AS base
 USER root
 ";
 
+/// The argv that launches the Pi agent inside the container. This is the
+/// single source of truth for the per-project Dockerfile `CMD` (emitted
+/// below) and for the tmux observability wrapper in [`crate::docker`], so
+/// the two can never drift apart.
+pub const PI_LAUNCH_ARGV: [&str; 2] = ["bun", "/opt/pi-npm/bin/pi"];
+
 /// Emit a Dockerfile for the given parsed `.pithos` config.
 ///
 /// **Precondition:** `yaml` must be the validated output of
@@ -87,7 +93,12 @@ pub fn emit(yaml: &YamlOwned) -> String {
         "ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]"
     )
     .unwrap();
-    writeln!(out, "CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]").unwrap();
+    let cmd_elems = PI_LAUNCH_ARGV
+        .iter()
+        .map(|a| format!("\"{a}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(out, "CMD [{cmd_elems}]").unwrap();
     out
 }
 
