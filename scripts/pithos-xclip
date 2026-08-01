@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# xclip-compatible read shim for pithos' host clipboard bridge.
+# Pi's Linux clipboard-image fallback calls:
+#   xclip -selection clipboard -t TARGETS -o
+#   xclip -selection clipboard -t image/png -o
+# When PITHOS_CLIPBOARD_URL is set, serve those requests from the host-side
+# pithos bridge. For everything else, defer to a real xclip if one exists.
+
+orig=("$@")
+
+fallback() {
+  if [[ -x /usr/bin/xclip ]]; then
+    exec /usr/bin/xclip "${orig[@]}"
+  fi
+  exit 1
+}
+
+if [[ -z "${PITHOS_CLIPBOARD_URL:-}" ]]; then
+  fallback
+fi
+
+out=false
+target=""
+target_set=false
+selection=""
+selection_set=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|-out)
+      [[ "$out" == false ]] || fallback
+      out=true
+      shift
+      ;;
+    -t|-target)
+      [[ $# -ge 2 && "$target_set" == false ]] || fallback
+      target="$2"
+      target_set=true
+      shift 2
+      ;;
+    -selection)
+      [[ $# -ge 2 && "$selection_set" == false ]] || fallback
+      selection="$2"
+      selection_set=true
+      shift 2
+      ;;
+    *)
+      fallback
+      ;;
+  esac
+done
+
+[[ "$out" == true && "$selection" == clipboard ]] || fallback
+
+curl_args=(-fsS --noproxy '*' --connect-timeout 1 --max-time 2.5)
+case "$target" in
+  TARGETS)
+    exec curl "${curl_args[@]}" "${PITHOS_CLIPBOARD_URL}/types"
+    ;;
+  image/png)
+    exec curl "${curl_args[@]}" "${PITHOS_CLIPBOARD_URL}/image.png"
+    ;;
+  *)
+    fallback
+    ;;
+esac

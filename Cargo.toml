@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 ctrlc = "3"
+getrandom = "0.4"
 saphyr = "=0.0.6"
 sha2 = "=0.11.0"
 tempfile = "3"

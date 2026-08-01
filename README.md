@@ -49,6 +49,15 @@ pithos version      # print the pithos version
 
 Run `pithos help` for the full flag reference (`--rebuild`, `--no-build`, etc.).
 
+### Clipboard screenshots
+
+When `pithos` launches the container it starts a short-lived host clipboard bridge
+and exposes it to Pi. Take a screenshot to your host clipboard, then press
+`Ctrl+V` in Pi to paste it as an image attachment. The bridge is scoped to the
+running container and protected by a random per-run token; only image data is
+exposed. Linux hosts require `wl-paste` or `xclip`; macOS and Windows use built-in
+clipboard tools.
+
 ### Observing the agent (`--tmux`)
 
 `pithos --tmux` launches pi inside a named tmux session (`pithos`) in the

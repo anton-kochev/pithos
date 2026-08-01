@@ -792,6 +792,22 @@ fn run_run(
         .map(std::path::PathBuf::from);
     let env_file = discover_env_file(cwd);
     let extensions_manifest_path = cwd.join(".pithos.d").join("extensions.list");
+    let clipboard_shim_dir = cwd.join(".pithos.d");
+    let clipboard_bridge =
+        match pithos::clipboard_bridge::ClipboardBridge::start(&clipboard_shim_dir) {
+            Ok(bridge) => Some(bridge),
+            Err(e) => {
+                narrate(
+                    style,
+                    "» clipboard:",
+                    &format!("host clipboard bridge unavailable: {e}"),
+                );
+                None
+            }
+        };
+    let clipboard_url = clipboard_bridge
+        .as_ref()
+        .map(pithos::clipboard_bridge::ClipboardBridge::container_url);
 
     // When --tmux is set, run the effective command inside a named tmux
     // session so a second terminal can attach and co-drive it. The wrapper
@@ -820,7 +836,11 @@ fn run_run(
         cwd,
         pithos_repo.as_deref(),
         Some(&extensions_manifest_path),
-        env_file.as_deref(),
+        pithos::docker::RunEnvironment {
+            env_file: env_file.as_deref(),
+            clipboard_url: clipboard_url.as_deref(),
+            clipboard_shim: clipboard_bridge.as_ref().map(|bridge| bridge.shim_path()),
+        },
         effective_cmd,
     ) {
         Ok(status) => ExitCode::from(exit_code_from_status(status)),

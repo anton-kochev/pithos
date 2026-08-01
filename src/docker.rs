@@ -753,6 +753,13 @@ pub enum RunError {
     Spawn(#[from] std::io::Error),
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RunEnvironment<'a> {
+    pub env_file: Option<&'a Path>,
+    pub clipboard_url: Option<&'a str>,
+    pub clipboard_shim: Option<&'a Path>,
+}
+
 /// Spawn `docker run` with the flag set defined by FR-501, inheriting the
 /// caller's TTY. Blocks until the container exits; returns the exit status
 /// for the caller to translate into the launcher's exit code.
@@ -763,9 +770,9 @@ pub enum RunError {
 /// generated `.pithos.d/extensions.list`; when present, it is bind-mounted
 /// read-only at `/etc/pithos/extensions.list` so the container entrypoint
 /// can reconcile declared Pi extensions on startup. Missing file is a
-/// silent skip. `env_file` is the path to `.env`; caller passes `None`
-/// when absent. `cmd` is appended after the image tag; an empty slice
-/// means docker falls through to the Dockerfile's `CMD` (FR-502).
+/// silent skip. `environment` supplies the optional `.env` path and host
+/// clipboard bridge URL/shim. `cmd` is appended after the image tag; an empty
+/// slice means docker falls through to the Dockerfile's `CMD` (FR-502).
 ///
 /// Shells out to:
 ///   docker run --rm -it --name ... --hostname ... --user 501:20
@@ -774,6 +781,8 @@ pub enum RunError {
 ///              [-v <PITHOS_REPO>/pi-config/... per Layer 3 item, if exists]
 ///              [-v <extensions_manifest>:/etc/pithos/extensions.list:ro, if file exists]
 ///              [--env-file <.env>, if Some]
+///              [-v <clipboard-shim>:/usr/local/bin/xclip:ro]
+///              [-e PITHOS_CLIPBOARD_URL]
 ///              -w /workspace/<project>  <image_tag> [<cmd>...]
 pub fn run(
     image_tag: &str,
@@ -781,7 +790,7 @@ pub fn run(
     workspace: &Path,
     pithos_repo: Option<&Path>,
     extensions_manifest: Option<&Path>,
-    env_file: Option<&Path>,
+    environment: RunEnvironment<'_>,
     cmd: &[String],
 ) -> Result<std::process::ExitStatus, RunError> {
     let args = assemble_run_args(
@@ -790,19 +799,30 @@ pub fn run(
         workspace,
         pithos_repo,
         extensions_manifest,
-        env_file,
+        environment,
         cmd,
     );
     // Stdio::inherit is the default; be explicit so a future refactor
     // pulling in stream_lines for "consistency with build" doesn't
     // accidentally swallow the user's TTY.
-    let status = Command::new("docker")
-        .args(&args)
+    let mut command = docker_run_command(&args, environment.clipboard_url);
+    let status = command
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()?;
     Ok(status)
+}
+
+fn docker_run_command(args: &[OsString], clipboard_url: Option<&str>) -> Command {
+    let mut command = Command::new("docker");
+    command.args(args);
+    if let Some(url) = clipboard_url {
+        // `docker run -e NAME` inherits NAME from this child environment while
+        // keeping the bearer token out of the long-lived Docker CLI argv.
+        command.env("PITHOS_CLIPBOARD_URL", url);
+    }
+    command
 }
 
 /// Wrap an effective container command in a named tmux session so a second
@@ -836,7 +856,7 @@ fn assemble_run_args(
     workspace: &Path,
     pithos_repo: Option<&Path>,
     extensions_manifest: Option<&Path>,
-    env_file: Option<&Path>,
+    environment: RunEnvironment<'_>,
     cmd: &[String],
 ) -> Vec<OsString> {
     let pid = std::process::id();
@@ -895,9 +915,23 @@ fn assemble_run_args(
             args.push(bind);
         }
     }
-    if let Some(env_path) = env_file {
+    if let Some(env_path) = environment.env_file {
         args.push("--env-file".into());
         args.push(env_path.into());
+    }
+    if let Some(shim) = environment.clipboard_shim {
+        let mut bind = OsString::from(shim);
+        bind.push(":/usr/local/bin/xclip:ro");
+        args.push("-v".into());
+        args.push(bind);
+    }
+    if environment.clipboard_url.is_some() {
+        if cfg!(target_os = "linux") {
+            args.push("--add-host".into());
+            args.push("host.docker.internal:host-gateway".into());
+        }
+        args.push("-e".into());
+        args.push("PITHOS_CLIPBOARD_URL".into());
     }
     args.push("-w".into());
     args.push(workdir.into());
@@ -1041,7 +1075,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
-            None,
+            RunEnvironment::default(),
             &[],
         );
         assert!(args.contains(&OsString::from("--rm")));
@@ -1063,7 +1097,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
-            None,
+            RunEnvironment::default(),
             &[],
         );
         let expected_name = format!("pithos-demo-{pid}");
@@ -1087,7 +1121,7 @@ mod tests {
             Path::new("/tmp/demo-ws"),
             None,
             None,
-            None,
+            RunEnvironment::default(),
             &[],
         );
         assert!(
@@ -1110,7 +1144,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
-            None,
+            RunEnvironment::default(),
             &[],
         );
         assert!(
@@ -1136,7 +1170,7 @@ mod tests {
             Path::new("/tmp/x"),
             Some(td.path()),
             None,
-            None,
+            RunEnvironment::default(),
             &[],
         );
         for (i, arg) in args.iter().enumerate() {
@@ -1160,7 +1194,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
-            None,
+            RunEnvironment::default(),
             &[],
         );
         assert!(!args.contains(&OsString::from("--env-file")));
@@ -1174,7 +1208,11 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
-            Some(Path::new("/tmp/.env")),
+            RunEnvironment {
+                env_file: Some(Path::new("/tmp/.env")),
+                clipboard_url: None,
+                clipboard_shim: None,
+            },
             &[],
         );
         assert!(
@@ -1197,7 +1235,7 @@ mod tests {
             Path::new("/tmp/x"),
             Some(td.path()),
             None,
-            None,
+            RunEnvironment::default(),
             &[],
         );
 
@@ -1238,7 +1276,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             None,
-            None,
+            RunEnvironment::default(),
             &[],
         );
         assert!(
@@ -1258,7 +1296,7 @@ mod tests {
             Path::new("/work"),
             None,
             None,
-            None,
+            RunEnvironment::default(),
             &cmd,
         );
         let n = args.len();
@@ -1277,10 +1315,69 @@ mod tests {
             Path::new("/work"),
             None,
             None,
-            None,
+            RunEnvironment::default(),
             &[],
         );
         assert_eq!(args.last(), Some(&OsString::from("pithos:proj")));
+    }
+
+    #[test]
+    fn docker_run_command_supplies_clipboard_url_through_child_environment() {
+        let command = docker_run_command(
+            &[OsString::from("run")],
+            Some("http://host.docker.internal:49152/token"),
+        );
+        let value = command
+            .get_envs()
+            .find(|(key, _)| *key == "PITHOS_CLIPBOARD_URL")
+            .and_then(|(_, value)| value);
+        assert_eq!(
+            value,
+            Some(std::ffi::OsStr::new(
+                "http://host.docker.internal:49152/token"
+            ))
+        );
+    }
+
+    #[test]
+    fn assemble_run_args_inherits_clipboard_bridge_url_without_exposing_value() {
+        let args = assemble_run_args(
+            "pithos:proj",
+            "proj",
+            Path::new("/work"),
+            None,
+            None,
+            RunEnvironment {
+                env_file: None,
+                clipboard_url: Some("http://host.docker.internal:49152/token"),
+                clipboard_shim: Some(Path::new("/tmp/pithos-xclip")),
+            },
+            &[],
+        );
+        assert!(
+            args.windows(2)
+                .any(|w| { w[0] == "-e" && w[1] == "PITHOS_CLIPBOARD_URL" }),
+            "missing inherited PITHOS_CLIPBOARD_URL env in {args:?}"
+        );
+        assert!(
+            args.iter()
+                .all(|arg| !arg.to_string_lossy().contains("49152/token")),
+            "clipboard bearer token leaked into docker argv: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| {
+                w[0] == "-v" && w[1] == "/tmp/pithos-xclip:/usr/local/bin/xclip:ro"
+            }),
+            "missing clipboard shim bind in {args:?}"
+        );
+        if cfg!(target_os = "linux") {
+            assert!(
+                args.windows(2).any(|w| {
+                    w[0] == "--add-host" && w[1] == "host.docker.internal:host-gateway"
+                }),
+                "missing host-gateway mapping in {args:?}"
+            );
+        }
     }
 
     // tmux_wrap — named-session observability wrapper
@@ -1768,7 +1865,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             Some(&manifest),
-            None,
+            RunEnvironment::default(),
             &[],
         );
 
@@ -1801,7 +1898,7 @@ mod tests {
             Path::new("/tmp/x"),
             None,
             Some(&manifest),
-            None,
+            RunEnvironment::default(),
             &[],
         );
 

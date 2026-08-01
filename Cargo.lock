@@ -352,6 +352,7 @@ version = "0.10.0"
 dependencies = [
  "assert_cmd",
  "ctrlc",
+ "getrandom",
  "saphyr",
  "sha2",
  "tempfile",

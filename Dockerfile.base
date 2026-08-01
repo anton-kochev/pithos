@@ -78,7 +78,8 @@ COPY --chown=pi:pi pi-config/ /opt/pi-defaults/
 # --- Bake entrypoint and helper scripts ---
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY scripts/bootstrap.sh /usr/local/bin/bootstrap.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/bootstrap.sh
+COPY scripts/pithos-xclip /usr/local/bin/xclip
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/bootstrap.sh /usr/local/bin/xclip
 
 # --- Bake + apply Pi patches (idempotent local edits to pi's install tree) ---
 # Each /opt/pi-patches/*.mjs is an idempotent patcher for changes that should

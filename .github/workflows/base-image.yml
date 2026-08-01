@@ -57,7 +57,7 @@ jobs:
         run: |
           docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base \
             bash -euc '
-              for bin in tini node uv gh rg fdfind jq fzf python3 git pi; do
+              for bin in tini node uv gh rg fdfind jq fzf python3 git pi xclip; do
                 command -v "$bin" >/dev/null || { echo "MISSING: $bin" >&2; exit 1; }
               done
               [ "$(id -u)" = "501" ] || { echo "UID != 501: $(id -u)" >&2; exit 1; }

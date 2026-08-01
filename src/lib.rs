@@ -1,3 +1,4 @@
+pub mod clipboard_bridge;
 pub mod config;
 pub mod docker;
 pub mod dockerfile;
