@@ -575,12 +575,14 @@ fn ensure_image(
 
     // First pass: fingerprint label only. Installer RUN steps populate
     // /opt/pithos-versions/<tc> inside the image as a side-effect.
-    match pithos::docker::build(
-        context.path(),
-        dockerfile_path,
-        &project,
-        &hash,
-        &BTreeMap::new(),
+    match pithos::docker::build_request(
+        pithos::docker::BuildRequest {
+            context: context.path(),
+            dockerfile: dockerfile_path,
+            project: &project,
+            fingerprint: &hash,
+            extra_labels: &BTreeMap::new(),
+        },
         style,
     ) {
         Ok(()) => {}
@@ -673,12 +675,14 @@ fn rebuild_with_version_labels(
         );
     }
 
-    match pithos::docker::build(
-        context,
-        dockerfile_path,
-        project,
-        hash,
-        &extra_labels,
+    match pithos::docker::build_request(
+        pithos::docker::BuildRequest {
+            context,
+            dockerfile: dockerfile_path,
+            project,
+            fingerprint: hash,
+            extra_labels: &extra_labels,
+        },
         style,
     ) {
         Ok(()) => Ok(()),
@@ -830,19 +834,19 @@ fn run_run(
         cmd
     };
 
-    match pithos::docker::run(
-        &ensured.tag,
-        &ensured.project,
-        cwd,
-        pithos_repo.as_deref(),
-        Some(&extensions_manifest_path),
-        pithos::docker::RunEnvironment {
+    match pithos::docker::run_request(pithos::docker::RunRequest {
+        image_tag: &ensured.tag,
+        project: &ensured.project,
+        workspace: cwd,
+        pithos_repo: pithos_repo.as_deref(),
+        extensions_manifest: Some(&extensions_manifest_path),
+        environment: pithos::docker::RunEnvironment {
             env_file: env_file.as_deref(),
             clipboard_url: clipboard_url.as_deref(),
             clipboard_shim: clipboard_bridge.as_ref().map(|bridge| bridge.shim_path()),
         },
-        effective_cmd,
-    ) {
+        command: effective_cmd,
+    }) {
         Ok(status) => ExitCode::from(exit_code_from_status(status)),
         Err(pithos::docker::RunError::Spawn(e)) => {
             narrate(style, "» ERROR:", &format!("docker run: {e}"));
