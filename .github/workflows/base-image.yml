@@ -42,20 +42,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push base image
+      # Build the runner's own architecture first and load it into the local
+      # daemon so the smoke test can run before anything is published. A
+      # multi-arch build cannot be loaded locally, hence the single platform
+      # here; the push step below reuses this work from the builder's cache.
+      - name: Build amd64 image for the smoke test
         uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.base
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: linux/amd64
+          load: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-base
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-base,mode=max
 
       - name: Smoke test (runtime + default Atlas package)
         run: |
           IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base
+
+          # $IMAGE is the locally loaded amd64 build, not a registry pull —
+          # nothing has been published at this point. Do not add a `docker
+          # pull` here: it would replace the image under test with the
+          # currently published one and assert against the wrong artifact.
 
           # Expectations come from the image's own labels, not from the npm
           # registry: querying npm here would race a publish between the build
@@ -128,3 +136,19 @@ jobs:
               pi list | grep -F "npm:$EXPECTED_DEFAULT_PACKAGE" >/dev/null
               echo "OK: Pi $EXPECTED_PI_VERSION, $EXPECTED_DEFAULT_PACKAGE $ACTUAL_ATLAS_VERSION"
             '
+
+      # Only now does anything become visible to users. The amd64 layers are
+      # already in the builder's cache from the test build, so this re-runs
+      # only the arm64 leg. arm64 stays untested — it cannot be exercised
+      # without emulating a second runtime, which is the same coverage the
+      # published manifest had before this step existed.
+      - name: Build and push base image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.base
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-base
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-base,mode=max
