@@ -37,9 +37,7 @@ fn main() {
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         {
-            panic!(
-                "toolchains/{file_name}: name {name:?} must be lowercase ASCII letters/digits"
-            );
+            panic!("toolchains/{file_name}: name {name:?} must be lowercase ASCII letters/digits");
         }
 
         let path = entry.path();

@@ -53,14 +53,78 @@ jobs:
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-base
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-base,mode=max
 
-      - name: Smoke test (binaries + UID/GID)
+      - name: Smoke test (runtime + default Atlas package)
         run: |
-          docker run --rm ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base \
+          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base
+
+          # Expectations come from the image's own labels, not from the npm
+          # registry: querying npm here would race a publish between the build
+          # and this step and fail a perfectly good commit. This asserts the
+          # installed runtime matches what the image claims to ship.
+          label() { docker inspect --format "{{index .Config.Labels \"$1\"}}" "$IMAGE"; }
+          EXPECTED_PI_VERSION=$(label dev.pithos.pi-version)
+          EXPECTED_ATLAS_VERSION=$(label dev.pithos.atlas-version)
+          EXPECTED_DEFAULT_PACKAGE=$(label dev.pithos.default-npm-package)
+          for v in EXPECTED_PI_VERSION EXPECTED_ATLAS_VERSION EXPECTED_DEFAULT_PACKAGE; do
+            [ -n "${!v}" ] || { echo "base image missing label for $v" >&2; exit 1; }
+          done
+
+          # An empty manifest mounted read-only makes the entrypoint run its
+          # prune pass with zero project-declared packages — the regression
+          # test for the default-package exemption. Without this mount the
+          # prune pass is skipped entirely and the exemption goes untested.
+          MANIFEST=$(mktemp)
+          chmod 0644 "$MANIFEST"
+          trap 'rm -f "$MANIFEST"' EXIT
+
+          docker run --rm \
+            --env EXPECTED_PI_VERSION="$EXPECTED_PI_VERSION" \
+            --env EXPECTED_ATLAS_VERSION="$EXPECTED_ATLAS_VERSION" \
+            --env EXPECTED_DEFAULT_PACKAGE="$EXPECTED_DEFAULT_PACKAGE" \
+            --volume "$MANIFEST:/etc/pithos/extensions.list:ro" \
+            "$IMAGE" \
             bash -euc '
               for bin in tini node uv gh rg fdfind jq fzf python3 git pi xclip; do
                 command -v "$bin" >/dev/null || { echo "MISSING: $bin" >&2; exit 1; }
               done
               [ "$(id -u)" = "501" ] || { echo "UID != 501: $(id -u)" >&2; exit 1; }
               [ "$(id -g)" = "20" ] || { echo "GID != 20: $(id -g)" >&2; exit 1; }
-              echo "OK"
+              [ "$(pi --version)" = "$EXPECTED_PI_VERSION" ] || {
+                echo "Pi $(pi --version) != labelled $EXPECTED_PI_VERSION" >&2
+                exit 1
+              }
+
+              # The entrypoint set this from the image ENV; if the two ever
+              # drift, the prune pass silently uninstalls the baked default.
+              [ "$PITHOS_DEFAULT_NPM_PACKAGE" = "$EXPECTED_DEFAULT_PACKAGE" ] || {
+                echo "ENV $PITHOS_DEFAULT_NPM_PACKAGE != labelled $EXPECTED_DEFAULT_PACKAGE" >&2
+                exit 1
+              }
+
+              SETTINGS=/home/pi/.pi/agent/settings.json
+              ATLAS_DIR="/home/pi/.pi/agent/npm/node_modules/$EXPECTED_DEFAULT_PACKAGE"
+
+              # Pinned installs record `npm:<name>@<version>`, so match the prefix.
+              jq -e --arg pkg "$EXPECTED_DEFAULT_PACKAGE" '\''
+                (.packages // [])
+                | map(if type == "string" then . else .source end)
+                | any(startswith("npm:" + $pkg + "@"))
+              '\'' "$SETTINGS" >/dev/null
+
+              [ -f "$ATLAS_DIR/package.json" ] || { echo "Atlas package missing" >&2; exit 1; }
+              ACTUAL_ATLAS_VERSION=$(jq -r .version "$ATLAS_DIR/package.json")
+              [ "$ACTUAL_ATLAS_VERSION" = "$EXPECTED_ATLAS_VERSION" ] || {
+                echo "Atlas $ACTUAL_ATLAS_VERSION != labelled $EXPECTED_ATLAS_VERSION" >&2
+                exit 1
+              }
+
+              # The retired default must not come back with a new base image.
+              ! jq -e '\''
+                (.packages // [])
+                | map(if type == "string" then . else .source end)
+                | any(startswith("npm:@anton-kochev/answer"))
+              '\'' "$SETTINGS" >/dev/null
+
+              pi list | grep -F "npm:$EXPECTED_DEFAULT_PACKAGE" >/dev/null
+              echo "OK: Pi $EXPECTED_PI_VERSION, $EXPECTED_DEFAULT_PACKAGE $ACTUAL_ATLAS_VERSION"
             '

@@ -3,8 +3,8 @@ mod host;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -133,6 +133,12 @@ fn handle_client<F>(stream: &mut TcpStream, token: &str, image_reader: F)
 where
     F: FnOnce() -> Option<Vec<u8>>,
 {
+    // The listener is non-blocking so `serve` can poll `running` between
+    // accepts, and on macOS/BSD an accepted socket inherits that flag (Linux
+    // does not, which is why this only misbehaved on macOS). Left set, reads
+    // return `WouldBlock` before the request bytes arrive and the timeouts
+    // below are no-ops, since socket timeouts apply to blocking sockets only.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(CLIENT_TIMEOUT));
     let _ = stream.set_write_timeout(Some(CLIENT_TIMEOUT));
     let Some(request) = read_request_head(stream) else {

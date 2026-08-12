@@ -91,11 +91,27 @@ fn assemble_base_build_args_uses_dockerfile_base_and_base_tag() {
 
 #[test]
 fn assemble_base_build_args_emits_no_labels() {
-    // The base image carries no pithos labels — those are per-project.
+    // No `--label` on the command line: the base image's own labels are
+    // `LABEL` instructions in Dockerfile.base. Per-project fingerprint and
+    // version labels are the other builder's job.
     let args = assemble_base_build_args(Path::new("/srv/pithos"));
     assert!(
         !args.contains(&OsString::from("--label")),
         "base build should not emit --label, got {args:?}"
+    );
+}
+
+#[test]
+fn assemble_base_build_args_emits_no_build_args() {
+    // Determinism lock. Everything the base image installs is pinned in
+    // Dockerfile.base, so two rebuilds with no source change must produce the
+    // same image ID. A per-invocation `--build-arg` breaks that, and because
+    // `fingerprint::compute` hashes the base image ID, it would silently
+    // invalidate every project image's cache on every `pithos rebuild-base`.
+    let args = assemble_base_build_args(Path::new("/srv/pithos"));
+    assert!(
+        !args.contains(&OsString::from("--build-arg")),
+        "base build must stay deterministic — no --build-arg, got {args:?}"
     );
 }
 

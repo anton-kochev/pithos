@@ -14,9 +14,10 @@ fn assemble_run_args_emits_core_flags() {
     assert!(args.contains(&OsString::from("--rm")));
     assert!(args.contains(&OsString::from("-it")));
     assert!(!args.contains(&OsString::from("--init")));
-    assert!(args
-        .windows(2)
-        .any(|w| w[0] == "--user" && w[1] == "501:20"));
+    assert!(
+        args.windows(2)
+            .any(|w| w[0] == "--user" && w[1] == "501:20")
+    );
     assert_eq!(args.last(), Some(&OsString::from("pithos:demo")));
 }
 

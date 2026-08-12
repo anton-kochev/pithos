@@ -74,10 +74,20 @@ observers may attach and detach freely. The flag also wraps an explicit command 
 
 ## What's in the container
 
-The base image bundles the pi coding agent, preconfigured with the
-[`/answer`](https://github.com/anton-kochev/pi-extensions/tree/main/answer)
-extension available out of the box — no per-project `.pithos` entry required.
-Declare additional extensions per project under `pi.extensions` in `.pithos`
-(`npm:<version>` or `git:<url>#<ref>`).
+The base image bundles the Pi coding agent and preinstalls
+[`@pithos-kit/atlas`](https://github.com/anton-kochev/pithos-kit/tree/main/pithos.atlas),
+which provides the `/pithos` package catalog, compatibility checks, and
+interactive configuration. Both are pinned by the `PI_VERSION` and
+`ATLAS_VERSION` build args in `Dockerfile.base` — bump one and rebuild to ship
+an update — so the same commit always produces the same image and container
+startup performs no registry request. To read the versions off an image:
+`docker inspect --format '{{json .Config.Labels}}' ghcr.io/anton-kochev/pithos:base`. Atlas is seeded only into fresh project volumes, so existing projects
+can opt in with `pi install npm:@pithos-kit/atlas` or by recreating their
+volume. Volumes created before Atlas replaced the older `/answer` extension
+keep that package until recreated — it is inert, not removed automatically.
+
+Atlas is the sole default Pi package and needs no per-project `.pithos` entry.
+Declare additional packages per project under `pi.extensions` in `.pithos`
+using exact `npm:<version>` pins or `git:<url>#<ref>` specs.
 
 If you need GitHub access (`gh`, git push over HTTPS) inside the container, run `bootstrap.sh` from the shell — it sets your git identity and walks through the `gh auth login` device flow. The token persists in the project's named volume, so this is a one-time step per project.

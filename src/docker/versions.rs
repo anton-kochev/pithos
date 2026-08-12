@@ -11,8 +11,7 @@ use std::process::Command;
 /// `-c` string a fixed constant removes the last shell-injection surface
 /// belt-and-suspenders. A missing versions file yields an empty `value`,
 /// which [`parse_versions_stdout`] surfaces as [`ExtractError::EmptyValue`].
-const EXTRACT_SH: &str =
-    "for t in \"$@\"; do v=$(cat /opt/pithos-versions/\"$t\" 2>/dev/null || true); printf '%s=%s\\n' \"$t\" \"$v\"; done";
+const EXTRACT_SH: &str = "for t in \"$@\"; do v=$(cat /opt/pithos-versions/\"$t\" 2>/dev/null || true); printf '%s=%s\\n' \"$t\" \"$v\"; done";
 
 /// Failure modes for [`extract_versions`]. All variants represent
 /// launcher/installer contract violations, not user configuration errors —

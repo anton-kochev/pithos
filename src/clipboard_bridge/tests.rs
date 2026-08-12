@@ -125,9 +125,11 @@ fn random_tokens_are_128_bit_lowercase_hex() {
     let first = random_token().unwrap();
     let second = random_token().unwrap();
     assert_eq!(first.len(), 32);
-    assert!(first
-        .bytes()
-        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    assert!(
+        first
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    );
     assert_ne!(first, second);
 }
 

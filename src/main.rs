@@ -37,14 +37,25 @@ const MINIMAL_PITHOS: &str = "toolchains: {}\n";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand {
-    Build { rebuild: bool },
-    Run { mode: RunMode, cmd: Vec<String>, tmux: bool },
+    Build {
+        rebuild: bool,
+    },
+    Run {
+        mode: RunMode,
+        cmd: Vec<String>,
+        tmux: bool,
+    },
     Info,
-    Clean { all: bool },
+    Clean {
+        all: bool,
+    },
     RebuildBase,
     Help,
     Version,
-    Reject { kind: RejectKind, value: String },
+    Reject {
+        kind: RejectKind,
+        value: String,
+    },
 }
 
 impl Subcommand {
@@ -325,7 +336,11 @@ fn read_pithos(cwd: &Path, style: Style) -> Result<Vec<u8>, ExitCode> {
         Ok(b) => Ok(b),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             narrate(style, "» ERROR:", ".pithos not found");
-            narrate(style, "»", "Create a minimal .pithos here? It will contain:");
+            narrate(
+                style,
+                "»",
+                "Create a minimal .pithos here? It will contain:",
+            );
             narrate(style, "»", "");
             narrate(style, "»", "  toolchains: {}");
             narrate(style, "»", "");
@@ -661,11 +676,7 @@ fn rebuild_with_version_labels(
         .iter()
         .map(|(name, version)| format!("{name}={version}"))
         .collect();
-    narrate(
-        style,
-        "»",
-        &format!("resolved: {}", resolved.join(", ")),
-    );
+    narrate(style, "»", &format!("resolved: {}", resolved.join(", ")));
 
     let mut extra_labels: BTreeMap<String, String> = BTreeMap::new();
     for (name, version) in &versions {
@@ -1000,7 +1011,14 @@ fn run_info(
     };
 
     let config_summary = summarize_config(yaml);
-    let rendered = render_info(&project, &config_summary, &fingerprint, &tag, image.as_ref(), status);
+    let rendered = render_info(
+        &project,
+        &config_summary,
+        &fingerprint,
+        &tag,
+        image.as_ref(),
+        status,
+    );
     print!("{rendered}");
     ExitCode::SUCCESS
 }
@@ -1771,7 +1789,15 @@ mod tests {
     #[test]
     fn help_text_lists_all_wired_subcommands() {
         let t = help_text();
-        for name in ["run", "build", "info", "clean", "rebuild-base", "help", "version"] {
+        for name in [
+            "run",
+            "build",
+            "info",
+            "clean",
+            "rebuild-base",
+            "help",
+            "version",
+        ] {
             assert!(t.contains(name), "help missing subcommand {name:?}: {t}");
         }
     }
@@ -1788,7 +1814,10 @@ mod tests {
         // Lock the .pithos toolchain-format section so a refactor that drops
         // it from the prose still fails CI.
         let t = help_text();
-        assert!(t.contains("Config (.pithos):"), "help missing config section: {t}");
+        assert!(
+            t.contains("Config (.pithos):"),
+            "help missing config section: {t}"
+        );
         assert!(t.contains("flat form"), "help missing flat-form note: {t}");
         assert!(
             t.contains("dotnet: \"10.0.0\""),
@@ -1832,7 +1861,10 @@ mod tests {
             created: "now".into(),
             fingerprint: Some("other".into()),
         };
-        assert_eq!(rebuild_status("abc", Some(&img)), RebuildStatus::RebuildNeeded);
+        assert_eq!(
+            rebuild_status("abc", Some(&img)),
+            RebuildStatus::RebuildNeeded
+        );
     }
 
     #[test]
@@ -1843,7 +1875,10 @@ mod tests {
             created: "now".into(),
             fingerprint: None,
         };
-        assert_eq!(rebuild_status("abc", Some(&img)), RebuildStatus::RebuildNeeded);
+        assert_eq!(
+            rebuild_status("abc", Some(&img)),
+            RebuildStatus::RebuildNeeded
+        );
     }
 
     #[test]
@@ -1895,13 +1930,11 @@ mod tests {
 
     #[test]
     fn summarize_config_with_single_apt_uses_singular_package() {
-        let yaml = saphyr::YamlOwned::load_from_str(
-            "toolchains: {}\nextras:\n  apt: [git]\n",
-        )
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
+        let yaml = saphyr::YamlOwned::load_from_str("toolchains: {}\nextras:\n  apt: [git]\n")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
         let s = summarize_config(&yaml);
         assert!(s.contains("1 package"), "{s}");
         assert!(!s.contains("1 packages"), "{s}");
@@ -2264,7 +2297,10 @@ mod tests {
     #[test]
     fn merge_candidates_dedupes_by_id() {
         let dangling = vec![img("sha256:a", None)];
-        let tagged = vec![img("sha256:a", Some("pithos:x")), img("sha256:b", Some("pithos:y"))];
+        let tagged = vec![
+            img("sha256:a", Some("pithos:x")),
+            img("sha256:b", Some("pithos:y")),
+        ];
         let merged = merge_candidates(dangling, tagged);
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].id, "sha256:a");
@@ -2321,16 +2357,17 @@ mod tests {
     fn decide_clean_ignores_tagged_when_not_all() {
         // Locks the default-mode contract: tagged images are never considered
         // candidates unless --all is set.
-        let t = vec![img("sha256:t1", Some("pithos:x")), img("sha256:t2", Some("pithos:y"))];
+        let t = vec![
+            img("sha256:t1", Some("pithos:x")),
+            img("sha256:t2", Some("pithos:y")),
+        ];
         assert_eq!(decide_clean(false, vec![], t), CleanDecision::Nothing);
     }
 
     #[test]
     fn summarize_removal_outcome_all_ok_returns_zero() {
-        let results: Vec<Result<String, String>> = vec![
-            Ok("pithos:a".into()),
-            Ok("pithos:b".into()),
-        ];
+        let results: Vec<Result<String, String>> =
+            vec![Ok("pithos:a".into()), Ok("pithos:b".into())];
         let (code, lines) = summarize_removal_outcome(&results);
         assert_eq!(code, 0);
         assert!(lines.iter().any(|l| l.contains("removed pithos:a")));

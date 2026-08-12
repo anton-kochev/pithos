@@ -48,4 +48,3 @@ fn validate_version(toolchain: &str, value: &YamlOwned) -> Result<(), ConfigErro
     }
     Ok(())
 }
-

@@ -642,9 +642,7 @@ fn cli_exit_126_within_3s_when_daemon_unreachable() {
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !docker_ok {
-        eprintln!(
-            "cli_exit_126_within_3s_when_daemon_unreachable: skipped (docker not on PATH)"
-        );
+        eprintln!("cli_exit_126_within_3s_when_daemon_unreachable: skipped (docker not on PATH)");
         return;
     }
 

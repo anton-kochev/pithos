@@ -134,6 +134,13 @@ pub fn build_request(request: BuildRequest<'_>, style: Style) -> Result<(), Buil
 /// - shares the per-project [`BuildError`] variants so callers funnel
 ///   non-zero / spawn failures through one match arm.
 ///
+/// Carries no per-invocation build arguments on purpose: everything the base
+/// image installs is version-pinned in `Dockerfile.base`, so a rebuild with no
+/// source change is a full cache hit and leaves the base image ID untouched.
+/// That matters beyond build time — [`crate::fingerprint::compute`] hashes the
+/// base image ID, so a base image that changed for no reason would invalidate
+/// every project image's cache.
+///
 /// Shells out to:
 ///   `docker build --progress=plain -f Dockerfile.base -t <BASE_IMAGE_REF> <context>`
 pub fn build_base(context: &Path, style: Style) -> Result<(), BuildError> {

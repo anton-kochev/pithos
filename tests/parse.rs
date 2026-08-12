@@ -1,4 +1,4 @@
-use pithos::config::{load, ConfigError};
+use pithos::config::{ConfigError, load};
 
 #[test]
 fn valid_parses() {
@@ -684,7 +684,10 @@ fn extras_non_string_nested_key_rejected() {
     let err = load(bytes).expect_err("expected non-string-extras-key error");
 
     // Assert
-    assert!(matches!(err, ConfigError::NonStringExtrasKey), "got {err:?}");
+    assert!(
+        matches!(err, ConfigError::NonStringExtrasKey),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -887,7 +890,10 @@ fn pi_non_string_version_rejected() {
     let err = load(bytes).expect_err("expected non-string-pi-version error");
 
     // Assert
-    assert!(matches!(err, ConfigError::NonStringPiVersion), "got {err:?}");
+    assert!(
+        matches!(err, ConfigError::NonStringPiVersion),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -970,7 +976,10 @@ fn pi_explicit_true_version_rejected() {
     let err = load(bytes).expect_err("expected non-string-pi-version error");
 
     // Assert
-    assert!(matches!(err, ConfigError::NonStringPiVersion), "got {err:?}");
+    assert!(
+        matches!(err, ConfigError::NonStringPiVersion),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -982,7 +991,10 @@ fn pi_explicit_false_version_rejected() {
     let err = load(bytes).expect_err("expected non-string-pi-version error");
 
     // Assert
-    assert!(matches!(err, ConfigError::NonStringPiVersion), "got {err:?}");
+    assert!(
+        matches!(err, ConfigError::NonStringPiVersion),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -1093,7 +1105,8 @@ fn pi_extensions_sequence_rejected() {
 #[test]
 fn pi_extensions_non_string_key_rejected() {
     // Arrange
-    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    42: \"npm:0.10.7\"\n";
+    let bytes =
+        b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    42: \"npm:0.10.7\"\n";
 
     // Act
     let err = load(bytes).expect_err("expected non-string-extension-name error");
@@ -1155,7 +1168,8 @@ fn pi_extensions_unknown_prefix_rejected() {
 #[test]
 fn pi_extensions_floating_npm_version_rejected() {
     // Arrange
-    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"npm:latest\"\n";
+    let bytes =
+        b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"npm:latest\"\n";
 
     // Act
     let err = load(bytes).expect_err("expected floating-extension-version error");
@@ -1171,7 +1185,8 @@ fn pi_extensions_floating_npm_version_rejected() {
 #[test]
 fn pi_extensions_malformed_npm_version_rejected() {
     // Arrange
-    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"npm:1.x\"\n";
+    let bytes =
+        b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"npm:1.x\"\n";
 
     // Act
     let err = load(bytes).expect_err("expected invalid-extension-version error");
@@ -1203,7 +1218,8 @@ fn pi_extensions_git_missing_ref_rejected() {
 #[test]
 fn pi_extensions_git_empty_url_rejected() {
     // Arrange
-    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"git:#main\"\n";
+    let bytes =
+        b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"git:#main\"\n";
 
     // Act
     let err = load(bytes).expect_err("expected empty-git-url error");
@@ -1255,14 +1271,21 @@ fn pi_extensions_invalid_prefix_message_lists_valid_prefixes() {
 
     // Assert — message names both prefixes so users can self-correct
     let msg = err.to_string();
-    assert!(msg.contains("npm:"), "message should name npm prefix: {msg}");
-    assert!(msg.contains("git:"), "message should name git prefix: {msg}");
+    assert!(
+        msg.contains("npm:"),
+        "message should name npm prefix: {msg}"
+    );
+    assert!(
+        msg.contains("git:"),
+        "message should name git prefix: {msg}"
+    );
 }
 
 #[test]
 fn pi_extensions_floating_message_suggests_exact_version() {
     // Arrange
-    let bytes = b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"npm:latest\"\n";
+    let bytes =
+        b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    foo: \"npm:latest\"\n";
 
     // Act
     let err = load(bytes).expect_err("expected floating-extension-version error");

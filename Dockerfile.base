@@ -8,6 +8,9 @@ ARG HOST_UID=501
 ARG HOST_GID=20
 ARG NODE_VERSION=24
 ARG BUN_VERSION=1.3.14
+ARG PI_VERSION=0.84.0
+ARG ATLAS_VERSION=0.2.0
+ARG DEFAULT_NPM_PACKAGE=@pithos-kit/atlas
 
 ENV DEBIAN_FRONTEND=noninteractive \
   LANG=C.UTF-8 \
@@ -62,7 +65,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin U
 # floor used when `.pithos` does not pin `pi.version`; rebuild the base
 # image to bump the floor.
 RUN mkdir -p /opt/pi-npm \
-  && npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@0.75.3 \
+  && npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@${PI_VERSION} \
   && chown -R ${HOST_UID}:${HOST_GID} /opt/pi-npm
 
 # --- Create the pi user (UID-matched to macOS default 501:20) ---
@@ -96,13 +99,27 @@ RUN set -e; for p in /opt/pi-patches/*.mjs; do [ -e "$p" ] || continue; node "$p
 
 USER pi
 
-# --- Bake default pi extensions into the seeded defaults ---
-# PI_CODING_AGENT_DIR redirects pi's agent dir to /opt/pi-defaults/, so the
+# --- Bake the default Pi package into the seeded defaults ---
+# PI_CODING_AGENT_DIR redirects Pi's agent dir to /opt/pi-defaults/, so the
 # install lands in the image-baked defaults. The entrypoint's `cp -rn` then
-# seeds it into every container's ~/.pi/agent/ and pi auto-loads it — no
-# per-project .pithos entry required. Pinned by version; bump here and rebuild
-# the base image to ship an update.
-RUN PI_CODING_AGENT_DIR=/opt/pi-defaults pi install npm:@anton-kochev/answer@0.2.0
+# seeds it into every fresh container's ~/.pi/agent/ and Pi auto-loads it — no
+# per-project .pithos entry required. Pinned by version: bump ATLAS_VERSION and
+# rebuild the base image to ship an update.
+#
+# PITHOS_DEFAULT_NPM_PACKAGE is the runtime half of the contract — entrypoint.sh
+# reads it to exempt this package from the prune pass, which would otherwise
+# uninstall it on every start as "not declared by the project".
+ENV PITHOS_DEFAULT_NPM_PACKAGE=${DEFAULT_NPM_PACKAGE}
+RUN PI_CODING_AGENT_DIR=/opt/pi-defaults \
+      pi install "npm:${DEFAULT_NPM_PACKAGE}@${ATLAS_VERSION}"
+
+# --- Record what this image actually contains ---
+# The CI smoke test reads these back with `docker inspect` and asserts the
+# installed runtime matches, instead of querying the npm registry at test time
+# (which races a publish) or hardcoding the versions a second time.
+LABEL dev.pithos.pi-version="${PI_VERSION}" \
+      dev.pithos.atlas-version="${ATLAS_VERSION}" \
+      dev.pithos.default-npm-package="${DEFAULT_NPM_PACKAGE}"
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

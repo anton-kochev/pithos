@@ -87,10 +87,8 @@ mod tests {
 
     #[test]
     fn manifest_empty_when_extensions_empty() {
-        let yaml = config::load(
-            b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions: {}\n",
-        )
-        .unwrap();
+        let yaml = config::load(b"toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions: {}\n")
+            .unwrap();
         assert_eq!(manifest(&yaml), "");
         assert_eq!(count(&yaml), 0);
     }

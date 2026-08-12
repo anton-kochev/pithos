@@ -301,7 +301,10 @@ mod tests {
         let mut sink: Vec<u8> = Vec::new();
         let tail = stream_lines(input, &mut sink, Style::plain(), 3);
         // The `==` branch only fires on the (N+1)th push; at exactly N, nothing evicts.
-        assert_eq!(tail, vec!["l1".to_string(), "l2".to_string(), "l3".to_string()]);
+        assert_eq!(
+            tail,
+            vec!["l1".to_string(), "l2".to_string(), "l3".to_string()]
+        );
     }
 
     #[test]
@@ -309,7 +312,10 @@ mod tests {
         let input: &[u8] = b"l1\nl2\nl3\n";
         let mut sink: Vec<u8> = Vec::new();
         let tail = stream_lines(input, &mut sink, Style::plain(), 20);
-        assert_eq!(tail, vec!["l1".to_string(), "l2".to_string(), "l3".to_string()]);
+        assert_eq!(
+            tail,
+            vec!["l1".to_string(), "l2".to_string(), "l3".to_string()]
+        );
     }
 
     #[test]
