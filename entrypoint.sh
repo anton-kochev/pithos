@@ -20,11 +20,6 @@ set -euo pipefail
 
 PI_AGENT_DIR="/home/pi/.pi/agent"
 DEFAULTS_DIR="/opt/pi-defaults"
-# Name of the image-baked default Pi package, set as ENV by Dockerfile.base so
-# the name has exactly one definition. Fail loudly rather than fall back to a
-# literal: a wrong or missing value makes the prune pass below uninstall the
-# baked default on every container start, which is silent and confusing.
-DEFAULT_NPM_PACKAGE="${PITHOS_DEFAULT_NPM_PACKAGE:?base image did not set PITHOS_DEFAULT_NPM_PACKAGE}"
 
 # Ensure the directory structure exists.
 mkdir -p "$PI_AGENT_DIR/sessions"
@@ -110,9 +105,8 @@ if [[ -r "$MANIFEST" ]]; then
   # as duplicated `/cmd:1, /cmd:2` entries.
   #
   # npm only. Git extensions stay additive-only (see the `git:` case in the
-  # reconcile loop above). The image-baked default package is a user-removable
-  # default rather than a project declaration, so this pass must not prune it
-  # when present — hence the $default filter below.
+  # reconcile loop above). Every npm package must be declared in `.pithos`;
+  # there are no image-baked packages exempt from pruning.
   settings="$PI_AGENT_DIR/settings.json"
   if [[ -r "$settings" ]]; then
     manifest_npm_names=$(awk -F'\t' '$2 ~ /^npm:/ { print $1 }' "$MANIFEST")
@@ -126,20 +120,12 @@ if [[ -r "$MANIFEST" ]]; then
     # The version strip uses a lookbehind so it only eats a *trailing* version,
     # never a leading npm scope: `@scope/pkg` has no version and must survive
     # whole. Without it, `sub("@[^@]*$"; "")` matches from index 0 and returns
-    # "" for every unversioned scoped package — which the empty-guard above
-    # then skips, so such a package could never be pruned. Both the bare and
-    # versioned forms of $default are exempted: pinned installs record
-    # `npm:<name>@<version>`, but volumes seeded by earlier unpinned builds
-    # carry the bare form.
-    done < <(jq -r --arg default "$DEFAULT_NPM_PACKAGE" '
+    # "" for every unversioned scoped package, which the empty guard above
+    # would then skip.
+    done < <(jq -r '
       .packages // []
       | map(if type == "string" then . else .source end)
       | map(select(startswith("npm:")))
-      | map(select(
-          ((. == ("npm:" + $default))
-            or startswith("npm:" + $default + "@"))
-          | not
-        ))
       | map(sub("^npm:"; "") | sub("(?<=.)@[^@]*$"; ""))
       | .[]
     ' "$settings" 2>/dev/null)

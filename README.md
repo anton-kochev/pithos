@@ -72,22 +72,51 @@ lifecycle (detaching it ends the run, since the container is `--rm`); additional
 observers may attach and detach freely. The flag also wraps an explicit command —
 `pithos --tmux -- bash` runs `bash` inside the session instead of pi.
 
+## Pithos Kit
+
+[`pithos-kit`](https://github.com/anton-kochev/pithos-kit) is the companion
+collection of Pi packages for Pithos. Its independently versioned packages add
+features such as prompt polishing, interactive question answering, task
+tracking, command safeguards, architecture agents, and additional skills. See
+the [Pithos Kit package catalog](https://github.com/anton-kochev/pithos-kit#packages)
+for the complete list.
+
+Pithos Kit is optional: no Pithos Kit package is installed by default. Add the
+packages you want under `pi.extensions` in `.pithos`, using exact versions:
+
+```yaml
+toolchains:
+  rust: "1.85.0"
+pi:
+  version: "0.84.1"
+  extensions:
+    "@pithos-kit/atlas": "npm:0.2.0"
+    "@pithos-kit/squiggle": "npm:0.4.0"
+    "@pithos-kit/telos": "npm:0.2.0"
+```
+
+Restart Pithos after editing `.pithos`; it reconciles the declared packages
+when the container starts. Third-party Pi packages use the same `pi.extensions`
+mapping.
+
+[`@pithos-kit/atlas`](https://github.com/anton-kochev/pithos-kit/tree/main/pithos.atlas)
+provides the `/pithos` package catalog, compatibility checks, and configuration
+UI. To use it, declare Atlas as shown above, restart Pithos, and run
+`/pithos config` inside Pi to manage the other Pithos Kit packages.
+
 ## What's in the container
 
-The base image bundles the Pi coding agent and preinstalls
-[`@pithos-kit/atlas`](https://github.com/anton-kochev/pithos-kit/tree/main/pithos.atlas),
-which provides the `/pithos` package catalog, compatibility checks, and
-interactive configuration. Both are pinned by the `PI_VERSION` and
-`ATLAS_VERSION` build args in `Dockerfile.base` — bump one and rebuild to ship
-an update — so the same commit always produces the same image and container
-startup performs no registry request. To read the versions off an image:
-`docker inspect --format '{{json .Config.Labels}}' ghcr.io/anton-kochev/pithos:base`. Atlas is seeded only into fresh project volumes, so existing projects
-can opt in with `pi install npm:@pithos-kit/atlas` or by recreating their
-volume. Volumes created before Atlas replaced the older `/answer` extension
-keep that package until recreated — it is inert, not removed automatically.
+The base image bundles the Pi coding agent but no Pi packages. Pi is pinned by
+the `PI_VERSION` build argument in `Dockerfile.base` so the same commit always
+produces the same runtime. To read the version from an image:
 
-Atlas is the sole default Pi package and needs no per-project `.pithos` entry.
-Declare additional packages per project under `pi.extensions` in `.pithos`
-using exact `npm:<version>` pins or `git:<url>#<ref>` specs.
+```sh
+docker inspect --format '{{index .Config.Labels "dev.pithos.pi-version"}}' \
+  ghcr.io/anton-kochev/pithos:base
+```
+
+Project packages are installed from `pi.extensions` when the container starts.
+The mapping accepts exact `npm:<version>` pins or `git:<url>#<ref>` specs;
+undeclared npm packages are removed from the project's persistent volume.
 
 If you need GitHub access (`gh`, git push over HTTPS) inside the container, run `bootstrap.sh` from the shell — it sets your git identity and walks through the `gh auth login` device flow. The token persists in the project's named volume, so this is a one-time step per project.
