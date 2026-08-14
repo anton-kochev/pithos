@@ -22,6 +22,24 @@ fn assemble_run_args_emits_core_flags() {
 }
 
 #[test]
+fn assemble_run_args_enables_truecolor_in_container() {
+    let args = assemble_run_args(
+        "pithos:demo",
+        "demo",
+        Path::new("/tmp/x"),
+        None,
+        None,
+        RunEnvironment::default(),
+        &[],
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w[0] == "-e" && w[1] == "COLORTERM=truecolor"),
+        "missing -e COLORTERM=truecolor pair in {args:?}"
+    );
+}
+
+#[test]
 fn assemble_run_args_names_container_and_hostname_from_project_and_pid() {
     let pid = std::process::id();
     let args = assemble_run_args(

@@ -52,6 +52,7 @@ pub struct RunRequest<'a> {
 ///            [-v <PITHOS_REPO>/pi-config/... per Layer 3 item, if exists]
 ///            [-v <extensions_manifest>:/etc/pithos/extensions.list:ro, if file exists]
 ///            [--env-file <.env>, if Some]
+///            -e COLORTERM=truecolor
 ///            [-v <clipboard-shim>:/usr/local/bin/xclip:ro]
 ///            [-e PITHOS_CLIPBOARD_URL]
 ///            -w /workspace/<project> <image_tag> [<cmd>...]
@@ -239,6 +240,8 @@ fn render_run_args(
         args.push("--env-file".into());
         args.push(env_path.into());
     }
+    args.push("-e".into());
+    args.push("COLORTERM=truecolor".into());
     if let Some(shim) = environment.clipboard_shim {
         let mut bind = OsString::from(shim);
         bind.push(":/usr/local/bin/xclip:ro");
