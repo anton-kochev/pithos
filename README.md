@@ -47,7 +47,9 @@ pithos help         # full command reference
 pithos version      # print the pithos version
 ```
 
-Run `pithos help` for the full flag reference (`--rebuild`, `--no-build`, etc.).
+Run `pithos help` for the full flag reference (`--rebuild`, `--no-build`, `--session`,
+etc.). When the first argument is a flag, `run` is implied — `pithos --tmux` and
+`pithos run --tmux` are the same command.
 
 ### Clipboard screenshots
 
@@ -71,6 +73,25 @@ pithos prints the exact command on launch. The primary terminal owns the session
 lifecycle (detaching it ends the run, since the container is `--rm`); additional
 observers may attach and detach freely. The flag also wraps an explicit command —
 `pithos --tmux -- bash` runs `bash` inside the session instead of pi.
+
+### Resuming a Pi session
+
+Pi sessions live in the project's named volume (`pithos-home-<project>`), so they
+survive the `--rm` container. Three ways back into one:
+
+```sh
+pithos --continue                     # most recent session for this project
+pithos --resume                       # Pi's interactive session picker
+pithos --session 01a0335e             # a specific session, full or partial UUID
+```
+
+`--session` also accepts a session file path. Partial ids are matched by prefix
+against this project's sessions first, then across all projects — a match from a
+different project makes Pi offer to fork it into the current one. The selectors
+are mutually exclusive, and none of them can be combined with an explicit command
+(that command would replace the Pi invocation entirely, so pithos rejects the
+combination with exit 2 instead of dropping the flag). They do compose with
+`--tmux`, `--rebuild`, and `--no-build`.
 
 ## Pithos Kit
 

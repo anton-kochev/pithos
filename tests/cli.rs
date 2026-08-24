@@ -584,6 +584,78 @@ fn cli_run_subcommand_with_cmd_reaches_docker_shellout() {
 }
 
 #[test]
+fn cli_bare_session_flag_reaches_docker_shellout() {
+    // Arrange — same no-docker harness as the cmd test, but with the bare
+    // `pithos --session <id>` form: no subcommand, leading flag. A parse-phase
+    // rejection would narrate "unknown flag:" or "unknown subcommand:".
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), VALID).unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .args(["--session", "01a0335e-142c-7d6b-bebf-fe07bc2a3935"])
+        .current_dir(&td)
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert()
+        .code(1);
+
+    // Assert
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unknown flag:"),
+        "--session was rejected as unknown flag: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown subcommand:"),
+        "--session was rejected as unknown subcommand: {stderr}"
+    );
+    assert!(
+        td.path().join(".pithos.d").join("Dockerfile").is_file(),
+        "Dockerfile should be emitted before the docker shellout failure"
+    );
+}
+
+#[test]
+fn cli_session_flag_with_explicit_cmd_exits_2() {
+    // The selector would be silently dropped by an explicit command, so the
+    // parser rejects the combination before any I/O.
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), VALID).unwrap();
+
+    // Act
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .args(["--session", "01a0335e", "--", "bash"])
+        .current_dir(&td)
+        .assert()
+        .code(2);
+
+    // Assert — narration on stderr only, and the reject short-circuits before
+    // the Dockerfile write.
+    let output = assert.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be combined with an explicit command"),
+        "stderr missing the conflict message: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout must stay empty: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !td.path().join(".pithos.d").exists(),
+        "parse-phase reject must not touch the filesystem"
+    );
+}
+
+#[test]
 fn cli_build_rejects_unknown_flag_writes_only_to_stderr() {
     // T-505 lock-down: narration goes to stderr; stdout stays clean so it's
     // safe to redirect stdout to /dev/null without losing error messaging.

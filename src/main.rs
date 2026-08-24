@@ -13,6 +13,10 @@ use pithos::output::{Style, narrate};
 enum RejectKind {
     Subcommand,
     Flag,
+    /// A recognized flag used wrongly — a missing value, or a combination the
+    /// CLI does not accept. Carries a full sentence, so it narrates without
+    /// the "unknown flag:" prefix that would misdescribe it.
+    Usage,
 }
 
 /// Execution mode for the `run` (and internally for `build`) pipeline.
@@ -27,9 +31,33 @@ enum RunMode {
     NoBuild,
 }
 
+/// Which Pi session the container should attach to.
+///
+/// Same closed-enum rationale as [`RunMode`]: the three selectors are
+/// mutually exclusive, so the invalid combinations are unrepresentable
+/// rather than merely rejected.
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum SessionMode {
+    /// No session flag — Pi starts fresh (the image `CMD` runs unmodified).
+    None,
+    /// `--session <id>`: a session file path or (partial) UUID.
+    Id(String),
+    /// `--continue`/`-c`: resume the most recent session for this project.
+    Continue,
+    /// `--resume`/`-r`: let Pi show its interactive session picker.
+    Resume,
+}
+
 // Short usage line for fail-fast reject paths. `pithos help` prints the full usage.
 const USAGE: &str =
     "usage: pithos [run | build | info | clean | rebuild-base | help | version] [options]";
+
+// Reject messages for the session selectors. Held as constants so the parser
+// and its tests quote the same wording.
+const SESSION_EXCLUSIVE: &str = "--session, --continue and --resume are mutually exclusive";
+const SESSION_NEEDS_ID: &str = "--session requires a session id";
+const SESSION_WITH_CMD: &str =
+    "--session/--continue/--resume cannot be combined with an explicit command";
 
 // Content written when the user accepts the prompt to create a missing `.pithos`.
 // Mirrors the example in the prompt narration; validates cleanly through `pithos::config::load`.
@@ -44,6 +72,7 @@ enum Subcommand {
         mode: RunMode,
         cmd: Vec<String>,
         tmux: bool,
+        session: SessionMode,
     },
     Info,
     Clean {
@@ -62,11 +91,13 @@ impl Subcommand {
     fn from_args(args: &[String]) -> Self {
         match args.get(1).map(String::as_str) {
             // Bare `pithos` = `pithos run`: matches common-invocation muscle memory.
-            None => Self::Run {
-                mode: RunMode::Default,
-                cmd: Vec::new(),
-                tmux: false,
-            },
+            None => Self::parse_run(&[]),
+            Some("run") => Self::parse_run(&args[2..]),
+            // A leading flag implies `run` too, so `pithos --session <id>` and
+            // `pithos --tmux` work without spelling out the subcommand. Unknown
+            // flags still fail fast — `parse_run` rejects them as flags rather
+            // than as subcommands.
+            Some(s) if s.starts_with('-') => Self::parse_run(&args[1..]),
             Some("build") => {
                 let mut rebuild = false;
                 for arg in args.iter().skip(2) {
@@ -81,53 +112,6 @@ impl Subcommand {
                     }
                 }
                 Self::Build { rebuild }
-            }
-            Some("run") => {
-                let mut mode = RunMode::Default;
-                let mut cmd: Vec<String> = Vec::new();
-                let mut tmux = false;
-                let mut iter = args.iter().skip(2);
-                while let Some(arg) = iter.next() {
-                    match arg.as_str() {
-                        "--" => {
-                            cmd.extend(iter.by_ref().cloned());
-                            break;
-                        }
-                        "--tmux" => tmux = true,
-                        "--rebuild" => match mode {
-                            RunMode::NoBuild => {
-                                return Self::Reject {
-                                    kind: RejectKind::Flag,
-                                    value: "--rebuild and --no-build are mutually exclusive"
-                                        .to_string(),
-                                };
-                            }
-                            RunMode::Default | RunMode::Rebuild => mode = RunMode::Rebuild,
-                        },
-                        "--no-build" => match mode {
-                            RunMode::Rebuild => {
-                                return Self::Reject {
-                                    kind: RejectKind::Flag,
-                                    value: "--rebuild and --no-build are mutually exclusive"
-                                        .to_string(),
-                                };
-                            }
-                            RunMode::Default | RunMode::NoBuild => mode = RunMode::NoBuild,
-                        },
-                        s if s.starts_with("--") => {
-                            return Self::Reject {
-                                kind: RejectKind::Flag,
-                                value: s.to_string(),
-                            };
-                        }
-                        _ => {
-                            cmd.push(arg.clone());
-                            cmd.extend(iter.by_ref().cloned());
-                            break;
-                        }
-                    }
-                }
-                Self::Run { mode, cmd, tmux }
             }
             Some("help") => match args.get(2) {
                 None => Self::Help,
@@ -179,6 +163,116 @@ impl Subcommand {
         }
     }
 
+    /// Parse the argument tail of a `run` invocation: everything after
+    /// `pithos run`, or after `pithos` itself when a leading flag implies the
+    /// subcommand.
+    ///
+    /// Flag parsing stops at the first non-flag token (or at `--`); from there
+    /// every remaining token belongs to the container command verbatim.
+    fn parse_run(rest: &[String]) -> Self {
+        let mut mode = RunMode::Default;
+        let mut cmd: Vec<String> = Vec::new();
+        let mut tmux = false;
+        let mut session = SessionMode::None;
+        let mut i = 0;
+        while i < rest.len() {
+            match rest[i].as_str() {
+                "--" => {
+                    cmd.extend(rest[i + 1..].iter().cloned());
+                    break;
+                }
+                "--tmux" => tmux = true,
+                "--rebuild" => match mode {
+                    RunMode::NoBuild => {
+                        return Self::Reject {
+                            kind: RejectKind::Usage,
+                            value: "--rebuild and --no-build are mutually exclusive".to_string(),
+                        };
+                    }
+                    RunMode::Default | RunMode::Rebuild => mode = RunMode::Rebuild,
+                },
+                "--no-build" => match mode {
+                    RunMode::Rebuild => {
+                        return Self::Reject {
+                            kind: RejectKind::Usage,
+                            value: "--rebuild and --no-build are mutually exclusive".to_string(),
+                        };
+                    }
+                    RunMode::Default | RunMode::NoBuild => mode = RunMode::NoBuild,
+                },
+                "--session" => {
+                    // A value starting with `-` is a forgotten id, not an id:
+                    // session ids are UUIDs and paths, never flags.
+                    let Some(id) = rest
+                        .get(i + 1)
+                        .filter(|v| !v.is_empty() && !v.starts_with('-'))
+                    else {
+                        return Self::Reject {
+                            kind: RejectKind::Usage,
+                            value: SESSION_NEEDS_ID.to_string(),
+                        };
+                    };
+                    if let Some(reject) =
+                        Self::select_session(&mut session, SessionMode::Id(id.clone()))
+                    {
+                        return reject;
+                    }
+                    i += 1;
+                }
+                "--continue" | "-c" => {
+                    if let Some(reject) = Self::select_session(&mut session, SessionMode::Continue)
+                    {
+                        return reject;
+                    }
+                }
+                "--resume" | "-r" => {
+                    if let Some(reject) = Self::select_session(&mut session, SessionMode::Resume) {
+                        return reject;
+                    }
+                }
+                s if s.starts_with('-') => {
+                    return Self::Reject {
+                        kind: RejectKind::Flag,
+                        value: s.to_string(),
+                    };
+                }
+                _ => {
+                    cmd.extend(rest[i..].iter().cloned());
+                    break;
+                }
+            }
+            i += 1;
+        }
+        // An explicit command replaces the whole Pi argv, which would silently
+        // drop the selector — reject rather than lie about what was launched.
+        if session != SessionMode::None && !cmd.is_empty() {
+            return Self::Reject {
+                kind: RejectKind::Usage,
+                value: SESSION_WITH_CMD.to_string(),
+            };
+        }
+        Self::Run {
+            mode,
+            cmd,
+            tmux,
+            session,
+        }
+    }
+
+    /// Apply a session selector. Repeating the identical selector is a no-op
+    /// (mirroring `--no-build --no-build`); a second, different one rejects.
+    fn select_session(current: &mut SessionMode, next: SessionMode) -> Option<Self> {
+        if *current == SessionMode::None || *current == next {
+            *current = next;
+            None
+        } else {
+            Some(Self::Reject {
+                kind: RejectKind::Usage,
+                value: SESSION_EXCLUSIVE.to_string(),
+            })
+        }
+    }
+
     fn requires_daemon(&self) -> bool {
         matches!(
             self,
@@ -210,6 +304,7 @@ fn main() -> ExitCode {
                 narrate(style, "» ERROR:", &format!("unknown subcommand: {value}"))
             }
             RejectKind::Flag => narrate(style, "» ERROR:", &format!("unknown flag: {value}")),
+            RejectKind::Usage => narrate(style, "» ERROR:", value),
         }
         narrate(style, "»", USAGE);
         return ExitCode::from(2);
@@ -308,7 +403,12 @@ fn main() -> ExitCode {
             rebuild,
             style,
         ),
-        Subcommand::Run { mode, cmd, tmux } => run_run(
+        Subcommand::Run {
+            mode,
+            cmd,
+            tmux,
+            session,
+        } => run_run(
             &cwd,
             &yaml,
             &pithos_bytes,
@@ -317,6 +417,7 @@ fn main() -> ExitCode {
             mode,
             &cmd,
             tmux,
+            &session,
             style,
         ),
         Subcommand::Info => run_info(&cwd, &yaml, &pithos_bytes, &dockerfile_content, style),
@@ -430,6 +531,25 @@ fn discover_env_file(cwd: &Path) -> Option<std::path::PathBuf> {
     p.exists().then_some(p)
 }
 
+/// Materialize the Pi launch argv with the session selector appended.
+/// [`SessionMode::None`] yields an empty vec, meaning "add nothing — let
+/// docker fall through to the image `CMD`". Built from
+/// [`pithos::dockerfile::PI_LAUNCH_ARGV`] so the launcher and the generated
+/// `CMD` cannot drift, same as [`pithos::docker::tmux_wrap`].
+fn pi_session_argv(session: &SessionMode) -> Vec<String> {
+    let flags: Vec<String> = match session {
+        SessionMode::None => return Vec::new(),
+        SessionMode::Id(id) => vec!["--session".to_string(), id.clone()],
+        SessionMode::Continue => vec!["--continue".to_string()],
+        SessionMode::Resume => vec!["--resume".to_string()],
+    };
+    pithos::dockerfile::PI_LAUNCH_ARGV
+        .iter()
+        .map(|s| s.to_string())
+        .chain(flags)
+        .collect()
+}
+
 fn version_text() -> String {
     format!("pithos {}", env!("CARGO_PKG_VERSION"))
 }
@@ -441,7 +561,8 @@ fn help_text() -> String {
          usage: pithos <COMMAND> [OPTIONS]\n\
          \n\
          Commands:\n  \
-           run [cmd...]   Build-if-needed, then launch container (default when no command given)\n  \
+           run [cmd...]   Build-if-needed, then launch container (implied when the first\n                 \
+           argument is a flag, or when no command is given)\n  \
            build          Build the image without launching\n  \
            info           Print project config, fingerprint, and image status\n  \
            clean          Remove dangling pithos images (or all with --all)\n  \
@@ -450,7 +571,8 @@ fn help_text() -> String {
            version        Print the pithos version\n\
          \n\
          Options:\n  \
-           run:    --rebuild, --no-build, --tmux, -- <cmd...>\n  \
+           run:    --rebuild, --no-build, --tmux,\n          \
+                   --session <id>, --continue/-c, --resume/-r, -- <cmd...>\n  \
            build:  --rebuild\n\
          \n\
          Config (.pithos):\n  \
@@ -459,6 +581,12 @@ fn help_text() -> String {
              toolchains:\n      \
                dotnet: \"10.0.0\"\n      \
                rust: \"1.85.0\"\n\
+         \n\
+         Pi sessions:\n  \
+           --session <id> resumes a specific session (a full or partial UUID, or a\n  \
+           session file path), --continue resumes the most recent one for this\n  \
+           project, and --resume opens Pi\'s interactive picker. None of the three\n  \
+           can be combined with an explicit command.\n\
          \n\
          All narration is written to stderr; stdout is reserved for container output and\n\
          for `pithos help` / `pithos version`.",
@@ -786,6 +914,7 @@ fn run_run(
     mode: RunMode,
     cmd: &[String],
     tmux: bool,
+    session: &SessionMode,
     style: Style,
 ) -> ExitCode {
     let ensured = match ensure_image(
@@ -823,6 +952,16 @@ fn run_run(
     let clipboard_url = clipboard_bridge
         .as_ref()
         .map(pithos::clipboard_bridge::ClipboardBridge::container_url);
+
+    // A session selector turns the implicit image CMD into an explicit Pi
+    // argv carrying the flag. The parser guarantees `cmd` is empty here, so
+    // nothing the user asked for is being overwritten.
+    let session_cmd = pi_session_argv(session);
+    let cmd: &[String] = if session_cmd.is_empty() {
+        cmd
+    } else {
+        &session_cmd
+    };
 
     // When --tmux is set, run the effective command inside a named tmux
     // session so a second terminal can attach and co-drive it. The wrapper
@@ -1416,13 +1555,31 @@ mod tests {
     }
 
     #[test]
-    fn from_args_flag_before_subcommand_is_unknown_subcommand() {
-        // `--rebuild` sitting in args[1] falls through the subcommand path.
+    fn from_args_leading_flag_implies_run() {
+        // A leading flag means `run` is implied, so `--rebuild` is parsed as a
+        // run flag and the following token becomes the container command —
+        // it is no longer read as a subcommand.
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "--rebuild", "build"])),
+            Subcommand::Run {
+                mode: RunMode::Rebuild,
+                cmd: vec!["build".to_string()],
+                tmux: false,
+                session: SessionMode::None,
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_leading_unknown_flag_is_rejected_as_flag() {
+        // Implied-run does not loosen the rejection surface: an unrecognized
+        // leading flag still fails fast, just as a flag rather than as a
+        // subcommand.
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "--nope"])),
             Subcommand::Reject {
-                kind: RejectKind::Subcommand,
-                value: "--rebuild".to_string(),
+                kind: RejectKind::Flag,
+                value: "--nope".to_string(),
             }
         );
     }
@@ -1435,6 +1592,7 @@ mod tests {
                 mode: RunMode::Default,
                 cmd: vec![],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1458,6 +1616,7 @@ mod tests {
                 mode: RunMode::Default,
                 cmd: vec![],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1470,6 +1629,7 @@ mod tests {
                 mode: RunMode::Rebuild,
                 cmd: vec![],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1493,6 +1653,7 @@ mod tests {
                 mode: RunMode::Rebuild,
                 cmd: vec!["extra".to_string()],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1505,6 +1666,7 @@ mod tests {
                 mode: RunMode::Default,
                 cmd: vec!["bash".to_string()],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1517,6 +1679,7 @@ mod tests {
                 mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "-c".to_string(), "echo".to_string()],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1529,6 +1692,7 @@ mod tests {
                 mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "-c".to_string(), "echo".to_string()],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1541,6 +1705,7 @@ mod tests {
                 mode: RunMode::Rebuild,
                 cmd: vec!["bash".to_string()],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1553,6 +1718,7 @@ mod tests {
                 mode: RunMode::Rebuild,
                 cmd: vec![],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1568,6 +1734,7 @@ mod tests {
                 mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "--rebuild".to_string()],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1580,6 +1747,7 @@ mod tests {
                 mode: RunMode::NoBuild,
                 cmd: vec![],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1592,6 +1760,7 @@ mod tests {
                 mode: RunMode::NoBuild,
                 cmd: vec!["bash".to_string()],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1601,7 +1770,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--rebuild", "--no-build"])),
             Subcommand::Reject {
-                kind: RejectKind::Flag,
+                kind: RejectKind::Usage,
                 value: "--rebuild and --no-build are mutually exclusive".to_string(),
             }
         );
@@ -1612,7 +1781,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--no-build", "--rebuild"])),
             Subcommand::Reject {
-                kind: RejectKind::Flag,
+                kind: RejectKind::Usage,
                 value: "--rebuild and --no-build are mutually exclusive".to_string(),
             }
         );
@@ -1626,6 +1795,7 @@ mod tests {
                 mode: RunMode::Default,
                 cmd: vec!["--no-build".to_string()],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1638,6 +1808,7 @@ mod tests {
                 mode: RunMode::Default,
                 cmd: vec!["bash".to_string(), "--no-build".to_string()],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1653,6 +1824,7 @@ mod tests {
                 mode: RunMode::NoBuild,
                 cmd: vec![],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
     }
@@ -1671,7 +1843,7 @@ mod tests {
                 "extra"
             ])),
             Subcommand::Reject {
-                kind: RejectKind::Flag,
+                kind: RejectKind::Usage,
                 value: "--rebuild and --no-build are mutually exclusive".to_string(),
             }
         );
@@ -1692,6 +1864,7 @@ mod tests {
                 mode: RunMode::Default,
                 cmd: vec![],
                 tmux: true,
+                session: SessionMode::None,
             }
         );
     }
@@ -1711,6 +1884,7 @@ mod tests {
                 mode: RunMode::Rebuild,
                 cmd: vec!["bash".to_string()],
                 tmux: true,
+                session: SessionMode::None,
             }
         );
     }
@@ -1730,8 +1904,409 @@ mod tests {
                 mode: RunMode::Default,
                 cmd: vec!["--tmux".to_string()],
                 tmux: false,
+                session: SessionMode::None,
             }
         );
+    }
+
+    #[test]
+    fn from_args_session_id_bare_implies_run() {
+        // Arrange — the headline invocation: no subcommand, just the flag.
+        let argv = args(&[
+            "pithos",
+            "--session",
+            "01a0335e-142c-7d6b-bebf-fe07bc2a3935",
+        ]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec![],
+                tmux: false,
+                session: SessionMode::Id("01a0335e-142c-7d6b-bebf-fe07bc2a3935".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_session_id_under_explicit_run() {
+        // Arrange
+        let argv = args(&["pithos", "run", "--session", "01a0335e"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert — the explicit and implied forms agree.
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec![],
+                tmux: false,
+                session: SessionMode::Id("01a0335e".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_continue_long_and_short_agree() {
+        // Arrange
+        let long = args(&["pithos", "--continue"]);
+        let short = args(&["pithos", "-c"]);
+
+        // Act
+        let parsed_long = Subcommand::from_args(&long);
+        let parsed_short = Subcommand::from_args(&short);
+
+        // Assert
+        let expected = Subcommand::Run {
+            mode: RunMode::Default,
+            cmd: vec![],
+            tmux: false,
+            session: SessionMode::Continue,
+        };
+        assert_eq!(parsed_long, expected);
+        assert_eq!(parsed_short, expected);
+    }
+
+    #[test]
+    fn from_args_resume_long_and_short_agree() {
+        // Arrange
+        let long = args(&["pithos", "--resume"]);
+        let short = args(&["pithos", "-r"]);
+
+        // Act
+        let parsed_long = Subcommand::from_args(&long);
+        let parsed_short = Subcommand::from_args(&short);
+
+        // Assert
+        let expected = Subcommand::Run {
+            mode: RunMode::Default,
+            cmd: vec![],
+            tmux: false,
+            session: SessionMode::Resume,
+        };
+        assert_eq!(parsed_long, expected);
+        assert_eq!(parsed_short, expected);
+    }
+
+    #[test]
+    fn from_args_session_combines_with_rebuild_and_tmux() {
+        // Arrange
+        let argv = args(&["pithos", "--tmux", "--rebuild", "--session", "01a0335e"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert — the selector is orthogonal to the build-mode and tmux flags.
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Rebuild,
+                cmd: vec![],
+                tmux: true,
+                session: SessionMode::Id("01a0335e".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_session_without_value_is_rejected() {
+        // Arrange
+        let argv = args(&["pithos", "--session"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Reject {
+                kind: RejectKind::Usage,
+                value: SESSION_NEEDS_ID.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_session_followed_by_flag_is_rejected() {
+        // A forgotten id must not silently swallow the next flag as the value.
+        // Arrange
+        let argv = args(&["pithos", "--session", "--tmux"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Reject {
+                kind: RejectKind::Usage,
+                value: SESSION_NEEDS_ID.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_session_and_continue_are_mutually_exclusive() {
+        // Arrange
+        let argv = args(&["pithos", "--session", "01a0335e", "--continue"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Reject {
+                kind: RejectKind::Usage,
+                value: SESSION_EXCLUSIVE.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_continue_and_resume_are_mutually_exclusive() {
+        // Arrange
+        let argv = args(&["pithos", "-c", "-r"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Reject {
+                kind: RejectKind::Usage,
+                value: SESSION_EXCLUSIVE.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_repeated_continue_is_idempotent() {
+        // Mirrors from_args_run_no_build_twice_is_idempotent: only a *different*
+        // selector is an error.
+        // Arrange
+        let argv = args(&["pithos", "--continue", "-c"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec![],
+                tmux: false,
+                session: SessionMode::Continue,
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_repeated_session_with_same_id_is_idempotent() {
+        // Arrange
+        let argv = args(&["pithos", "--session", "01a0335e", "--session", "01a0335e"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec![],
+                tmux: false,
+                session: SessionMode::Id("01a0335e".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_repeated_session_with_different_id_is_rejected() {
+        // Arrange
+        let argv = args(&["pithos", "--session", "01a0335e", "--session", "02b1446f"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Reject {
+                kind: RejectKind::Usage,
+                value: SESSION_EXCLUSIVE.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_session_with_explicit_cmd_is_rejected() {
+        // An explicit command replaces the whole Pi argv, so the selector would
+        // be silently dropped — reject instead.
+        // Arrange
+        let argv = args(&["pithos", "--session", "01a0335e", "--", "bash"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Reject {
+                kind: RejectKind::Usage,
+                value: SESSION_WITH_CMD.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_continue_with_bare_cmd_is_rejected() {
+        // Arrange
+        let argv = args(&["pithos", "--continue", "bash"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Reject {
+                kind: RejectKind::Usage,
+                value: SESSION_WITH_CMD.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_session_after_double_dash_is_cmd_arg() {
+        // Arrange
+        let argv = args(&["pithos", "run", "--", "--session", "01a0335e"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert — past `--` the tokens belong to the container command, and
+        // the conflict check must not fire on them.
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec!["--session".to_string(), "01a0335e".to_string()],
+                tmux: false,
+                session: SessionMode::None,
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_short_flag_after_positional_is_cmd_arg() {
+        // `-c` only means --continue in leading-flag position; after a
+        // positional the parser never re-enters flag mode.
+        // Arrange
+        let argv = args(&["pithos", "run", "bash", "-c", "echo hi"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec!["bash".to_string(), "-c".to_string(), "echo hi".to_string()],
+                tmux: false,
+                session: SessionMode::None,
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_unknown_short_flag_is_rejected() {
+        // The catch-all covers single-dash tokens too, so a typo'd short flag
+        // errors instead of becoming a container command named `-x`.
+        // Arrange
+        let argv = args(&["pithos", "run", "-x"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                value: "-x".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn pi_session_argv_none_is_empty() {
+        // Empty means "add nothing" — docker falls through to the image CMD.
+        assert!(pi_session_argv(&SessionMode::None).is_empty());
+    }
+
+    #[test]
+    fn pi_session_argv_id_appends_session_flag_to_pi_launch_argv() {
+        // Arrange
+        let session = SessionMode::Id("01a0335e-142c-7d6b-bebf-fe07bc2a3935".to_string());
+
+        // Act
+        let argv = pi_session_argv(&session);
+
+        // Assert
+        assert_eq!(
+            argv,
+            vec![
+                "bun".to_string(),
+                "/opt/pi-npm/bin/pi".to_string(),
+                "--session".to_string(),
+                "01a0335e-142c-7d6b-bebf-fe07bc2a3935".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pi_session_argv_continue_and_resume_use_long_flags() {
+        // Pi accepts both spellings; the long ones read better in `ps` output.
+        assert_eq!(
+            pi_session_argv(&SessionMode::Continue).last().unwrap(),
+            "--continue"
+        );
+        assert_eq!(
+            pi_session_argv(&SessionMode::Resume).last().unwrap(),
+            "--resume"
+        );
+    }
+
+    #[test]
+    fn pi_session_argv_starts_with_the_image_cmd_argv() {
+        // Locks the single-source-of-truth tie to dockerfile::PI_LAUNCH_ARGV.
+        let argv = pi_session_argv(&SessionMode::Continue);
+        assert_eq!(&argv[..2], &pithos::dockerfile::PI_LAUNCH_ARGV[..]);
+    }
+
+    #[test]
+    fn pi_session_argv_survives_the_tmux_wrapper() {
+        // Composition check: --tmux wraps the materialized Pi argv verbatim
+        // instead of falling back to the bare PI_LAUNCH_ARGV.
+        // Arrange
+        let session_cmd = pi_session_argv(&SessionMode::Id("01a0335e".to_string()));
+
+        // Act
+        let wrapped = pithos::docker::tmux_wrap(&session_cmd);
+
+        // Assert
+        assert_eq!(&wrapped[wrapped.len() - 2..], &["--session", "01a0335e"]);
     }
 
     #[test]
@@ -1807,6 +2382,10 @@ mod tests {
         let t = help_text();
         assert!(t.contains("--rebuild"), "help missing --rebuild: {t}");
         assert!(t.contains("--no-build"), "help missing --no-build: {t}");
+        assert!(t.contains("--tmux"), "help missing --tmux: {t}");
+        assert!(t.contains("--session"), "help missing --session: {t}");
+        assert!(t.contains("--continue"), "help missing --continue: {t}");
+        assert!(t.contains("--resume"), "help missing --resume: {t}");
     }
 
     #[test]
