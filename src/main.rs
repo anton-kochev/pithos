@@ -550,6 +550,26 @@ fn pi_session_argv(session: &SessionMode) -> Vec<String> {
         .collect()
 }
 
+/// Pick the argv `docker run` appends after the image tag: the materialized
+/// Pi argv when a session selector is set, otherwise the user's command (an
+/// empty slice meaning "fall through to the image CMD").
+///
+/// `Subcommand::parse_run` rejects the selector-plus-command combination, so
+/// the two inputs are never both populated. The assert pins that invariant at
+/// the point that relies on it — softening the parser would otherwise turn
+/// this into silent command loss with no test failing.
+fn effective_command<'a>(session_cmd: &'a [String], cmd: &'a [String]) -> &'a [String] {
+    if session_cmd.is_empty() {
+        cmd
+    } else {
+        debug_assert!(
+            cmd.is_empty(),
+            "session selector reached run_run alongside a command: {cmd:?}"
+        );
+        session_cmd
+    }
+}
+
 fn version_text() -> String {
     format!("pithos {}", env!("CARGO_PKG_VERSION"))
 }
@@ -953,15 +973,8 @@ fn run_run(
         .as_ref()
         .map(pithos::clipboard_bridge::ClipboardBridge::container_url);
 
-    // A session selector turns the implicit image CMD into an explicit Pi
-    // argv carrying the flag. The parser guarantees `cmd` is empty here, so
-    // nothing the user asked for is being overwritten.
     let session_cmd = pi_session_argv(session);
-    let cmd: &[String] = if session_cmd.is_empty() {
-        cmd
-    } else {
-        &session_cmd
-    };
+    let cmd = effective_command(&session_cmd, cmd);
 
     // When --tmux is set, run the effective command inside a named tmux
     // session so a second terminal can attach and co-drive it. The wrapper
@@ -2247,6 +2260,78 @@ mod tests {
                 value: "-x".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn from_args_session_with_trailing_double_dash_keeps_selector() {
+        // A bare trailing `--` yields an empty cmd, so the conflict check must
+        // not fire and the selector must survive.
+        // Arrange
+        let argv = args(&["pithos", "--session", "01a0335e", "--"]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Run {
+                mode: RunMode::Default,
+                cmd: vec![],
+                tmux: false,
+                session: SessionMode::Id("01a0335e".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn from_args_session_with_empty_value_is_rejected() {
+        // `--session ""` must not resolve to an empty id that Pi would then
+        // prefix-match against every session it knows.
+        // Arrange
+        let argv = args(&["pithos", "--session", ""]);
+
+        // Act
+        let parsed = Subcommand::from_args(&argv);
+
+        // Assert
+        assert_eq!(
+            parsed,
+            Subcommand::Reject {
+                kind: RejectKind::Usage,
+                value: SESSION_NEEDS_ID.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn effective_command_prefers_the_session_argv() {
+        // Arrange
+        let session_cmd = pi_session_argv(&SessionMode::Continue);
+
+        // Act
+        let chosen = effective_command(&session_cmd, &[]);
+
+        // Assert
+        assert_eq!(chosen, session_cmd.as_slice());
+    }
+
+    #[test]
+    fn effective_command_passes_the_user_command_through_when_no_selector() {
+        // Arrange
+        let cmd = vec!["bash".to_string(), "-lc".to_string(), "echo hi".to_string()];
+
+        // Act
+        let chosen = effective_command(&[], &cmd);
+
+        // Assert
+        assert_eq!(chosen, cmd.as_slice());
+    }
+
+    #[test]
+    fn effective_command_empty_inputs_fall_through_to_the_image_cmd() {
+        // Empty out means docker appends nothing and the image CMD runs.
+        assert!(effective_command(&[], &[]).is_empty());
     }
 
     #[test]
