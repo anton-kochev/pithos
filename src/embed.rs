@@ -6,11 +6,19 @@ include!(concat!(env!("OUT_DIR"), "/embedded_installers.rs"));
 
 const ENTRYPOINT_SH: &[u8] = include_bytes!("../entrypoint.sh");
 
+/// The Bun compat preload baked into the build context and, from there, into
+/// every per-project image at [`crate::dockerfile::PI_BUN_COMPAT_PATH`]. Public
+/// because [`crate::fingerprint::compute`] hashes it: the base image ID alone
+/// would not invalidate a project's cache when only the launcher's copy of the
+/// shim changes.
+pub const PI_BUN_COMPAT_MJS: &[u8] = include_bytes!("../scripts/pi-bun-compat.mjs");
+
 /// Materialize the docker build context into `dest`. Resulting tree:
 ///
 /// ```text
 /// <dest>/toolchains/<name>-install.sh             (mode 0o755 on unix, one per script in toolchains/)
 /// <dest>/entrypoint.sh                            (mode 0o755 on unix)
+/// <dest>/pi-bun-compat.mjs                        (mode 0o755 on unix)
 /// <dest>/pi-config/{prompts,skills,themes}/       (empty dirs)
 /// ```
 ///
@@ -28,6 +36,10 @@ pub fn extract_to(dest: &Path) -> io::Result<()> {
         write_executable(&toolchains.join(format!("{name}-install.sh")), bytes)?;
     }
     write_executable(&dest.join("entrypoint.sh"), ENTRYPOINT_SH)?;
+    // Not executable in the image (Bun reads it via --preload), but the shared
+    // 0o755 writer keeps the extraction path single-purpose; Dockerfile.base
+    // resets the mode on the copy it bakes.
+    write_executable(&dest.join("pi-bun-compat.mjs"), PI_BUN_COMPAT_MJS)?;
     for sub in ["prompts", "skills", "themes"] {
         fs::create_dir_all(dest.join("pi-config").join(sub))?;
     }
@@ -105,6 +117,15 @@ mod tests {
         assert!(std::fs::metadata(&entry).expect("stat").len() > 0);
         assert_executable(&entry);
 
+        let preload = dir.path().join("pi-bun-compat.mjs");
+        assert!(preload.is_file(), "missing pi-bun-compat.mjs");
+        assert_eq!(
+            std::fs::read(&preload).expect("read"),
+            PI_BUN_COMPAT_MJS,
+            "extracted preload does not match the embedded bytes"
+        );
+        assert_executable(&preload);
+
         for sub in ["prompts", "skills", "themes"] {
             let p = dir.path().join("pi-config").join(sub);
             assert!(p.is_dir(), "missing pi-config/{sub}");
@@ -115,6 +136,27 @@ mod tests {
                 p.display()
             );
         }
+    }
+
+    #[test]
+    fn bun_compat_preload_installs_the_shim_only_when_absent() {
+        // The shim must stay a *fallback*: a Bun/Node that already implements
+        // markAsUncloneable has to keep its native version. Content check, not
+        // a runtime one — there is no JS engine in the Rust test suite — so the
+        // guard cannot be dropped without this failing.
+        let src = std::str::from_utf8(PI_BUN_COMPAT_MJS).expect("preload is utf-8");
+        assert!(
+            src.contains("import workerThreads from \"node:worker_threads\";"),
+            "preload must patch node:worker_threads"
+        );
+        assert!(
+            src.contains("if (typeof workerThreads.markAsUncloneable !== \"function\")"),
+            "preload must install markAsUncloneable only when it is missing"
+        );
+        assert!(
+            src.contains("Object.defineProperty(workerThreads, \"markAsUncloneable\""),
+            "preload must define markAsUncloneable on the module namespace"
+        );
     }
 
     #[cfg(unix)]

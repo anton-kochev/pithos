@@ -684,6 +684,7 @@ fn ensure_image(
         dockerfile_content,
         pithos_bytes,
         &installers,
+        pithos::embed::PI_BUN_COMPAT_MJS,
         &base_image_id,
     );
 
@@ -1144,6 +1145,7 @@ fn run_info(
         dockerfile_content,
         pithos_bytes,
         &installers,
+        pithos::embed::PI_BUN_COMPAT_MJS,
         &base_image_id,
     );
 
@@ -2353,6 +2355,8 @@ mod tests {
             argv,
             vec![
                 "bun".to_string(),
+                "--preload".to_string(),
+                "/opt/pi-bun-compat.mjs".to_string(),
                 "/opt/pi-npm/bin/pi".to_string(),
                 "--session".to_string(),
                 "01a0335e-142c-7d6b-bebf-fe07bc2a3935".to_string(),
@@ -2376,8 +2380,9 @@ mod tests {
     #[test]
     fn pi_session_argv_starts_with_the_image_cmd_argv() {
         // Locks the single-source-of-truth tie to dockerfile::PI_LAUNCH_ARGV.
+        let launch = pithos::dockerfile::PI_LAUNCH_ARGV;
         let argv = pi_session_argv(&SessionMode::Continue);
-        assert_eq!(&argv[..2], &pithos::dockerfile::PI_LAUNCH_ARGV[..]);
+        assert_eq!(&argv[..launch.len()], &launch[..]);
     }
 
     #[test]

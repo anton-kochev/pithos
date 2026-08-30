@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 /// Compute the SHA-256 fingerprint over
-/// (Dockerfile || .pithos || installers || base_image_id).
+/// (Dockerfile || .pithos || installers || bun_compat || base_image_id).
 /// Returns a 64-char lowercase hex digest.
 ///
 /// Installers are hashed in alphabetical order of `name` (BTreeMap iteration
@@ -19,6 +19,12 @@ use sha2::{Digest, Sha256};
 /// `Dockerfile.base` / `entrypoint.sh` are invisible to per-project cache
 /// hits.
 ///
+/// `bun_compat` is [`crate::embed::PI_BUN_COMPAT_MJS`], the Bun preload the
+/// emitted Dockerfile copies into the image. It is hashed separately from
+/// `base_image_id` because the launcher carries its own copy: a pithos binary
+/// with an updated shim must invalidate project images built by the previous
+/// one, even when the base image ID has not moved.
+///
 /// No separator or length-prefix between blobs: input boundaries are
 /// unambiguous because the Dockerfile is emitter-controlled and ends with
 /// `\n`, `.pithos` is validated UTF-8 YAML, installer bodies are
@@ -29,6 +35,7 @@ pub fn compute(
     dockerfile: &str,
     pithos: &[u8],
     installers: &BTreeMap<String, Vec<u8>>,
+    bun_compat: &[u8],
     base_image_id: &str,
 ) -> String {
     let mut hasher = Sha256::new();
@@ -37,6 +44,7 @@ pub fn compute(
     for content in installers.values() {
         hasher.update(content);
     }
+    hasher.update(bun_compat);
     hasher.update(base_image_id.as_bytes());
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(64);
@@ -96,11 +104,16 @@ mod tests {
     // `docker inspect --format '{{.Id}}'`.
     const FIXTURE_BASE: &str = "sha256:test";
 
+    // Stand-in for the embedded Bun preload. Deliberately not the real bytes:
+    // the known-vector test below must not have to change every time a comment
+    // in `scripts/pi-bun-compat.mjs` is reworded.
+    const FIXTURE_PRELOAD: &[u8] = b"#!preload\n";
+
     #[test]
     fn compute_returns_known_sha256_for_fixed_input() {
         // Anti-drift: pre-computed via
         //   { printf 'FROM base\n'; printf 'toolchains: {}\n';
-        //     printf '#!dotnet\n'; printf '#!rust\n';
+        //     printf '#!dotnet\n'; printf '#!rust\n'; printf '#!preload\n';
         //     printf 'sha256:test'; } | sha256sum
         // Note: no trailing \n on `sha256:test` — `compute` hashes the raw
         // bytes of `base_image_id`, and FIXTURE_BASE has no embedded newline.
@@ -108,11 +121,12 @@ mod tests {
             "FROM base\n",
             b"toolchains: {}\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             FIXTURE_BASE,
         );
         assert_eq!(
             out,
-            "b0b96de5039c081a096df40a178ab4a5a85165f41d3d94a428c0fc7791612066"
+            "f839a661f3d5189d83c0acbc3f2f3807b3ffce24d579eb7831cd8beb4937ee03"
         );
     }
 
@@ -122,12 +136,14 @@ mod tests {
             "FROM base\n",
             b"x: 1\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             FIXTURE_BASE,
         );
         let b = compute(
             "FROM base\n",
             b"x: 1\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             FIXTURE_BASE,
         );
         assert_eq!(a, b);
@@ -139,12 +155,14 @@ mod tests {
             "FROM base\n",
             b"x: 1\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             FIXTURE_BASE,
         );
         let b = compute(
             "FROM base2\n",
             b"x: 1\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             FIXTURE_BASE,
         );
         assert_ne!(a, b);
@@ -156,12 +174,14 @@ mod tests {
             "FROM base\n",
             b"x: 1\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             FIXTURE_BASE,
         );
         let b = compute(
             "FROM base\n",
             b"x: 2\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             FIXTURE_BASE,
         );
         assert_ne!(a, b);
@@ -175,9 +195,16 @@ mod tests {
             "FROM base\n",
             b"x: 1\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             FIXTURE_BASE,
         );
-        let b = compute("FROM base\n", b"x: 1\n", &tweaked, FIXTURE_BASE);
+        let b = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &tweaked,
+            FIXTURE_PRELOAD,
+            FIXTURE_BASE,
+        );
         assert_ne!(a, b);
     }
 
@@ -189,9 +216,38 @@ mod tests {
             "FROM base\n",
             b"x: 1\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             FIXTURE_BASE,
         );
-        let b = compute("FROM base\n", b"x: 1\n", &extra, FIXTURE_BASE);
+        let b = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &extra,
+            FIXTURE_PRELOAD,
+            FIXTURE_BASE,
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn compute_changes_when_bun_compat_preload_changes() {
+        // The launcher ships its own copy of the preload and copies it into
+        // every project image, so a shim edit must miss the cache even when
+        // the base image ID is unchanged.
+        let a = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_PRELOAD,
+            FIXTURE_BASE,
+        );
+        let b = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            b"#!preload-2\n",
+            FIXTURE_BASE,
+        );
         assert_ne!(a, b);
     }
 
@@ -203,12 +259,14 @@ mod tests {
             "FROM base\n",
             b"x: 1\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             FIXTURE_BASE,
         );
         let b = compute(
             "FROM base\n",
             b"x: 1\n",
             &fixture_installers(),
+            FIXTURE_PRELOAD,
             "sha256:other",
         );
         assert_ne!(a, b);
@@ -224,8 +282,20 @@ mod tests {
         let mut b_map = BTreeMap::new();
         b_map.insert("rust".to_string(), b"#!rust\n".to_vec());
         b_map.insert("dotnet".to_string(), b"#!dotnet\n".to_vec());
-        let a = compute("FROM base\n", b"x: 1\n", &a_map, FIXTURE_BASE);
-        let b = compute("FROM base\n", b"x: 1\n", &b_map, FIXTURE_BASE);
+        let a = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &a_map,
+            FIXTURE_PRELOAD,
+            FIXTURE_BASE,
+        );
+        let b = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &b_map,
+            FIXTURE_PRELOAD,
+            FIXTURE_BASE,
+        );
         assert_eq!(a, b);
     }
 

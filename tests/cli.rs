@@ -14,9 +14,12 @@ USER root
 # Pi-config defaults baked into /opt/pi-defaults/; entrypoint seeds them into the user's volume on first run. Tini handles PID 1 signal forwarding.
 COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
+COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
 ";
 
 #[test]
@@ -411,9 +414,12 @@ RUN /usr/local/bin/rust-install.sh 1.85.0
 # Pi-config defaults baked into /opt/pi-defaults/; entrypoint seeds them into the user's volume on first run. Tini handles PID 1 signal forwarding.
 COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
+COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
 ";
     assert_eq!(content, expected);
 }
@@ -460,9 +466,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends git libssl3 && 
 # Pi-config defaults baked into /opt/pi-defaults/; entrypoint seeds them into the user's volume on first run. Tini handles PID 1 signal forwarding.
 COPY pi-config/ /opt/pi-defaults/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
+COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
 ";
     assert_eq!(content, expected);
 }

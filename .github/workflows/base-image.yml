@@ -117,6 +117,94 @@ jobs:
               echo "OK: Pi $EXPECTED_PI_VERSION, no default Pi packages"
             '
 
+      - name: Smoke test (Bun compat preload)
+        run: |
+          IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base
+
+          # Pi's bundled CLI reaches node:worker_threads.markAsUncloneable
+          # through undici while loading extensions. Bun 1.3.14 has no such
+          # function, so a session with *any* extension — a no-op one included —
+          # dies before the first extension factory runs. The image ships
+          # /opt/pi-bun-compat.mjs and pithos launches Pi as
+          # `bun --preload /opt/pi-bun-compat.mjs ...` (dockerfile::PI_LAUNCH_ARGV).
+          EXPECTED_PI_VERSION=$(docker inspect \
+            --format '{{index .Config.Labels "dev.pithos.pi-version"}}' "$IMAGE")
+
+          docker run --rm \
+            --env EXPECTED_PI_VERSION="$EXPECTED_PI_VERSION" \
+            "$IMAGE" \
+            bash -euc '
+              SHIM=/opt/pi-bun-compat.mjs
+              [ -r "$SHIM" ] || { echo "MISSING: $SHIM" >&2; exit 1; }
+
+              # Prints "native" or "shim" and exits non-zero when the function
+              # is absent altogether, so one probe answers both questions.
+              cat > /tmp/probe.mjs <<"EOF"
+          import wt from "node:worker_threads";
+          if (typeof wt.markAsUncloneable !== "function") {
+            console.error("markAsUncloneable is missing");
+            process.exit(1);
+          }
+          console.log(String(wt.markAsUncloneable).includes("_value") ? "shim" : "native");
+          EOF
+
+              if bun /tmp/probe.mjs >/dev/null 2>&1; then NATIVE=yes; else NATIVE=no; fi
+              WITH=$(bun --preload "$SHIM" /tmp/probe.mjs)
+              if [ "$NATIVE" = yes ] && [ "$WITH" != native ]; then
+                echo "preload replaced Bun native markAsUncloneable" >&2
+                exit 1
+              fi
+              if [ "$NATIVE" = no ] && [ "$WITH" != shim ]; then
+                echo "preload did not install the fallback (got: $WITH)" >&2
+                exit 1
+              fi
+
+              # One no-op extension is all it takes to hit the crash.
+              mkdir -p /tmp/noop-ext
+              cat > /tmp/noop-ext/package.json <<"EOF"
+          {"name":"pithos-smoke-noop","version":"1.0.0","type":"module","main":"index.mjs"}
+          EOF
+              cat > /tmp/noop-ext/index.mjs <<"EOF"
+          export default function noop() { return {}; }
+          EOF
+              node /opt/pi-npm/bin/pi install /tmp/noop-ext >/dev/null
+
+              # Reproduction leg: on a Bun without its own markAsUncloneable,
+              # the baked Pi floor must die here — that failure is the only
+              # thing that makes the preloaded leg below meaningful. If bare
+              # Bun starts Pi anyway the shim is guarding nothing (Pi stopped
+              # hitting the path, or the floor moved below the bug), and the
+              # build fails loudly so someone re-checks whether it is still
+              # needed. Same for a failure with any *other* error.
+              if bun /opt/pi-npm/bin/pi --version >/tmp/plain.log 2>&1; then
+                if [ "$NATIVE" = no ]; then
+                  echo "bare Bun started Pi $EXPECTED_PI_VERSION with an extension loaded:" >&2
+                  echo "the preload guards nothing on this floor — re-check if it is needed" >&2
+                  exit 1
+                fi
+                echo "note: this Bun ships markAsUncloneable; nothing to reproduce"
+              elif grep -q markAsUncloneable /tmp/plain.log; then
+                echo "reproduced: bare Bun + one extension -> markAsUncloneable"
+              else
+                echo "bare-Bun Pi failed for an unrelated reason:" >&2
+                cat /tmp/plain.log >&2
+                exit 1
+              fi
+
+              # The launch path pithos actually uses. Must always start clean.
+              if ! bun --preload "$SHIM" /opt/pi-npm/bin/pi --version >/tmp/preloaded.log 2>&1; then
+                echo "preloaded Pi failed to start:" >&2
+                cat /tmp/preloaded.log >&2
+                exit 1
+              fi
+              [ "$(cat /tmp/preloaded.log)" = "$EXPECTED_PI_VERSION" ] || {
+                echo "preloaded Pi reported $(cat /tmp/preloaded.log), want $EXPECTED_PI_VERSION" >&2
+                exit 1
+              }
+
+              echo "OK: Bun preload active (native=$NATIVE), Pi starts with an extension loaded"
+            '
+
       # Only now does anything become visible to users. The amd64 layers are
       # already in the builder's cache from the test build, so this re-runs
       # only the arm64 leg. arm64 stays untested — it cannot be exercised

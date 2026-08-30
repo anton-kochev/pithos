@@ -348,6 +348,8 @@ fn tmux_wrap_empty_cmd_materializes_pi_launch_argv() {
             "-s".to_string(),
             "pithos".to_string(),
             "bun".to_string(),
+            "--preload".to_string(),
+            "/opt/pi-bun-compat.mjs".to_string(),
             "/opt/pi-npm/bin/pi".to_string(),
         ]
     );
