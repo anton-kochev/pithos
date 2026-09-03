@@ -6,8 +6,8 @@
 Declarative Docker development containers.
 
 Describe your project's toolchain in a `.pithos` YAML file; `pithos` builds a
-reproducible container image and drops you into a shell with the toolchain
-ready to use. Image rebuilds are skipped when the config hasn't changed.
+reproducible container image and launches Pi with the toolchain ready to use.
+Image rebuilds are skipped when the config hasn't changed.
 
 ## Installation
 
@@ -38,18 +38,27 @@ extras:
 Then:
 
 ```sh
-pithos              # build (if needed) and launch a shell in the container
-pithos build        # build the image without launching
-pithos info         # show project, fingerprint, and image status
-pithos clean        # remove dangling pithos images (--all for tagged too)
-pithos rebuild-base # build Dockerfile.base locally for dev iteration
-pithos help         # full command reference
-pithos version      # print the pithos version
+pithos                                      # build (if needed) and launch Pi
+pithos --fork 01a0335e                      # pass Pi options through unchanged
+pithos --model openai/gpt-4o -p "Review"    # Pi options and arguments
+pithos --pi "Review this project"           # positional-first Pi arguments
+pithos run bash                             # launch another container command
+pithos build                                # build without launching
+pithos info                                 # show project, fingerprint, image status
+pithos clean                                # remove images (--all for tagged too)
+pithos rebuild-base                         # rebuild base for dev iteration
+pithos help                                 # full command reference
+pithos version                              # print the pithos version
 ```
 
-Run `pithos help` for the full flag reference (`--rebuild`, `--no-build`, `--session`,
-etc.). When the first argument is a flag, `run` is implied — `pithos --tmux` and
-`pithos run --tmux` are the same command.
+Pithos owns `--rebuild`, `--no-build`, and `--tmux`. Any other leading option
+starts an opaque argument tail that is forwarded verbatim to Pi, so Pithos also
+works with flags added by newer Pi versions or extensions. Put Pithos options
+before Pi options. Use `--pi` when the Pi argument list starts with a positional,
+`--`, or a Pithos-owned option name intended for Pi. When the first argument is a
+flag, `run` is implied — `pithos --tmux` and `pithos run --tmux` are the same
+command. Run `pithos help`
+for the full reference.
 
 ### Clipboard screenshots
 
@@ -74,24 +83,26 @@ lifecycle (detaching it ends the run, since the container is `--rm`); additional
 observers may attach and detach freely. The flag also wraps an explicit command —
 `pithos --tmux -- bash` runs `bash` inside the session instead of pi.
 
-### Resuming a Pi session
+### Passing arguments to Pi
 
 Pi sessions live in the project's named volume (`pithos-home-<project>`), so they
-survive the `--rm` container. Three ways back into one:
+survive the `--rm` container. Pi's full CLI is available through Pithos:
 
 ```sh
-pithos --continue                     # most recent session for this project
-pithos --resume                       # Pi's interactive session picker
-pithos --session 01a0335e             # a specific session, full or partial UUID
+pithos --continue                         # most recent project session
+pithos --resume                           # interactive session picker
+pithos --session 01a0335e                 # use a session by path or partial UUID
+pithos --fork 01a0335e                    # fork a session
+pithos --provider openai --model gpt-4o   # any other built-in Pi options
+pithos --plan                             # extension-provided options also work
+pithos --pi "Review this repository"      # positional-first Pi arguments
 ```
 
-`--session` also accepts a session file path. Partial ids are matched by prefix
-against this project's sessions first, then across all projects — a match from a
-different project makes Pi offer to fork it into the current one. The selectors
-are mutually exclusive, and none of them can be combined with an explicit command
-(that command would replace the Pi invocation entirely, so pithos rejects the
-combination with exit 2 instead of dropping the flag). They do compose with
-`--tmux`, `--rebuild`, and `--no-build`.
+Pithos does not maintain its own list of Pi flags or validate their values; the
+Pi version running inside the container does. Once a Pi option is encountered,
+every remaining argument is passed through unchanged. This allows options to be
+combined with prompts, for example `pithos --continue "Pick up the refactor"`.
+Place `--rebuild`, `--no-build`, and `--tmux` before the first Pi option.
 
 ## Pithos Kit
 

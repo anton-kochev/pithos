@@ -631,36 +631,62 @@ fn cli_bare_session_flag_reaches_docker_shellout() {
 }
 
 #[test]
-fn cli_session_flag_with_explicit_cmd_exits_2() {
-    // The selector would be silently dropped by an explicit command, so the
-    // parser rejects the combination before any I/O.
+fn cli_fork_flag_reaches_docker_shellout() {
+    // Pi owns --fork and its value. Pithos should pass both through rather
+    // than rejecting a Pi option it does not parse itself.
     let td = tempdir().unwrap();
     fs::write(td.path().join(".pithos"), VALID).unwrap();
 
-    // Act
     let assert = Command::cargo_bin("pithos")
         .unwrap()
-        .args(["--session", "01a0335e", "--", "bash"])
+        .args(["--fork", "01a0335e-142c-7d6b-bebf-fe07bc2a3935"])
         .current_dir(&td)
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
         .assert()
-        .code(2);
+        .code(1);
 
-    // Assert — narration on stderr only, and the reject short-circuits before
-    // the Dockerfile write.
-    let output = assert.get_output();
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
     assert!(
-        stderr.contains("cannot be combined with an explicit command"),
-        "stderr missing the conflict message: {stderr}"
+        !stderr.contains("unknown flag:"),
+        "--fork was rejected as an unknown flag: {stderr}"
     );
     assert!(
-        output.stdout.is_empty(),
-        "stdout must stay empty: {:?}",
-        String::from_utf8_lossy(&output.stdout)
+        td.path().join(".pithos.d").join("Dockerfile").is_file(),
+        "Dockerfile should be emitted before the docker shellout failure"
+    );
+}
+
+#[test]
+fn cli_session_flag_with_initial_prompt_reaches_docker_shellout() {
+    // Everything from --session onward belongs to Pi, including Pi's own `--`
+    // delimiter and the initial prompt after it.
+    let td = tempdir().unwrap();
+    fs::write(td.path().join(".pithos"), VALID).unwrap();
+
+    let assert = Command::cargo_bin("pithos")
+        .unwrap()
+        .args(["--session", "01a0335e", "--", "Continue from here"])
+        .current_dir(&td)
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert()
+        .code(1);
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    assert!(
+        !stderr.contains("cannot be combined") && !stderr.contains("unknown flag:"),
+        "Pi argument tail was rejected by pithos: {stderr}"
     );
     assert!(
-        !td.path().join(".pithos.d").exists(),
-        "parse-phase reject must not touch the filesystem"
+        td.path().join(".pithos.d").join("Dockerfile").is_file(),
+        "Dockerfile should be emitted before the docker shellout failure"
     );
 }
 
