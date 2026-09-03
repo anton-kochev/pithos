@@ -56,11 +56,13 @@ fn assemble_extract_run_args_places_sh_dollar_zero_before_positionals() {
 
 #[test]
 fn parse_versions_stdout_happy_path() {
-    let expected: Vec<String> = vec!["dotnet".into(), "rust".into()];
-    let out = parse_versions_stdout("dotnet=10.0.102\nrust=1.85.0\n", &expected).unwrap();
+    let expected: Vec<String> = vec!["dotnet".into(), "node".into(), "rust".into()];
+    let out =
+        parse_versions_stdout("dotnet=10.0.102\nnode=22.14.0\nrust=1.85.0\n", &expected).unwrap();
     assert_eq!(out.get("dotnet").map(String::as_str), Some("10.0.102"));
+    assert_eq!(out.get("node").map(String::as_str), Some("22.14.0"));
     assert_eq!(out.get("rust").map(String::as_str), Some("1.85.0"));
-    assert_eq!(out.len(), 2);
+    assert_eq!(out.len(), 3);
 }
 
 #[test]

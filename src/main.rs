@@ -517,10 +517,12 @@ fn help_text() -> String {
              pithos --pi \"Start with this prompt\"\n\
          \n\
          Config (.pithos):\n  \
-           Toolchains use the flat form — a quoted exact version per name; nested\n  \
-           `version:` keys are not supported:\n    \
+           Toolchains use the flat form — a quoted numeric version per name; nested\n  \
+           `version:` keys are not supported. Prefer N.N.N exact pins; Node also\n  \
+           accepts N or N.N and resolves the newest matching release:\n    \
              toolchains:\n      \
                dotnet: \"10.0.0\"\n      \
+               node: \"22.14.0\"\n      \
                rust: \"1.85.0\"\n\
          \n\
          All narration is written to stderr; stdout is reserved for container output and\n\
@@ -1850,8 +1852,12 @@ mod tests {
         );
         assert!(t.contains("flat form"), "help missing flat-form note: {t}");
         assert!(
-            t.contains("dotnet: \"10.0.0\""),
-            "help missing flat-form example: {t}"
+            t.contains("dotnet: \"10.0.0\"") && t.contains("node: \"22.14.0\""),
+            "help missing flat-form examples: {t}"
+        );
+        assert!(
+            t.contains("Node also") && t.contains("N or N.N"),
+            "help missing Node partial-version behavior: {t}"
         );
         assert!(
             t.contains("`version:` keys are not supported"),

@@ -171,7 +171,10 @@ fn cli_exit_2_on_unknown_toolchain() {
         "stderr missing offending toolchain name 'python': {stderr}"
     );
     assert!(
-        stderr.contains("dotnet") && stderr.contains("rust") && stderr.contains("go"),
+        stderr.contains("dotnet")
+            && stderr.contains("go")
+            && stderr.contains("node")
+            && stderr.contains("rust"),
         "stderr missing valid toolchain names: {stderr}"
     );
 }
@@ -422,6 +425,42 @@ ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
 CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
 ";
     assert_eq!(content, expected);
+}
+
+#[test]
+fn cli_emits_node_toolchain_and_late_path_activation() {
+    let td = tempdir().unwrap();
+    fs::write(
+        td.path().join(".pithos"),
+        "toolchains:\n  node: \"22.14\"\npi:\n  version: \"0.75.3\"\n",
+    )
+    .unwrap();
+
+    let _ = Command::cargo_bin("pithos")
+        .unwrap()
+        .arg("build")
+        .current_dir(&td)
+        .env_clear()
+        .env("PATH", "")
+        .env("HOME", std::env::var_os("HOME").unwrap_or_default())
+        .env("TMPDIR", std::env::var_os("TMPDIR").unwrap_or_default())
+        .env("DOCKER_HOST", "unix:///nonexistent/pithos-test.sock")
+        .assert();
+
+    let content = fs::read_to_string(td.path().join(".pithos.d/Dockerfile")).unwrap();
+    let install = content
+        .find("RUN /usr/local/bin/node-install.sh 22.14")
+        .expect("node installer layer");
+    let pi = content
+        .find("RUN npm install --prefix=/opt/pi-npm")
+        .expect("Pi install layer");
+    let activation = content
+        .find("ENV PATH=\"/opt/node/bin:${PATH}\"")
+        .expect("Node PATH activation");
+    assert!(
+        install < pi && pi < activation,
+        "unexpected layer order:\n{content}"
+    );
 }
 
 #[test]

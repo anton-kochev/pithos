@@ -153,7 +153,7 @@ fn toolchains_sequence_rejected() {
 #[test]
 fn valid_toolchain_versions_parse() {
     // Arrange
-    let bytes = b"toolchains:\n  dotnet: \"10.0.102\"\n  rust: \"1.85.0\"\n  go: \"1\"\n";
+    let bytes = b"toolchains:\n  dotnet: \"10.0.102\"\n  rust: \"1.85.0\"\n  go: \"1\"\n  node: \"22.14\"\n";
 
     // Act
     let result = load(bytes);
@@ -187,7 +187,7 @@ fn unknown_toolchain_error_message_lists_valid_names() {
 
     // Assert
     let msg = err.to_string();
-    for expected in ["dotnet", "rust", "go"] {
+    for expected in ["dotnet", "go", "node", "rust"] {
         assert!(
             msg.contains(expected),
             "error message missing valid name `{expected}`: {msg}"

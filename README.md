@@ -30,6 +30,7 @@ Create a `.pithos` file at the root of your project:
 
 ```yaml
 toolchains:
+  node: "22.14.0"
   rust: "1.85.0"
 extras:
   apt: [git, curl]
@@ -59,6 +60,32 @@ before Pi options. Use `--pi` when the Pi argument list starts with a positional
 flag, `run` is implied — `pithos --tmux` and `pithos run --tmux` are the same
 command. Run `pithos help`
 for the full reference.
+
+### Per-project Node.js
+
+Declare `node` under `toolchains` to select the Node.js runtime used by project
+commands:
+
+```yaml
+toolchains:
+  node: "22.14.0"
+```
+
+Exact `N.N.N` versions are recommended for reproducible builds. Numeric partial
+versions are also supported: `"22"` and `"22.14"` resolve at image-build time
+to the newest matching official release available for the container architecture.
+Pithos downloads the
+official Linux archive, verifies it against Node.js's `SHASUMS256.txt`, and
+records the resolved version in the image's `dev.pithos.node-version` label.
+Run `pithos build --rebuild` to re-resolve a partial version after a newer release.
+The selected archive supplies `node` and that release's bundled npm tooling
+(such as `npm`, `npx`, and, where included, `corepack`).
+
+The base image's Node 24 remains installed separately for Pithos-owned package
+maintenance. The configured project Node takes precedence for project commands,
+while the default Pi session continues to run with Pithos's pinned Bun runtime.
+Pithos does not inspect `.nvmrc`, `.node-version`, or `package.json`; `.pithos`
+is authoritative.
 
 ### Clipboard screenshots
 
@@ -162,9 +189,11 @@ finish debugging; do not commit them.
 
 ## What's in the container
 
-The base image bundles the Pi coding agent but no Pi packages. Pi is pinned by
-the `PI_VERSION` build argument in `Dockerfile.base` so the same commit always
-produces the same runtime. To read the version from an image:
+The base image bundles Node 24 for Pithos infrastructure and the Pi coding agent,
+but no Pi packages. A project's `toolchains.node` declaration overrides the
+project-facing Node runtime without removing that infrastructure installation.
+Pi is pinned by the `PI_VERSION` build argument in `Dockerfile.base` so the same
+commit always produces the same runtime. To read the version from an image:
 
 ```sh
 docker inspect --format '{{index .Config.Labels "dev.pithos.pi-version"}}' \

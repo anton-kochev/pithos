@@ -121,10 +121,11 @@ fn assemble_build_args_renders_extra_labels_in_btreemap_order() {
     // order becomes non-deterministic and this test flakes.
     let mut extras: BTreeMap<String, String> = BTreeMap::new();
     extras.insert("dev.pithos.rust-version".into(), "1.85.0".into());
+    extras.insert("dev.pithos.node-version".into(), "22.14.0".into());
     extras.insert("dev.pithos.dotnet-version".into(), "10.0.102".into());
     let args = assemble_build_args(build_request(&extras));
-    // Three --label args total: fingerprint + two extras.
-    assert_eq!(args.iter().filter(|a| *a == "--label").count(), 3);
+    // Four --label args total: fingerprint + three extras.
+    assert_eq!(args.iter().filter(|a| *a == "--label").count(), 4);
     // Collect the arg immediately following each --label.
     let rendered: Vec<String> = args
         .windows(2)
@@ -141,6 +142,7 @@ fn assemble_build_args_renders_extra_labels_in_btreemap_order() {
         vec![
             "dev.pithos.fingerprint=abc123".to_string(),
             "dev.pithos.dotnet-version=10.0.102".to_string(),
+            "dev.pithos.node-version=22.14.0".to_string(),
             "dev.pithos.rust-version=1.85.0".to_string(),
         ]
     );

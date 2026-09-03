@@ -309,7 +309,8 @@ mod tests {
         // Format lock — the `--version` suffix and `dev.pithos.` prefix are
         // externally observable via `docker inspect` and must not drift.
         assert_eq!(version_label_key("dotnet"), "dev.pithos.dotnet-version");
-        assert_eq!(version_label_key("rust"), "dev.pithos.rust-version");
         assert_eq!(version_label_key("go"), "dev.pithos.go-version");
+        assert_eq!(version_label_key("node"), "dev.pithos.node-version");
+        assert_eq!(version_label_key("rust"), "dev.pithos.rust-version");
     }
 }

@@ -21,6 +21,15 @@ set -euo pipefail
 PI_AGENT_DIR="/home/pi/.pi/agent"
 DEFAULTS_DIR="/opt/pi-defaults"
 
+# Run Pi's package-management commands with the base image's Node/npm, not a
+# project-selected Node under /opt/node. This keeps extension reconciliation
+# independent from the project's runtime compatibility requirements. A
+# subshell prevents the infrastructure-only PATH from leaking to user code.
+pi_manage() (
+  export PATH="/usr/bin:/bin:/opt/cargo/bin:/opt/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/sbin:/sbin"
+  exec /usr/bin/node /opt/pi-npm/bin/pi "$@"
+)
+
 # Ensure the directory structure exists.
 mkdir -p "$PI_AGENT_DIR/sessions"
 
@@ -71,11 +80,11 @@ if [[ -r "$MANIFEST" ]]; then
           continue
         fi
         if [[ -n "$pinned" ]]; then
-          if ! pi remove "npm:${ext_name}" >&2; then
+          if ! pi_manage remove "npm:${ext_name}" >&2; then
             echo "pithos: warning: failed to remove stale ${ext_name}@${pinned} before upgrade" >&2
           fi
         fi
-        if ! pi install "npm:${ext_name}@${ext_version}" >&2; then
+        if ! pi_manage install "npm:${ext_name}@${ext_version}" >&2; then
           echo "pithos: warning: failed to install npm extension ${ext_name}@${ext_version}" >&2
         fi
         ;;
@@ -86,7 +95,7 @@ if [[ -r "$MANIFEST" ]]; then
         rest="${ext_spec#git:}"
         ext_url="${rest%#*}"
         ext_ref="${rest##*#}"
-        pi_err=$(pi install "git:${ext_url}@${ext_ref}" 2>&1 >&2) || {
+        pi_err=$(pi_manage install "git:${ext_url}@${ext_ref}" 2>&1 >&2) || {
           echo "pithos: warning: failed to install git extension ${ext_name} from ${ext_url}@${ext_ref}" >&2
           [[ -n "$pi_err" ]] && echo "pithos:   pi stderr: ${pi_err}" >&2
         }
@@ -113,7 +122,7 @@ if [[ -r "$MANIFEST" ]]; then
     while IFS= read -r installed; do
       [[ -z "$installed" ]] && continue
       if ! printf '%s\n' "$manifest_npm_names" | grep -Fxq -- "$installed"; then
-        if ! pi remove "npm:${installed}" >&2; then
+        if ! pi_manage remove "npm:${installed}" >&2; then
           echo "pithos: warning: failed to prune stale ${installed}" >&2
         fi
       fi
