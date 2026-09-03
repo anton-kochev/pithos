@@ -136,6 +136,30 @@ provides the `/pithos` package catalog, compatibility checks, and configuration
 UI. To use it, declare Atlas as shown above, restart Pithos, and run
 `/pithos config` inside Pi to manage the other Pithos Kit packages.
 
+### Debugging extensions
+
+Pithos Kit extension logging is disabled by default. To collect per-package
+JSON Lines logs, add these variables to the project's `.env` file and restart
+Pithos:
+
+```dotenv
+PITHOS_LOG_LEVEL=debug
+PITHOS_LOG_DIR=.pi/logs
+```
+
+Pithos passes `.env` into the container, and the project directory is mounted as
+the working directory, so the logs appear on the host under `.pi/logs`. Use
+`PITHOS_LOG_LEVEL=info` for less detail. To combine all package events in one
+file, replace `PITHOS_LOG_DIR` with:
+
+```dotenv
+PITHOS_LOG_FILE=.pi/pithos-kit.jsonl
+```
+
+Logs are bounded and redact secret-like fields, but can contain project paths
+and operational metadata. Remove the variables and delete the logs when you
+finish debugging; do not commit them.
+
 ## What's in the container
 
 The base image bundles the Pi coding agent but no Pi packages. Pi is pinned by
