@@ -328,27 +328,16 @@ fn main() -> ExitCode {
         }
     }
 
+    let inputs = ProjectInputs {
+        cwd: &cwd,
+        yaml: &yaml,
+        pithos_bytes: &pithos_bytes,
+        dockerfile_path: &dockerfile_path,
+        dockerfile_content: &dockerfile_content,
+    };
     match subcommand {
-        Subcommand::Build { rebuild } => run_build(
-            &cwd,
-            &yaml,
-            &pithos_bytes,
-            &dockerfile_path,
-            &dockerfile_content,
-            rebuild,
-            style,
-        ),
-        Subcommand::Run { mode, target, tmux } => run_run(
-            &cwd,
-            &yaml,
-            &pithos_bytes,
-            &dockerfile_path,
-            &dockerfile_content,
-            mode,
-            &target,
-            tmux,
-            style,
-        ),
+        Subcommand::Build { rebuild } => run_build(inputs, rebuild, style),
+        Subcommand::Run { mode, target, tmux } => run_run(inputs, mode, &target, tmux, style),
         Subcommand::Info => run_info(&cwd, &yaml, &pithos_bytes, &dockerfile_content, style),
         Subcommand::Clean { .. } | Subcommand::RebuildBase => {
             unreachable!("handled by short-circuit above")
@@ -544,6 +533,19 @@ fn require_daemon(style: Style) -> Result<(), ExitCode> {
     }
 }
 
+/// The project inputs `main` resolves once, before dispatch, and every
+/// image-producing subcommand threads through unchanged. Grouped because they
+/// only ever travel as a set: `run_build` forwards all five verbatim, and
+/// `run_run` reads just `cwd` itself while passing the rest straight on.
+#[derive(Clone, Copy)]
+struct ProjectInputs<'a> {
+    cwd: &'a Path,
+    yaml: &'a YamlOwned,
+    pithos_bytes: &'a [u8],
+    dockerfile_path: &'a Path,
+    dockerfile_content: &'a str,
+}
+
 struct EnsuredImage {
     tag: String,
     project: String,
@@ -554,14 +556,17 @@ struct EnsuredImage {
 /// output has already been narrated via `narrate(style, "» ERROR:", ...)`
 /// — callers should just propagate the code, not re-narrate.
 fn ensure_image(
-    cwd: &Path,
-    yaml: &YamlOwned,
-    pithos_bytes: &[u8],
-    dockerfile_path: &Path,
-    dockerfile_content: &str,
+    inputs: ProjectInputs<'_>,
     mode: RunMode,
     style: Style,
 ) -> Result<EnsuredImage, ExitCode> {
+    let ProjectInputs {
+        cwd,
+        yaml,
+        pithos_bytes,
+        dockerfile_path,
+        dockerfile_content,
+    } = inputs;
     let project = match pithos::project::name_from_path(cwd) {
         Some(n) => n,
         None => {
@@ -616,7 +621,7 @@ fn ensure_image(
     let tag = format!("pithos:{project}");
     match resolve_build_action(mode, cached.as_deref()) {
         BuildAction::Reuse(id) => {
-            if let Err(e) = pithos::docker::tag_image(&id, &tag) {
+            if let Err(e) = pithos::docker::tag_image(id, &tag) {
                 narrate(style, "» ERROR:", &format!("{e}"));
                 return Err(ExitCode::from(1));
             }
@@ -792,15 +797,7 @@ fn rebuild_with_version_labels(
     }
 }
 
-fn run_build(
-    cwd: &Path,
-    yaml: &YamlOwned,
-    pithos_bytes: &[u8],
-    dockerfile_path: &Path,
-    dockerfile_content: &str,
-    rebuild: bool,
-    style: Style,
-) -> ExitCode {
+fn run_build(inputs: ProjectInputs<'_>, rebuild: bool, style: Style) -> ExitCode {
     // `build` never aborts: --no-build is a `run`-only flag, so NoBuild is
     // unreachable here by construction. Collapsing to Default/Rebuild keeps
     // that invariant in the type system.
@@ -809,15 +806,7 @@ fn run_build(
     } else {
         RunMode::Default
     };
-    match ensure_image(
-        cwd,
-        yaml,
-        pithos_bytes,
-        dockerfile_path,
-        dockerfile_content,
-        mode,
-        style,
-    ) {
+    match ensure_image(inputs, mode, style) {
         Ok(_) => ExitCode::SUCCESS,
         Err(code) => code,
     }
@@ -845,28 +834,17 @@ fn exit_code_from_status(status: std::process::ExitStatus) -> u8 {
 }
 
 fn run_run(
-    cwd: &Path,
-    yaml: &YamlOwned,
-    pithos_bytes: &[u8],
-    dockerfile_path: &Path,
-    dockerfile_content: &str,
+    inputs: ProjectInputs<'_>,
     mode: RunMode,
     target: &RunTarget,
     tmux: bool,
     style: Style,
 ) -> ExitCode {
-    let ensured = match ensure_image(
-        cwd,
-        yaml,
-        pithos_bytes,
-        dockerfile_path,
-        dockerfile_content,
-        mode,
-        style,
-    ) {
+    let ensured = match ensure_image(inputs, mode, style) {
         Ok(e) => e,
         Err(code) => return code,
     };
+    let cwd = inputs.cwd;
     // Empty-string PITHOS_REPO would silently resolve relative to cwd on
     // join — treat it as unset.
     let pithos_repo = env::var_os("PITHOS_REPO")
