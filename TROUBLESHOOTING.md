@@ -330,6 +330,8 @@ PITHOS_LOG_LEVEL=info
 PITHOS_LOG_DIR=.pi/logs
 ```
 
+Pithos passes `.env` into the container and mounts the project directory as the working directory, so a relative path resolves on the host: the logs appear under the project’s own `.pi/logs`, readable without `docker exec`.
+
 Use `debug` only when additional breadcrumbs are required:
 
 ```dotenv
