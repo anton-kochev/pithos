@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
 
 /// Compute the SHA-256 fingerprint over
-/// (Dockerfile || .pithos || installers || bun_compat || base_image_id).
+/// (Dockerfile || .pithos || installers || bun_compat || entrypoint || base_image_id).
 /// Returns a 64-char lowercase hex digest.
 ///
 /// Installers are hashed in alphabetical order of `name` (BTreeMap iteration
@@ -16,8 +16,7 @@ use sha2::{Digest, Sha256};
 /// cache key to the actual base layer, so any base change (local rebuild via
 /// `pithos rebuild-base`, CI publish, `docker pull`) invalidates the
 /// per-project cache and forces a rebuild. Without this input, edits to
-/// `Dockerfile.base` / `entrypoint.sh` are invisible to per-project cache
-/// hits.
+/// `Dockerfile.base` are invisible to per-project cache hits.
 ///
 /// `bun_compat` is [`crate::embed::PI_BUN_COMPAT_MJS`], the Bun preload the
 /// emitted Dockerfile copies into the image. It is hashed separately from
@@ -25,10 +24,18 @@ use sha2::{Digest, Sha256};
 /// with an updated shim must invalidate project images built by the previous
 /// one, even when the base image ID has not moved.
 ///
+/// `entrypoint` is [`crate::embed::ENTRYPOINT_SH`], hashed for the same reason
+/// and not covered by `base_image_id`: the emitted Dockerfile's
+/// `COPY entrypoint.sh` overwrites the copy baked into the base image, so the
+/// launcher's embedded version is what actually runs. Omitting it let an
+/// entrypoint change ship in a new pithos binary while every existing project
+/// image kept running the old script on a cache hit — silently, because
+/// `rebuild-base` moves `base_image_id` but never reaches this layer.
+///
 /// No separator or length-prefix between blobs: input boundaries are
 /// unambiguous because the Dockerfile is emitter-controlled and ends with
-/// `\n`, `.pithos` is validated UTF-8 YAML, installer bodies are
-/// repo-controlled scripts, and `base_image_id` is a fixed-shape docker
+/// `\n`, `.pithos` is validated UTF-8 YAML, installer and entrypoint bodies
+/// are repo-controlled scripts, and `base_image_id` is a fixed-shape docker
 /// digest. Length-extension attacks are out of scope (inputs are not
 /// adversarial).
 pub fn compute(
@@ -36,6 +43,7 @@ pub fn compute(
     pithos: &[u8],
     installers: &BTreeMap<String, Vec<u8>>,
     bun_compat: &[u8],
+    entrypoint: &[u8],
     base_image_id: &str,
 ) -> String {
     let mut hasher = Sha256::new();
@@ -45,6 +53,7 @@ pub fn compute(
         hasher.update(content);
     }
     hasher.update(bun_compat);
+    hasher.update(entrypoint);
     hasher.update(base_image_id.as_bytes());
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(64);
@@ -109,24 +118,32 @@ mod tests {
     // in `scripts/pi-bun-compat.mjs` is reworded.
     const FIXTURE_PRELOAD: &[u8] = b"#!preload\n";
 
+    // Stand-in for the embedded entrypoint, for the same reason as
+    // FIXTURE_PRELOAD: `entrypoint.sh` is edited far more often than this
+    // module, and the known-vector test must not be collateral damage.
+    const FIXTURE_ENTRYPOINT: &[u8] = b"#!entrypoint\n";
+
     #[test]
     fn compute_returns_known_sha256_for_fixed_input() {
         // Anti-drift: pre-computed via
         //   { printf 'FROM base\n'; printf 'toolchains: {}\n';
         //     printf '#!dotnet\n'; printf '#!rust\n'; printf '#!preload\n';
-        //     printf 'sha256:test'; } | sha256sum
+        //     printf '#!entrypoint\n'; printf 'sha256:test'; } | sha256sum
         // Note: no trailing \n on `sha256:test` — `compute` hashes the raw
         // bytes of `base_image_id`, and FIXTURE_BASE has no embedded newline.
+        // Every other fixture ends in one, so the concatenation stays
+        // byte-unambiguous even without separators.
         let out = compute(
             "FROM base\n",
             b"toolchains: {}\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         assert_eq!(
             out,
-            "f839a661f3d5189d83c0acbc3f2f3807b3ffce24d579eb7831cd8beb4937ee03"
+            "4d8369c334720f76ebe11c25a479f1e5a5330cc6ae33c087d8f40eccadc9dc9b"
         );
     }
 
@@ -137,6 +154,7 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         let b = compute(
@@ -144,6 +162,7 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         assert_eq!(a, b);
@@ -156,6 +175,7 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         let b = compute(
@@ -163,6 +183,7 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         assert_ne!(a, b);
@@ -175,6 +196,7 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         let b = compute(
@@ -182,6 +204,7 @@ mod tests {
             b"x: 2\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         assert_ne!(a, b);
@@ -196,6 +219,7 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         let b = compute(
@@ -203,6 +227,7 @@ mod tests {
             b"x: 1\n",
             &tweaked,
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         assert_ne!(a, b);
@@ -217,6 +242,7 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         let b = compute(
@@ -224,6 +250,7 @@ mod tests {
             b"x: 1\n",
             &extra,
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         assert_ne!(a, b);
@@ -239,6 +266,7 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         let b = compute(
@@ -246,8 +274,36 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             b"#!preload-2\n",
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn compute_changes_when_entrypoint_changes() {
+        // The emitted Dockerfile's `COPY entrypoint.sh` overwrites the base
+        // image's copy, so `rebuild-base` never reaches this layer: only the
+        // fingerprint can stop a project image from running a stale script.
+        // Arrange / Act
+        let a = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
+            FIXTURE_BASE,
+        );
+        let b = compute(
+            "FROM base\n",
+            b"x: 1\n",
+            &fixture_installers(),
+            FIXTURE_PRELOAD,
+            b"#!entrypoint-2\n",
+            FIXTURE_BASE,
+        );
+
+        // Assert
         assert_ne!(a, b);
     }
 
@@ -260,6 +316,7 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         let b = compute(
@@ -267,6 +324,7 @@ mod tests {
             b"x: 1\n",
             &fixture_installers(),
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             "sha256:other",
         );
         assert_ne!(a, b);
@@ -287,6 +345,7 @@ mod tests {
             b"x: 1\n",
             &a_map,
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         let b = compute(
@@ -294,6 +353,7 @@ mod tests {
             b"x: 1\n",
             &b_map,
             FIXTURE_PRELOAD,
+            FIXTURE_ENTRYPOINT,
             FIXTURE_BASE,
         );
         assert_eq!(a, b);

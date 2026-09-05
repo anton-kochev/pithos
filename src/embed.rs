@@ -4,7 +4,12 @@ use std::path::Path;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_installers.rs"));
 
-const ENTRYPOINT_SH: &[u8] = include_bytes!("../entrypoint.sh");
+/// The container entrypoint baked into the build context and, from there, into
+/// every per-project image. Public because [`crate::fingerprint::compute`]
+/// hashes it: the emitted Dockerfile's `COPY entrypoint.sh` overwrites the copy
+/// carried by the base image, so the base image ID alone would not invalidate a
+/// project's cache when only the launcher's copy of the script changes.
+pub const ENTRYPOINT_SH: &[u8] = include_bytes!("../entrypoint.sh");
 
 /// The Bun compat preload baked into the build context and, from there, into
 /// every per-project image at [`crate::dockerfile::PI_BUN_COMPAT_PATH`]. Public

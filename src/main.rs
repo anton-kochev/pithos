@@ -602,6 +602,7 @@ fn ensure_image(
         pithos_bytes,
         &installers,
         pithos::embed::PI_BUN_COMPAT_MJS,
+        pithos::embed::ENTRYPOINT_SH,
         &base_image_id,
     );
 
@@ -1061,6 +1062,7 @@ fn run_info(
         pithos_bytes,
         &installers,
         pithos::embed::PI_BUN_COMPAT_MJS,
+        pithos::embed::ENTRYPOINT_SH,
         &base_image_id,
     );
 
