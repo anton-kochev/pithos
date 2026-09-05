@@ -41,6 +41,84 @@ if [[ -d "$DEFAULTS_DIR" ]]; then
   cp -rn "$DEFAULTS_DIR"/. "$PI_AGENT_DIR"/ 2>/dev/null || true
 fi
 
+# ─── Job 1a: apply baked pi settings ─────────────────────────────────
+# Job 1's no-clobber copy only reaches a volume with no settings.json yet,
+# so it cannot reach a project created before a key existed. This pass runs
+# on every start, is idempotent, and is a no-op once the file already agrees.
+#
+# Why these keys matter: `httpIdleTimeoutMs` is an idle timeout and resets on
+# every byte, so it cannot bound a provider stream that opens and then goes
+# silent. With no absolute per-attempt deadline pi waits indefinitely and the
+# turn ends only when the user presses Escape — surfacing as
+# `stopReason: "aborted"` with zero tokens and no error message, which reads
+# as a Pi hang rather than the provider stall it is.
+#
+# `retry.provider.maxRetries` stays 0 deliberately: provider-internal retries
+# hide the wait from pi and reintroduce the same invisible stall.
+# The two blobs differ by merge direction, not by topic:
+#
+#   PI_SETTINGS_FILL   the project's own value wins; these only fill a gap.
+#                      Reliability bounds live here so a project that needs a
+#                      longer deadline (slow model, heavy reasoning) can raise
+#                      it once and keep it.
+#
+#   PI_SETTINGS_FORCE  the image owns the key and reapplies it on every start.
+#                      A hand edit to one of these reverts on the next launch —
+#                      that is the point, it is what keeps projects identical.
+#
+# `defaultModel` is deliberately absent from both: it is the one setting that
+# is legitimately per-project, and forcing it would revert a deliberate choice
+# on every start.
+PI_SETTINGS_FILL='{
+  "httpIdleTimeoutMs": 300000,
+  "retry": {
+    "enabled": true,
+    "baseDelayMs": 2000,
+    "provider": { "timeoutMs": 120000, "maxRetries": 0, "maxRetryDelayMs": 60000 }
+  }
+}'
+PI_SETTINGS_FORCE='{
+  "defaultProvider": "openai-codex",
+  "defaultThinkingLevel": "high",
+  "theme": "auric-light/auric-dark",
+  "transport": "auto",
+  "steeringMode": "all",
+  "followUpMode": "one-at-a-time",
+  "treeFilterMode": "all",
+  "tuiMode": "regular",
+  "doubleEscapeAction": "tree",
+  "editorPaddingX": 0,
+  "enableSkillCommands": true,
+  "autocompleteMaxVisible": 5,
+  "markdown": { "mermaid": "streaming" },
+  "images": { "autoResize": true, "blockImages": false },
+  "terminal": { "showTerminalProgress": true, "clearOnShrink": false },
+  "retry": { "maxRetries": 1 },
+  "modelThinkingLevels": {
+    "openai-codex/gpt-5.6-sol": "high",
+    "openai-codex/gpt-5.6-terra": "high",
+    "openai-codex/gpt-5.6-luna": "high",
+    "openai-codex/gpt-6-astra": "medium",
+    "openai-codex/gpt-5.4-mini": "medium"
+  }
+}'
+# `*` deep-merges objects with the right side winning at every leaf, so
+# `($fill * $cur) * $force` reads as: defaults, then the project, then the
+# keys the image owns. An unreadable or non-object settings.json leaves jq
+# with nothing to merge; warn and leave the file untouched rather than
+# replacing state the user may still want to recover.
+settings="$PI_AGENT_DIR/settings.json"
+current='{}'
+[[ -s "$settings" ]] && current=$(cat "$settings")
+if merged=$(jq -n --argjson cur "$current" \
+                  --argjson fill "$PI_SETTINGS_FILL" \
+                  --argjson force "$PI_SETTINGS_FORCE" \
+                  '($fill * $cur) * $force' 2>/dev/null); then
+  printf '%s\n' "$merged" > "$settings"
+else
+  echo "pithos: warning: ${settings} is not valid JSON; pi settings not applied" >&2
+fi
+
 # ─── Job 1b: reconcile pi.extensions from /etc/pithos/extensions.list ─
 # Pithos mounts this manifest read-only when `.pithos` declares
 # `pi.extensions`. Each line is `<name>\t<spec>` where `<spec>` is
