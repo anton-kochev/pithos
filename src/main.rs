@@ -47,8 +47,7 @@ enum RunTarget {
 }
 
 // Short usage line for fail-fast reject paths. `pithos help` prints the full usage.
-const USAGE: &str =
-    "usage: pithos [run | build | info | clean | rebuild-base | help | version] [options]";
+const USAGE: &str = "usage: pithos [run | build | info | sessions | clean | rebuild-base | help | version] [options]";
 
 // Content written when the user accepts the prompt to create a missing `.pithos`.
 // Mirrors the example in the prompt narration; validates cleanly through `pithos::config::load`.
@@ -65,6 +64,9 @@ enum Subcommand {
         tmux: bool,
     },
     Info,
+    SessionsMigrate {
+        merge: bool,
+    },
     Clean {
         all: bool,
     },
@@ -122,6 +124,26 @@ impl Subcommand {
                     value: extra.clone(),
                 },
             },
+            Some("sessions") => {
+                if args.get(2).map(String::as_str) != Some("migrate") {
+                    return Self::Reject {
+                        kind: RejectKind::Usage,
+                        value: "usage: pithos sessions migrate [--merge]".into(),
+                    };
+                }
+                let mut merge = false;
+                for arg in &args[3..] {
+                    if arg == "--merge" {
+                        merge = true;
+                    } else {
+                        return Self::Reject {
+                            kind: RejectKind::Flag,
+                            value: arg.clone(),
+                        };
+                    }
+                }
+                Self::SessionsMigrate { merge }
+            }
             Some("clean") => {
                 let mut all = false;
                 for arg in args.iter().skip(2) {
@@ -211,7 +233,11 @@ impl Subcommand {
     fn requires_daemon(&self) -> bool {
         matches!(
             self,
-            Self::Build { .. } | Self::Run { .. } | Self::Clean { .. } | Self::RebuildBase
+            Self::Build { .. }
+                | Self::Run { .. }
+                | Self::Clean { .. }
+                | Self::RebuildBase
+                | Self::SessionsMigrate { .. }
         )
     }
 
@@ -339,6 +365,13 @@ fn main() -> ExitCode {
         Subcommand::Build { rebuild } => run_build(inputs, rebuild, style),
         Subcommand::Run { mode, target, tmux } => run_run(inputs, mode, &target, tmux, style),
         Subcommand::Info => run_info(&cwd, &yaml, &pithos_bytes, &dockerfile_content, style),
+        Subcommand::SessionsMigrate { merge } => match pithos::sessions::migrate(&cwd, merge) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                narrate(style, "» ERROR:", &e.to_string());
+                ExitCode::from(1)
+            }
+        },
         Subcommand::Clean { .. } | Subcommand::RebuildBase => {
             unreachable!("handled by short-circuit above")
         }
@@ -487,6 +520,7 @@ fn help_text() -> String {
            run [cmd...]   Build-if-needed, then launch Pi or an explicit command\n  \
            build          Build the image without launching\n  \
            info           Print project config, fingerprint, and image status\n  \
+           sessions migrate [--merge]  Copy legacy volume sessions to the project\n  \
            clean          Remove dangling pithos images (or all with --all)\n  \
            rebuild-base   Build Dockerfile.base into local :base for dev iteration\n  \
            help           Print this help\n  \
@@ -506,6 +540,7 @@ fn help_text() -> String {
              pithos --pi \"Start with this prompt\"\n\
          \n\
          Config (.pithos):\n  \
+           sessions.storage: project (default) or volume (legacy compatibility)\n  \
            Toolchains use the flat form — a quoted numeric version per name; nested\n  \
            `version:` keys are not supported. Prefer N.N.N exact pins; Node also\n  \
            accepts N or N.N and resolves the newest matching release:\n    \
@@ -845,6 +880,17 @@ fn run_run(
         Err(code) => return code,
     };
     let cwd = inputs.cwd;
+    let session_root = match pithos::config::session_storage(inputs.yaml).expect("validated config")
+    {
+        pithos::config::SessionStorage::Volume => None,
+        pithos::config::SessionStorage::Project => match pithos::sessions::prepare(cwd) {
+            Ok(root) => Some(root),
+            Err(e) => {
+                narrate(style, "» ERROR:", &e.to_string());
+                return ExitCode::from(1);
+            }
+        },
+    };
     // Empty-string PITHOS_REPO would silently resolve relative to cwd on
     // join — treat it as unset.
     let pithos_repo = env::var_os("PITHOS_REPO")
@@ -896,6 +942,7 @@ fn run_run(
         image_tag: &ensured.tag,
         project: &ensured.project,
         workspace: cwd,
+        session_root: session_root.as_deref(),
         pithos_repo: pithos_repo.as_deref(),
         extensions_manifest: Some(&extensions_manifest_path),
         environment: pithos::docker::RunEnvironment {
@@ -1012,6 +1059,15 @@ fn run_info(
         }
     };
     let tag = format!("pithos:{project}");
+    match pithos::config::session_storage(yaml).expect("validated config") {
+        pithos::config::SessionStorage::Project => println!(
+            "sessions:     project ({})",
+            cwd.join(".pi/sessions").display()
+        ),
+        pithos::config::SessionStorage::Volume => {
+            println!("sessions:     volume (pithos-home-{project})")
+        }
+    }
 
     let mut installers = BTreeMap::new();
     for name in pithos::dockerfile::toolchain_names(yaml) {
@@ -1139,7 +1195,7 @@ fn merge_candidates(
 ) -> Vec<pithos::docker::PithosImage> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(dangling.len() + tagged.len());
-    for img in dangling.into_iter().chain(tagged.into_iter()) {
+    for img in dangling.into_iter().chain(tagged) {
         if seen.insert(img.id.clone()) {
             out.push(img);
         }

@@ -21,4 +21,5 @@
 
 # Pithos generated artifacts
 /.pithos.d/
+/.pi/sessions/
 /node_modules

@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn session_overlay_follows_home_and_preserves_command() {
+    let mut args = assemble_run_args(
+        "pithos:demo",
+        "demo",
+        Path::new("/tmp/demo"),
+        None,
+        None,
+        RunEnvironment::default(),
+        &["pi".into(), "--session-dir".into(), "/custom".into()],
+    );
+    insert_session_mount(
+        &mut args,
+        Path::new("/tmp/a space,comma:colon/.pi/sessions"),
+    )
+    .unwrap();
+    let home = args
+        .iter()
+        .position(|a| a == "pithos-home-demo:/home/pi")
+        .unwrap();
+    assert_eq!(args[home + 1], "--mount");
+    assert_eq!(
+        args[home + 2],
+        "type=bind,\"source=/tmp/a space,comma:colon/.pi/sessions\",target=/home/pi/.pi/agent/sessions"
+    );
+    assert_eq!(&args[args.len() - 3..], ["pi", "--session-dir", "/custom"]);
+}
+
+#[test]
 fn assemble_run_args_emits_core_flags() {
     let args = assemble_run_args(
         "pithos:demo",

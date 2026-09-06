@@ -112,8 +112,10 @@ observers may attach and detach freely. The flag also wraps an explicit command 
 
 ### Passing arguments to Pi
 
-Pi sessions live in the project's named volume (`pithos-home-<project>`), so they
-survive the `--rm` container. Pi's full CLI is available through Pithos:
+Pi sessions default to the host project's `.pi/sessions/`, mounted at
+`/home/pi/.pi/agent/sessions`. Pi retains its working-directory subdirectories;
+transcripts are not necessarily directly inside `.pi/sessions`. They survive
+container removal. Pi's full CLI is available through Pithos:
 
 ```sh
 pithos --continue                         # most recent project session
@@ -130,6 +132,54 @@ Pi version running inside the container does. Once a Pi option is encountered,
 every remaining argument is passed through unchanged. This allows options to be
 combined with prompts, for example `pithos --continue "Pick up the refactor"`.
 Place `--rebuild`, `--no-build`, and `--tmux` before the first Pi option.
+
+### Session storage and migration
+
+Only the default session root is host-backed. Credentials, settings, installed
+extensions, and other home state remain in `pithos-home-<project>`. Explicit Pi
+session-directory settings, environment variables, and CLI arguments still take
+precedence over Pi's default path; those paths may not be host-backed.
+
+Sessions may contain sensitive source, prompts, command output, and secrets.
+Pithos creates `.pi/sessions/.gitignore` (`*` and `!.gitignore`) but never overwrites
+custom content; a conflicting safeguard causes an actionable startup error.
+Git ignores do not protect already tracked files, forced adds, cloud sync, IDE
+indexing, or backups. Review existing tracked transcripts. Teams can additionally
+add `/.pi/sessions/` to the root `.gitignore`; do not ignore all of `.pi/`.
+
+To keep the legacy volume-backed default session root:
+
+```yaml
+sessions:
+  storage: volume # project is the default when sessions is omitted
+```
+
+Changing modes does not copy history. Existing volume sessions are hidden by the
+new mount, not deleted. After building the project image, stop all source and
+destination session writers and explicitly import history:
+
+```sh
+pithos sessions migrate
+pithos sessions migrate --merge # occupied destination; skip existing files
+```
+
+Migration requires Docker, a valid `.pithos`, an existing project image, and the
+legacy volume. It copies only the session tree, with a read-only source mount,
+and never deletes the volume or overwrites files. Completed files remain after
+an interrupted import; retry with `--merge`. Switching back to volume mode does
+not copy new host sessions back. `pithos info` shows the selected default storage.
+
+Legacy volumes are keyed by sanitized basename: same-named checkouts may have
+mixed history. Review imported data before sharing. New host-backed sessions are
+separate per checkout; other home state still shares the existing volume naming.
+Moving files does not rewrite Pi's encoded cwd or embedded paths, so renaming a
+checkout can require explicitly selecting old sessions.
+
+Host directories are created with restrictive Unix permissions. The container's
+UID/GID `501:20` must also be able to write there; Pithos never loosens permissions
+or silently falls back to volume storage. Use volume mode if host ownership,
+SELinux, Docker Desktop sharing, network filesystems, or sync software makes the
+bind unsuitable. `pithos clean` remains image-only and does not delete sessions.
 
 ## Pithos Kit
 

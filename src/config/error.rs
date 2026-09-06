@@ -1,11 +1,13 @@
 use std::fmt;
 
-pub(super) const VALID_TOP_LEVEL: &[&str] = &["toolchains", "extras", "pi"];
+pub(super) const VALID_TOP_LEVEL: &[&str] = &["toolchains", "extras", "pi", "sessions"];
 pub(super) const VALID_EXTRAS: &[&str] = &["apt"];
 pub(super) const VALID_PI: &[&str] = &["version", "extensions"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error(".pithos sessions: {0}")]
+    Sessions(String),
     #[error(".pithos: not valid UTF-8")]
     NotUtf8,
 

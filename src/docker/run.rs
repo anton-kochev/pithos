@@ -24,12 +24,16 @@ pub struct RunRequest<'a> {
     pub image_tag: &'a str,
     pub project: &'a str,
     pub workspace: &'a Path,
+    /// Prepared host session directory. None retains volume-backed storage.
+    pub session_root: Option<&'a Path>,
     pub pithos_repo: Option<&'a Path>,
     pub extensions_manifest: Option<&'a Path>,
     pub environment: RunEnvironment<'a>,
     pub command: &'a [String],
 }
 
+/// Legacy convenience API (volume-backed sessions); use `run_request` for
+/// project-local session persistence.
 /// Spawn `docker run` with the flag set defined by FR-501, inheriting the
 /// caller's TTY. Blocks until the container exits; returns the exit status
 /// for the caller to translate into the launcher's exit code.
@@ -49,6 +53,7 @@ pub struct RunRequest<'a> {
 /// docker run --rm -it --name ... --hostname ... --user 501:20
 ///            -v <PWD>:/workspace/<project>:cached
 ///            -v pithos-home-<project>:/home/pi
+///            [--mount type=bind,source=<session_root>,target=/home/pi/.pi/agent/sessions]
 ///            [-v <PITHOS_REPO>/pi-config/... per Layer 3 item, if exists]
 ///            [-v <extensions_manifest>:/etc/pithos/extensions.list:ro, if file exists]
 ///            [--env-file <.env>, if Some]
@@ -70,6 +75,7 @@ pub fn run(
         image_tag,
         project,
         workspace,
+        session_root: None,
         pithos_repo,
         extensions_manifest,
         environment,
@@ -79,7 +85,7 @@ pub fn run(
 
 /// Launch a project container from a grouped request.
 pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, RunError> {
-    let args = assemble_run_args(
+    let mut args = assemble_run_args(
         request.image_tag,
         request.project,
         request.workspace,
@@ -88,6 +94,9 @@ pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, 
         request.environment,
         request.command,
     );
+    if let Some(root) = request.session_root {
+        insert_session_mount(&mut args, root)?;
+    }
     // Stdio::inherit is the default; be explicit so a future refactor
     // pulling in stream_lines for "consistency with build" doesn't
     // accidentally swallow the user's TTY.
@@ -263,6 +272,17 @@ fn render_run_args(
         args.push(arg.into());
     }
     args
+}
+
+/// Overlay only the default session root; explicit Pi overrides remain untouched.
+fn insert_session_mount(args: &mut Vec<OsString>, root: &Path) -> Result<(), std::io::Error> {
+    let mount = crate::sessions::bind_mount(root, "/home/pi/.pi/agent/sessions")?;
+    let home = args
+        .iter()
+        .position(|a| a.to_string_lossy().ends_with(":/home/pi"))
+        .expect("home volume is always rendered");
+    args.splice(home + 1..home + 1, [OsString::from("--mount"), mount]);
+    Ok(())
 }
 
 #[cfg(test)]

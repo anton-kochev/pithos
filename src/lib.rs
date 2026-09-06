@@ -7,3 +7,4 @@ pub mod extensions;
 pub mod fingerprint;
 pub mod output;
 pub mod project;
+pub mod sessions;

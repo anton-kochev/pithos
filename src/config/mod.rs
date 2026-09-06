@@ -1,6 +1,8 @@
 mod error;
 mod extras;
 mod pi;
+mod sessions;
+pub use sessions::{SessionStorage, session_storage};
 mod toolchains;
 mod version;
 
@@ -69,5 +71,6 @@ pub fn load(bytes: &[u8]) -> Result<YamlOwned, ConfigError> {
     if let Some(pi) = pi {
         pi::validate(pi)?;
     }
+    session_storage(&doc)?;
     Ok(doc)
 }

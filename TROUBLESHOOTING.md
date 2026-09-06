@@ -51,7 +51,19 @@ After rebuilding, verify again:
 
 ## 2. Decide whether the process is progressing
 
-By default, Pithos stores Pi sessions inside the `pithos-home-<project>` Docker volume, not in the host project’s `.pi/sessions` directory. From a second host terminal, list the active Pithos containers:
+By default, Pithos stores Pi sessions on the host in `.pi/sessions/`, overlaying
+`/home/pi/.pi/agent/sessions` inside the container. Inspect them without Docker:
+
+```bash
+find .pi/sessions -type f -name '*.jsonl'
+stat '.pi/sessions/<encoded-cwd>/<session>.jsonl'
+wc -l '.pi/sessions/<encoded-cwd>/<session>.jsonl'
+```
+
+Use `/session` to identify the affected file rather than assuming the newest file
+belongs to this run. Explicit Pi session-path overrides can use another location.
+With `sessions.storage: volume`, the default session root remains in
+`pithos-home-<project>`. In that mode, list active containers from a host terminal:
 
 ```bash
 docker ps --filter name=pithos- --format '{{.Names}}'
@@ -103,6 +115,27 @@ pithos run -- pi \
 ```
 
 Add the isolation flags from the relevant test below when needed. JSON mode does not expose progress from an already-running print-mode process; it is an alternative for a new diagnostic run.
+
+### Session storage startup or migration errors
+
+- Check `pithos info` for the configured default storage. Volume history is not
+  automatically copied: build the project image, stop writers, then run
+  `pithos sessions migrate` (or `--merge` to skip existing destination files).
+- Migration refuses running containers using the legacy volume. Keep all writers
+  stopped throughout import; this is not a live snapshot or synchronization tool.
+- A session directory or `.pi` symlink is rejected. Use real directories; custom
+  `.pi/sessions/.gitignore` content is preserved but must match the safeguard
+  (`*` followed by `!.gitignore`) before project-mode launch.
+- On Linux, a host-owned mode-0700 directory may not be writable by container
+  UID/GID `501:20`. Arrange deliberate ownership/access or select
+  `sessions: {storage: volume}`. Do not use world-writable permissions.
+- SELinux labeling and Docker Desktop file-sharing policies may block the mount
+  even when Unix permissions look correct. No automatic relabeling is performed.
+- Avoid cloud-sync and network-filesystem writers during a run or migration.
+  Host paths are on the Docker daemon machine; remote Docker contexts are not
+  automatically supported by this local-host storage design.
+- Git ignore rules do not remove already tracked transcripts or prevent other
+  software from uploading them. Sessions may contain secrets; review before sharing.
 
 ## 3. Run the isolation ladder
 
