@@ -50,6 +50,10 @@ fn launch_modes_and_info_use_policy_without_rewriting_pi_options() {
             .success();
         let log = fixture.log();
         assert!(log.contains("pithos-home-project:/home/pi"));
+        let initialization = log.find("--entrypoint\n/usr/bin/python3").unwrap();
+        let interactive = log.find("-it\n").unwrap();
+        assert!(initialization < interactive);
+        assert!(log.contains("--user\n501:20"));
         assert_eq!(
             log.contains("target=/home/pi/.pi/agent/sessions"),
             storage == "project"
@@ -84,6 +88,28 @@ fn migration_mounts_are_safe_and_no_build_or_deletion_occurs() {
             .any(|line| matches!(line, "build" | "rm" | "prune"))
     );
     assert!(!fixture.temp.path().join("project/.pithos.d").exists());
+}
+
+#[test]
+fn home_initialization_failure_prevents_interactive_launch() {
+    let fixture = Fixture::new();
+    fs::write(fixture.temp.path().join("bin/docker"), "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$DOCKER_LOG\"\ncase \"$1\" in\nimage|inspect) echo sha256:fake;;\nrun) echo 'initialization denied' >&2; exit 17;;\nesac\n").unwrap();
+    let output = assert_cmd::Command::cargo_bin("pithos")
+        .unwrap()
+        .current_dir(fixture.temp.path().join("project"))
+        .env("PATH", fixture.temp.path().join("bin"))
+        .env("DOCKER_LOG", fixture.temp.path().join("docker.log"))
+        .args(["run", "--no-build"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot initialize home volume pithos-home-project"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("initialization denied"), "{stderr}");
+    assert!(!fixture.log().contains("-it\n"));
 }
 
 #[test]

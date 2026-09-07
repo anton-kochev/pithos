@@ -953,8 +953,8 @@ fn run_run(
         command: effective_cmd,
     }) {
         Ok(status) => ExitCode::from(exit_code_from_status(status)),
-        Err(pithos::docker::RunError::Spawn(e)) => {
-            narrate(style, "» ERROR:", &format!("docker run: {e}"));
+        Err(e) => {
+            narrate(style, "» ERROR:", &e.to_string());
             ExitCode::from(1)
         }
     }

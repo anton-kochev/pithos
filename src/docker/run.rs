@@ -2,13 +2,14 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Failure modes for [`run`]. Mirrors [`super::BuildError`] but carries no
-/// `NonZero` variant — the container's exit code propagates to the user's
-/// shell verbatim via the caller's `ExitCode`, we don't reclassify it.
+/// Initialization failures are launcher errors. The interactive container's
+/// exit code still propagates to the user's shell verbatim.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
     #[error("docker run: {0}")]
     Spawn(#[from] std::io::Error),
+    #[error("cannot initialize home volume {volume}: {detail}")]
+    InitializeHome { volume: String, detail: String },
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -97,6 +98,7 @@ pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, 
     if let Some(root) = request.session_root {
         insert_session_mount(&mut args, root)?;
     }
+    initialize_home(request.image_tag, request.project)?;
     // Stdio::inherit is the default; be explicit so a future refactor
     // pulling in stream_lines for "consistency with build" doesn't
     // accidentally swallow the user's TTY.
@@ -107,6 +109,52 @@ pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, 
         .stderr(Stdio::inherit())
         .status()?;
     Ok(status)
+}
+
+/// Docker creates missing nested bind-mount ancestors as root. Prepare them
+/// before attaching sessions/config, including recovery of already-used volumes.
+fn initialize_home(image_tag: &str, project: &str) -> Result<(), RunError> {
+    let volume = format!("pithos-home-{project}");
+    let output = Command::new("docker")
+        .args(initialize_home_args(image_tag, &volume))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| RunError::InitializeHome {
+            volume: volume.clone(),
+            detail: error.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(RunError::InitializeHome {
+            volume,
+            detail: format!(
+                "{}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn initialize_home_args(image_tag: &str, volume: &str) -> Vec<OsString> {
+    [
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--user",
+        "0:0",
+        "--entrypoint",
+        "/usr/bin/python3",
+        "-v",
+        &format!("{volume}:/home/pi"),
+        image_tag,
+        "-c",
+        include_str!("initialize_home.py"),
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
 }
 
 fn docker_run_command(args: &[OsString], clipboard_url: Option<&str>) -> Command {

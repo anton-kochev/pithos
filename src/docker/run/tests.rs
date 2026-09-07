@@ -1,6 +1,113 @@
 use super::*;
 
 #[test]
+fn initialization_mounts_only_home_without_host_environment_or_tty() {
+    let args = initialize_home_args("pithos:demo", "pithos-home-demo");
+    assert_eq!(
+        args[..12],
+        [
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--user",
+            "0:0",
+            "--entrypoint",
+            "/usr/bin/python3",
+            "-v",
+            "pithos-home-demo:/home/pi",
+            "pithos:demo",
+            "-c"
+        ]
+    );
+    assert_eq!(args.len(), 13);
+    assert_eq!(args[12], include_str!("../initialize_home.py"));
+}
+
+/// Requires a Docker daemon and an existing base image. No registry pull is
+/// performed by the test itself; set PITHOS_TEST_IMAGE to a locally built image.
+#[test]
+#[ignore = "requires Docker and a Pithos base image"]
+fn docker_home_initialization_repairs_and_preserves_nested_sessions() {
+    let image = std::env::var("PITHOS_TEST_IMAGE")
+        .unwrap_or_else(|_| "ghcr.io/anton-kochev/pithos:base".into());
+    let project = format!("home-regression-{}", std::process::id());
+    let volume = format!("pithos-home-{project}");
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = Command::new("docker")
+                .args(["volume", "rm", "-f", &self.0])
+                .output();
+        }
+    }
+    let _cleanup = Cleanup(volume.clone());
+    let sessions = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Explicit test-fixture ownership, never a production host mutation.
+        std::fs::set_permissions(sessions.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(sessions.path().join("sentinel"), "retained").unwrap();
+    let home = format!("{volume}:/home/pi");
+    let run_shell = |script: &str| {
+        let output = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--user",
+                "0:0",
+                "--entrypoint",
+                "sh",
+                "-v",
+                &home,
+                &image,
+                "-ec",
+                script,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    for attempt in 0..3 {
+        if attempt == 1 {
+            // After fresh startup, reproduce the reported broken volume and
+            // retain a private file whose ownership must not change.
+            run_shell(
+                "rm /home/pi/.pi/agent/settings.json; chown 0:0 /home/pi/.pi /home/pi/.pi/agent; chmod 755 /home/pi/.pi /home/pi/.pi/agent; printf secret > /home/pi/.pi/credential-sentinel; chmod 600 /home/pi/.pi/credential-sentinel",
+            );
+        }
+        initialize_home(&image, &project).unwrap();
+        let mount =
+            crate::sessions::bind_mount(sessions.path(), "/home/pi/.pi/agent/sessions").unwrap();
+        let output = Command::new("docker").args(["run", "--rm", "--network", "none",
+            "--user", "501:20", "-v", &home, "--mount"]).arg(mount)
+            .args([&image, "sh", "-ec", "test $(id -u) = 501; test $(id -g) = 20; test -w /home/pi/.pi/agent/settings.json; jq -e 'type == \"object\"' /home/pi/.pi/agent/settings.json; test $(cat /home/pi/.pi/agent/sessions/sentinel) = retained"]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    run_shell(
+        "test $(cat /home/pi/.pi/credential-sentinel) = secret; test $(stat -c %u:%a /home/pi/.pi/credential-sentinel) = 0:600; mv /home/pi/.pi/agent /home/pi/.pi/saved-agent; ln -s saved-agent /home/pi/.pi/agent",
+    );
+    assert!(initialize_home(&image, &project).is_err());
+    run_shell("test -L /home/pi/.pi/agent; test -f /home/pi/.pi/saved-agent/settings.json");
+    assert_eq!(
+        std::fs::read_to_string(sessions.path().join("sentinel")).unwrap(),
+        "retained"
+    );
+}
+
+#[test]
 fn session_overlay_follows_home_and_preserves_command() {
     let mut args = assemble_run_args(
         "pithos:demo",

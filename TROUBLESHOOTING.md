@@ -2,6 +2,28 @@
 
 Use this runbook when Pi remains on `Working…`, stops after a tool result, or a non-interactive `-p` command appears silent.
 
+## Startup: settings.json permission denied
+
+Older launchers could let Docker create `/home/pi/.pi/agent` as root when
+mounting project sessions beneath it. Pi then failed to create `settings.json`.
+The launcher now initializes the named home volume before attaching host mounts,
+and repairs root-owned structural directories on existing volumes automatically.
+The session itself still runs as `501:20`; settings, credentials, transcripts,
+and host file permissions are not changed by initialization.
+
+If startup reports `cannot initialize home volume`, inspect the named volume in
+the error. Symlink/non-directory ancestors, unexpected directory owners, or
+restrictive existing modes require deliberate correction. Initialization does
+not recursively chown files or relax permissions; do not delete the volume or
+make it world-writable. A separately bind-mounted settings file must also be
+writable by the session user.
+
+Developers can run the daemon-backed regression against a local Pithos image:
+
+```bash
+PITHOS_TEST_IMAGE=pithos:your-project cargo test --lib docker_home_initialization -- --ignored
+```
+
 ## Quick triage
 
 1. Do not submit another prompt while the current turn is unfinished.
