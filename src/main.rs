@@ -474,14 +474,6 @@ fn abort_message(project: &str) -> String {
     format!("image pithos:{project} not found; run `pithos build` to create it (--no-build is set)")
 }
 
-/// Return `<cwd>/.env` if it exists, else `None`. Extracted so the
-/// conditional `--env-file` branch in `run_run` is unit-testable. No I/O
-/// beyond a `Path::exists()` probe.
-fn discover_env_file(cwd: &Path) -> Option<std::path::PathBuf> {
-    let p = cwd.join(".env");
-    p.exists().then_some(p)
-}
-
 /// Materialize Pi's launch argv when arguments must be appended. An empty
 /// argument list returns an empty vector so Docker falls through to the image
 /// `CMD`. Built from [`pithos::dockerfile::PI_LAUNCH_ARGV`] so pass-through
@@ -896,7 +888,6 @@ fn run_run(
     let pithos_repo = env::var_os("PITHOS_REPO")
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from);
-    let env_file = discover_env_file(cwd);
     let extensions_manifest_path = cwd.join(".pithos.d").join("extensions.list");
     let clipboard_shim_dir = cwd.join(".pithos.d");
     let clipboard_bridge =
@@ -946,7 +937,6 @@ fn run_run(
         pithos_repo: pithos_repo.as_deref(),
         extensions_manifest: Some(&extensions_manifest_path),
         environment: pithos::docker::RunEnvironment {
-            env_file: env_file.as_deref(),
             clipboard_url: clipboard_url.as_deref(),
             clipboard_shim: clipboard_bridge.as_ref().map(|bridge| bridge.shim_path()),
         },
@@ -1792,20 +1782,6 @@ mod tests {
         let wrapped = pithos::docker::tmux_wrap(&command);
 
         assert_eq!(&wrapped[wrapped.len() - 2..], &["--fork", "01a0335e"]);
-    }
-
-    #[test]
-    fn discover_env_file_returns_some_when_env_exists() {
-        let td = tempfile::tempdir().unwrap();
-        let env_path = td.path().join(".env");
-        std::fs::write(&env_path, "FOO=bar").unwrap();
-        assert_eq!(discover_env_file(td.path()), Some(env_path));
-    }
-
-    #[test]
-    fn discover_env_file_returns_none_when_env_absent() {
-        let td = tempfile::tempdir().unwrap();
-        assert!(discover_env_file(td.path()).is_none());
     }
 
     #[test]

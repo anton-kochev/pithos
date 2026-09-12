@@ -220,7 +220,8 @@ if [[ -r "$MANIFEST" ]]; then
 fi
 
 # ─── Job 2: set git identity from env vars ───────────────────────────
-# Values come from .env via the pithos launcher's --env-file flag.
+# Only explicitly supplied container environment values are used; Pithos does
+# not import workspace .env files.
 # If unset, skip silently — allows the image to work without them too.
 if [[ -n "${GIT_USER_NAME:-}" && -n "${GIT_USER_EMAIL:-}" ]]; then
   git config --global user.name  "$GIT_USER_NAME"

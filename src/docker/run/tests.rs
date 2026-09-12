@@ -273,39 +273,52 @@ fn assemble_run_args_every_dash_v_is_followed_by_a_bind_spec() {
 }
 
 #[test]
-fn assemble_run_args_omits_env_file_when_none() {
-    let args = assemble_run_args(
-        "pithos:demo",
-        "demo",
-        Path::new("/tmp/x"),
-        None,
-        None,
-        RunEnvironment::default(),
-        &[],
-    );
-    assert!(!args.contains(&OsString::from("--env-file")));
-}
+fn assemble_run_args_does_not_import_workspace_env_file() {
+    let td = tempfile::tempdir().unwrap();
+    let command = vec![
+        "app".to_string(),
+        "--env-file".to_string(),
+        "manual.env".to_string(),
+    ];
+    let commands = [Vec::new(), command.clone(), tmux_wrap(&command)];
 
-#[test]
-fn assemble_run_args_includes_env_file_when_some() {
-    let args = assemble_run_args(
-        "pithos:demo",
-        "demo",
-        Path::new("/tmp/x"),
-        None,
-        None,
-        RunEnvironment {
-            env_file: Some(Path::new("/tmp/.env")),
-            clipboard_url: None,
-            clipboard_shim: None,
-        },
-        &[],
-    );
-    assert!(
-        args.windows(2)
-            .any(|w| w[0] == "--env-file" && w[1] == "/tmp/.env"),
-        "missing --env-file /tmp/.env pair in {args:?}"
-    );
+    for present in [false, true] {
+        if present {
+            std::fs::write(
+                td.path().join(".env"),
+                "PITHOS_TEST_SECRET=synthetic-canary-value\n",
+            )
+            .unwrap();
+        }
+        for cmd in &commands {
+            let args = assemble_run_args(
+                "pithos:demo",
+                "demo",
+                td.path(),
+                None,
+                None,
+                RunEnvironment::default(),
+                cmd,
+            );
+            let image = args.iter().position(|arg| arg == "pithos:demo").unwrap();
+            let options = &args[..image];
+            assert!(!options.contains(&OsString::from("--env-file")));
+            let environment: Vec<_> = options
+                .windows(2)
+                .filter(|pair| pair[0] == "-e" || pair[0] == "--env")
+                .map(|pair| pair[1].to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(environment, ["COLORTERM=truecolor"]);
+            assert!(args.iter().all(|arg| {
+                let text = arg.to_string_lossy();
+                !text.contains("PITHOS_TEST_SECRET") && !text.contains("synthetic-canary-value")
+            }));
+            // A caller's --env-file is an opaque application argument, not a
+            // Docker option. Preserve it, including through the tmux wrapper.
+            let expected: Vec<OsString> = cmd.iter().map(OsString::from).collect();
+            assert_eq!(&args[image + 1..], expected);
+        }
+    }
 }
 
 #[test]
@@ -433,7 +446,6 @@ fn assemble_run_args_inherits_clipboard_bridge_url_without_exposing_value() {
         None,
         None,
         RunEnvironment {
-            env_file: None,
             clipboard_url: Some("http://host.docker.internal:49152/token"),
             clipboard_shim: Some(Path::new("/tmp/pithos-xclip")),
         },

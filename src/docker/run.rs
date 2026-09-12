@@ -14,7 +14,6 @@ pub enum RunError {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RunEnvironment<'a> {
-    pub env_file: Option<&'a Path>,
     pub clipboard_url: Option<&'a str>,
     pub clipboard_shim: Option<&'a Path>,
 }
@@ -45,8 +44,10 @@ pub struct RunRequest<'a> {
 /// generated `.pithos.d/extensions.list`; when present, it is bind-mounted
 /// read-only at `/etc/pithos/extensions.list` so the container entrypoint
 /// can reconcile declared Pi extensions on startup. Missing file is a
-/// silent skip. `environment` supplies the optional `.env` path and host
-/// clipboard bridge URL/shim. `cmd` is appended after the image tag; an empty
+/// silent skip. `environment` supplies Pithos-owned runtime integrations.
+/// Workspace `.env` files are not imported
+/// into the container environment, but remain readable through the workspace
+/// mount. `cmd` is appended after the image tag; an empty
 /// slice means docker falls through to the Dockerfile's `CMD` (FR-502).
 ///
 /// Shells out to:
@@ -57,7 +58,6 @@ pub struct RunRequest<'a> {
 ///            [--mount type=bind,source=<session_root>,target=/home/pi/.pi/agent/sessions]
 ///            [-v <PITHOS_REPO>/pi-config/... per Layer 3 item, if exists]
 ///            [-v <extensions_manifest>:/etc/pithos/extensions.list:ro, if file exists]
-///            [--env-file <.env>, if Some]
 ///            -e COLORTERM=truecolor
 ///            [-v <clipboard-shim>:/usr/local/bin/xclip:ro]
 ///            [-e PITHOS_CLIPBOARD_URL]
@@ -292,10 +292,6 @@ fn render_run_args(
     for bind in optional_mounts {
         args.push("-v".into());
         args.push(bind.clone());
-    }
-    if let Some(env_path) = environment.env_file {
-        args.push("--env-file".into());
-        args.push(env_path.into());
     }
     args.push("-e".into());
     args.push("COLORTERM=truecolor".into());

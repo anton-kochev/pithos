@@ -12,8 +12,8 @@
 # once per project (until something invalidates the token).
 #
 # Usage:
-#   pithos run -- bootstrap.sh             # from the host
-#   bootstrap.sh                           # from inside a running container
+#   pithos run -- env GIT_USER_NAME="Your Name" GIT_USER_EMAIL="you@example.com" bootstrap.sh
+#   GIT_USER_NAME="Your Name" GIT_USER_EMAIL="you@example.com" bootstrap.sh # inside
 
 set -euo pipefail
 
@@ -30,10 +30,10 @@ run_dim() { "$@" 2>&1 | sed "s/^/${_dim}  /;s/\$/${_reset}/"; }
 
 # ─── Validate env vars ───────────────────────────────────────────────
 # Unlike the entrypoint, we hard-fail here if they're missing — this
-# script is invoked by humans with clear intent, so a missing .env is
-# a real bug, not a degraded mode.
+# script is invoked by humans with clear intent, so missing identity values
+# are a real bug, not a degraded mode. Pithos does not import .env files.
 if [[ -z "${GIT_USER_NAME:-}" || -z "${GIT_USER_EMAIL:-}" ]]; then
-  echo "ERROR: GIT_USER_NAME and GIT_USER_EMAIL must be set in .env" >&2
+  echo 'ERROR: set GIT_USER_NAME and GIT_USER_EMAIL explicitly, e.g. pithos run -- env GIT_USER_NAME="Your Name" GIT_USER_EMAIL="you@example.com" bootstrap.sh' >&2
   exit 1
 fi
 

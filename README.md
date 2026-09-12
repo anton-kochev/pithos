@@ -61,6 +61,41 @@ flag, `run` is implied — `pithos --tmux` and `pithos run --tmux` are the same
 command. Run `pithos help`
 for the full reference.
 
+### Environment files and secrets
+
+**Breaking change:** Pithos no longer discovers or forwards the project's `.env`
+into the container environment. This applies to Pi, explicit `pithos run`
+commands, and `--tmux`; there is no replacement env-file option. Library callers
+must also remove the former `RunEnvironment.env_file` field.
+
+**This does not hide files:** the entire project directory is still mounted into
+Pi's container. A `.env` left there remains readable by Pi, shell tools, extensions,
+and applications that load dotenv files themselves. Ignore rules are not access
+controls.
+
+For the simplest secrets-separated workflow:
+
+1. Keep real secret files outside **all** Pithos-mounted directories, with only
+   non-secret examples such as `.env.example` in the checkout.
+2. Restart Pithos after moving secrets; existing containers retain previously
+   injected environment values. Check for copies in Git history, logs, and sessions.
+3. Run secret-free tests inside Pithos. Manually start the real-secret application
+   outside Pithos, loading its external secret file using the application's own
+   mechanism. Review Pi's changes first and avoid hot-reloading unreviewed edits.
+4. Let Pi use the app's normal API if needed, without exposing secrets through
+   responses, shared logs, or debug/admin endpoints. Prefer scoped staging credentials.
+
+If you previously used `.env` for Pi provider authentication, configure Pi's own
+credentials separately (for supported providers, use `/login` inside Pi). Those
+credentials remain accessible to code running in Pi's container; this change does
+not isolate them. Exporting arbitrary variables on the host does not forward them
+into the container. For explicit **non-secret** command configuration, use
+`pithos run -- env NAME=value command`; see [diagnostics](TROUBLESHOOTING.md#9-enable-diagnostics).
+Pithos-owned runtime environment handling is unchanged.
+
+This reduces accidental exposure, not disclosure by application code you later
+execute with secrets. No files are automatically hidden or relocated.
+
 ### Per-project Node.js
 
 Declare `node` under `toolchains` to select the Node.js runtime used by project
@@ -235,4 +270,13 @@ Project packages are installed from `pi.extensions` when the container starts.
 The mapping accepts exact `npm:<version>` pins or `git:<url>#<ref>` specs;
 undeclared npm packages are removed from the project's persistent volume.
 
-If you need GitHub access (`gh`, git push over HTTPS) inside the container, run `bootstrap.sh` from the shell — it sets your git identity and walks through the `gh auth login` device flow. The token persists in the project's named volume, so this is a one-time step per project.
+If you need GitHub access (`gh`, git push over HTTPS) inside the container, run
+`bootstrap.sh` with explicit non-secret identity variables:
+
+```sh
+pithos run -- env GIT_USER_NAME="Your Name" GIT_USER_EMAIL="you@example.com" bootstrap.sh
+```
+
+It sets your git identity and walks through the `gh auth login` device flow. The
+token persists in the project's named volume and is accessible inside Pi's
+container, so this is a one-time step per project.

@@ -378,25 +378,24 @@ pithos run -- env \
   pi
 ```
 
-For repeated runs, add the variables to the project’s `.env` file and restart Pithos:
+For repeated runs, reuse the command above or save it in a host-side shell script
+containing only non-secret configuration. Pithos no longer imports `.env`, and
+exporting these variables on the host alone does not forward them into the
+container. The explicit `env` command sets them for Pi after container startup.
 
-```dotenv
-PITHOS_LOG_LEVEL=info
-PITHOS_LOG_DIR=.pi/logs
-```
+Pithos mounts the project directory as the working directory, so `.pi/logs` inside
+the container is the project's own `.pi/logs` on the host, readable without
+`docker exec`. Removing environment import does not hide a `.env` left in that
+mount; keep real secret files outside all Pithos mounts.
 
-Pithos passes `.env` into the container and mounts the project directory as the working directory, so a relative path resolves on the host: the logs appear under the project’s own `.pi/logs`, readable without `docker exec`.
+Use `debug` only when additional breadcrumbs are required; to combine all package
+events in one file, replace `PITHOS_LOG_DIR` with `PITHOS_LOG_FILE`:
 
-Use `debug` only when additional breadcrumbs are required:
-
-```dotenv
-PITHOS_LOG_LEVEL=debug
-```
-
-To combine all package events in one file, replace `PITHOS_LOG_DIR` with:
-
-```dotenv
-PITHOS_LOG_FILE=.pi/pithos-kit.jsonl
+```bash
+pithos run -- env \
+  PITHOS_LOG_LEVEL=debug \
+  PITHOS_LOG_FILE=.pi/pithos-kit.jsonl \
+  pi
 ```
 
 Logs are bounded and redact secret-like fields, but can contain project paths and operational metadata. Remove the variables and delete the logs when troubleshooting is complete; do not commit diagnostic logs.
