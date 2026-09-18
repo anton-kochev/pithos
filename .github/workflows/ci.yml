@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Ubuntu runners ship a docker binary, which two CLI tests require.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Pinned exactly: this project does not accept stable/nightly/latest.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Serial: a fake-Docker test hits ETXTBSY when the suite runs in parallel.
+      - name: Rust tests
+        run: cargo test --locked --no-fail-fast -- --test-threads=1
+
+      - name: Skill mount tests
+        run: python3 tests/browser_skill_mount_test.py
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.20.0
+
+      - name: Browser asset tests
+        working-directory: browser
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
