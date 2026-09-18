@@ -122,6 +122,29 @@ while the default Pi session continues to run with Pithos's pinned Bun runtime.
 Pithos does not inspect `.nvmrc`, `.node-version`, or `package.json`; `.pithos`
 is authoritative.
 
+### Browser access (experimental)
+
+Optional browser support is default-off and requires a launcher built from this
+checkout (not a published release):
+
+```yaml
+toolchains: {}
+browser:
+  enabled: true
+  mode: interactive # or headless
+```
+
+On the next normal launch, Pithos prepares an isolated Chromium sidecar and owned
+remote CLI/skill. Interactive mode reports an authenticated loopback viewer;
+headless mode starts no display or viewer. `--no-build` never fetches missing
+browser assets. No pithos-kit package or second-terminal helper is required.
+
+**Experimental, and the pinned CLI requires an alpha Playwright runtime.**
+Startup fails closed if sandbox/readiness checks fail. Apple Silicon acceptance on
+Docker Desktop has been run end to end; independent review is still outstanding.
+See [`browser/README.md`](browser/README.md) for security boundaries and setup,
+and [`browser/VERIFICATION.md`](browser/VERIFICATION.md) for observed results.
+
 ### Clipboard screenshots
 
 When `pithos` launches the container it starts a short-lived host clipboard bridge

@@ -84,7 +84,7 @@ fn docker_home_initialization_repairs_and_preserves_nested_sessions() {
                 "rm /home/pi/.pi/agent/settings.json; chown 0:0 /home/pi/.pi /home/pi/.pi/agent; chmod 755 /home/pi/.pi /home/pi/.pi/agent; printf secret > /home/pi/.pi/credential-sentinel; chmod 600 /home/pi/.pi/credential-sentinel",
             );
         }
-        initialize_home(&image, &project).unwrap();
+        initialize_home(&image, &project, None).unwrap();
         let mount =
             crate::sessions::bind_mount(sessions.path(), "/home/pi/.pi/agent/sessions").unwrap();
         let output = Command::new("docker").args(["run", "--rm", "--network", "none",
@@ -99,7 +99,7 @@ fn docker_home_initialization_repairs_and_preserves_nested_sessions() {
     run_shell(
         "test $(cat /home/pi/.pi/credential-sentinel) = secret; test $(stat -c %u:%a /home/pi/.pi/credential-sentinel) = 0:600; mv /home/pi/.pi/agent /home/pi/.pi/saved-agent; ln -s saved-agent /home/pi/.pi/agent",
     );
-    assert!(initialize_home(&image, &project).is_err());
+    assert!(initialize_home(&image, &project, None).is_err());
     run_shell("test -L /home/pi/.pi/agent; test -f /home/pi/.pi/saved-agent/settings.json");
     assert_eq!(
         std::fs::read_to_string(sessions.path().join("sentinel")).unwrap(),
@@ -448,6 +448,7 @@ fn assemble_run_args_inherits_clipboard_bridge_url_without_exposing_value() {
         RunEnvironment {
             clipboard_url: Some("http://host.docker.internal:49152/token"),
             clipboard_shim: Some(Path::new("/tmp/pithos-xclip")),
+            browser: None,
         },
         &[],
     );

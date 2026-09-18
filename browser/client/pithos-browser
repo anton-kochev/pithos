@@ -1,0 +1,4 @@
+#!/bin/sh
+# Remove project Node preload/debug settings before Node starts, not after import.
+umask 077
+exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C.UTF-8 /usr/bin/node "/opt/pithos-browser/client/cli.mjs" "$@"

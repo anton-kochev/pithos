@@ -16,6 +16,7 @@ pub enum RunError {
 pub struct RunEnvironment<'a> {
     pub clipboard_url: Option<&'a str>,
     pub clipboard_shim: Option<&'a Path>,
+    pub browser: Option<&'a crate::browser::BrowserRun>,
 }
 
 /// Inputs for launching a project container.
@@ -98,25 +99,71 @@ pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, 
     if let Some(root) = request.session_root {
         insert_session_mount(&mut args, root)?;
     }
-    initialize_home(request.image_tag, request.project)?;
+    initialize_home(
+        request.image_tag,
+        request.project,
+        request.environment.browser,
+    )?;
+    if let Some(browser) = request.environment.browser {
+        browser.prepare_skill_mount(request.image_tag, request.project)?;
+        browser.configure_dev(&mut args)?;
+    }
     // Stdio::inherit is the default; be explicit so a future refactor
     // pulling in stream_lines for "consistency with build" doesn't
     // accidentally swallow the user's TTY.
     let mut command = docker_run_command(&args, request.environment.clipboard_url);
-    let status = command
+    command
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()?;
-    Ok(status)
+        .stderr(Stdio::inherit());
+    if let Some(browser) = request.environment.browser {
+        let mut child = browser.spawn_dev(&mut command)?;
+        let mut next_check = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            if std::time::Instant::now() >= next_check {
+                if !browser.healthy() {
+                    // The outer BrowserRun guard removes only its labelled dev
+                    // container, sidecar and network, even on this error path.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(std::io::Error::other(
+                        "browser sidecar failed; ending this owned run",
+                    )
+                    .into());
+                }
+                next_check = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    Ok(command.status()?)
 }
 
 /// Docker creates missing nested bind-mount ancestors as root. Prepare them
 /// before attaching sessions/config, including recovery of already-used volumes.
-fn initialize_home(image_tag: &str, project: &str) -> Result<(), RunError> {
+fn initialize_home(
+    image_tag: &str,
+    project: &str,
+    browser: Option<&crate::browser::BrowserRun>,
+) -> Result<(), RunError> {
     let volume = format!("pithos-home-{project}");
+    let args = initialize_home_args(image_tag, &volume);
+    if let Some(browser) = browser {
+        return browser
+            .run_helper(
+                args,
+                "cannot initialize Pi home; inspect volume ownership and session path collisions",
+            )
+            .map_err(|error| RunError::InitializeHome {
+                volume,
+                detail: error.to_string(),
+            });
+    }
     let output = Command::new("docker")
-        .args(initialize_home_args(image_tag, &volume))
+        .args(args)
         .stdin(Stdio::null())
         .output()
         .map_err(|error| RunError::InitializeHome {

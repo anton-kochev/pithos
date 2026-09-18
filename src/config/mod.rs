@@ -1,3 +1,5 @@
+mod browser;
+pub use browser::{BrowserConfig, BrowserMode, browser_config};
 mod error;
 mod extras;
 mod pi;
@@ -72,5 +74,6 @@ pub fn load(bytes: &[u8]) -> Result<YamlOwned, ConfigError> {
         pi::validate(pi)?;
     }
     session_storage(&doc)?;
+    browser_config(&doc)?;
     Ok(doc)
 }

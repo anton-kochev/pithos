@@ -91,6 +91,25 @@ pub fn emit(yaml: &YamlOwned) -> String {
         )
         .unwrap();
     }
+    if crate::config::browser_config(yaml)
+        .expect("validated config")
+        .enabled
+    {
+        writeln!(
+            out,
+            "\n# Browser assets: {}",
+            crate::browser::assets::fingerprint()
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "COPY browser/package.json browser/package-lock.json /opt/pithos-browser/"
+        )
+        .unwrap();
+        writeln!(out, "RUN cd /opt/pithos-browser && /usr/bin/node /usr/bin/npm ci --omit=dev --ignore-scripts --no-audit --no-fund").unwrap();
+        writeln!(out, "COPY browser/client/ /opt/pithos-browser/client/").unwrap();
+        writeln!(out, "RUN chmod 0755 /opt/pithos-browser/client/pithos-browser && ln -s /opt/pithos-browser/client/pithos-browser /usr/local/bin/pithos-browser").unwrap();
+    }
     if toolchains.contains_key("node") {
         writeln!(out).unwrap();
         writeln!(

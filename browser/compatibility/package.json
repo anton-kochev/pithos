@@ -1,0 +1,12 @@
+{
+  "name": "pithos-browser-compatibility-probe",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test probe.test.mjs",
+    "probe:sandbox": "node sandbox.mjs"
+  },
+  "devDependencies": {
+    "@playwright/cli": "0.1.19"
+  }
+}

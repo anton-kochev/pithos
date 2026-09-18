@@ -6,6 +6,7 @@ rust-version = "1.85"
 
 [dependencies]
 ctrlc = "3"
+fs2 = "=0.4.3"
 getrandom = "0.4"
 saphyr = "=0.0.6"
 sha2 = "=0.11.0"
@@ -19,3 +20,6 @@ tempfile = "3"
 [[bin]]
 name = "pithos"
 path = "src/main.rs"
+
+[target."cfg(unix)".dependencies]
+signal-hook = "=0.3.18"

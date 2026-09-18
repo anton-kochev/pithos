@@ -247,11 +247,17 @@ impl Subcommand {
 }
 
 fn main() -> ExitCode {
-    // §6.3: SIGINT → 130. Installed first so Ctrl-C at any stage (arg parse,
-    // docker probe, build, run) exits with the standardized code and runs
-    // destructors that would otherwise be skipped by default signal death.
-    let _ = ctrlc::set_handler(|| std::process::exit(130));
+    if pithos::browser::install_signal_handlers().is_err() {
+        eprintln!("pithos: cannot install signal cleanup handlers");
+        return ExitCode::from(1);
+    }
+    let result = launch();
+    pithos::browser::signal_exit()
+        .map(ExitCode::from)
+        .unwrap_or(result)
+}
 
+fn launch() -> ExitCode {
     let style = Style::detect();
     let args: Vec<String> = env::args().collect();
     let subcommand = Subcommand::from_args(&args);
@@ -533,6 +539,8 @@ fn help_text() -> String {
          \n\
          Config (.pithos):\n  \
            sessions.storage: project (default) or volume (legacy compatibility)\n  \
+           browser.enabled: false (default); true prepares an experimental Chromium sidecar\n  \
+           browser.mode: interactive (default) or headless; applies on next launch\n  \
            Toolchains use the flat form — a quoted numeric version per name; nested\n  \
            `version:` keys are not supported. Prefer N.N.N exact pins; Node also\n  \
            accepts N or N.N and resolves the newest matching release:\n    \
@@ -574,6 +582,7 @@ struct ProjectInputs<'a> {
 }
 
 struct EnsuredImage {
+    // Browser-enabled runs freeze the immutable ID, not the mutable project tag.
     tag: String,
     project: String,
 }
@@ -622,11 +631,20 @@ fn ensure_image(
         };
         installers.insert(name.clone(), bytes.to_vec());
     }
-    let base_image_id = match pithos::docker::inspect_image_id(pithos::docker::BASE_IMAGE_REF) {
+    let cache_only_browser = mode == RunMode::NoBuild
+        && pithos::config::browser_config(yaml)
+            .expect("validated config")
+            .enabled;
+    let base_lookup = if cache_only_browser {
+        pithos::browser::cached_base_id()
+    } else {
+        pithos::docker::inspect_image_id(pithos::docker::BASE_IMAGE_REF)
+    };
+    let base_image_id = match base_lookup {
         Ok(id) => id,
         Err(e) => {
             narrate(style, "» ERROR:", &format!("{e}"));
-            return Err(ExitCode::from(1));
+            return Err(ExitCode::from(if cache_only_browser { 4 } else { 1 }));
         }
     };
     let hash = pithos::fingerprint::compute(
@@ -657,6 +675,13 @@ fn ensure_image(
                 "»",
                 &format!("cached image {id} matches fingerprint; reusing as {tag}"),
             );
+            let tag = run_image_reference(
+                pithos::config::browser_config(yaml)
+                    .expect("validated config")
+                    .enabled,
+                &tag,
+                id,
+            );
             return Ok(EnsuredImage { tag, project });
         }
         BuildAction::Abort => {
@@ -666,7 +691,9 @@ fn ensure_image(
         BuildAction::Build => {}
     }
 
-    // `TempDir` cleans on Drop; SIGINT runs Drop, SIGKILL leaks under `$TMPDIR` for the OS to reap.
+    // Ordinary returns drop this public build context. Signal exits can leave
+    // temporary build files for the OS to reap; browser secrets/services have
+    // separate explicit signal cleanup and ownership-checked lease recovery.
     let context = match tempfile::tempdir() {
         Ok(t) => t,
         Err(e) => {
@@ -685,6 +712,25 @@ fn ensure_image(
             &format!("cannot extract build context: {e}"),
         );
         return Err(ExitCode::from(1));
+    }
+
+    if pithos::config::browser_config(yaml)
+        .expect("validated config")
+        .enabled
+    {
+        narrate(
+            style,
+            "» browser:",
+            "preparing optional pinned client layer; missing npm artifacts will be downloaded during the build",
+        );
+        if let Err(e) = pithos::browser::assets::extract_to(context.path()) {
+            narrate(
+                style,
+                "» ERROR:",
+                &format!("cannot extract browser assets: {e}"),
+            );
+            return Err(ExitCode::from(1));
+        }
     }
 
     // First pass: fingerprint label only. Installer RUN steps populate
@@ -726,7 +772,7 @@ fn ensure_image(
 
     if toolchain_names.is_empty() {
         // Nothing to extract; single-pass is sufficient.
-        return Ok(EnsuredImage { tag, project });
+        return finish_built_image(yaml, tag, project, &hash, style);
     }
 
     rebuild_with_version_labels(
@@ -738,7 +784,43 @@ fn ensure_image(
         &tag,
         style,
     )?;
-    Ok(EnsuredImage { tag, project })
+    finish_built_image(yaml, tag, project, &hash, style)
+}
+
+fn run_image_reference(browser: bool, tag: &str, id: &str) -> String {
+    if browser { id.into() } else { tag.into() }
+}
+
+fn finish_built_image(
+    yaml: &YamlOwned,
+    tag: String,
+    project: String,
+    hash: &str,
+    style: Style,
+) -> Result<EnsuredImage, ExitCode> {
+    if !pithos::config::browser_config(yaml)
+        .expect("validated config")
+        .enabled
+    {
+        return Ok(EnsuredImage { tag, project });
+    }
+    // Another invocation may retag pithos:<project> between build and run. Query
+    // the intended fingerprint rather than trusting that mutable tag for the
+    // client/server compatibility contract.
+    match pithos::docker::find_image_by_fingerprint(hash) {
+        Ok(Some(id)) => Ok(EnsuredImage {
+            tag: run_image_reference(true, &tag, &id),
+            project,
+        }),
+        _ => {
+            narrate(
+                style,
+                "» ERROR:",
+                "cannot resolve the browser-compatible dev image by fingerprint; rebuild and retry",
+            );
+            Err(ExitCode::from(1))
+        }
+    }
 }
 
 /// Second pass: read resolved versions from the first-pass image, then
@@ -834,9 +916,35 @@ fn run_build(inputs: ProjectInputs<'_>, rebuild: bool, style: Style) -> ExitCode
         RunMode::Default
     };
     match ensure_image(inputs, mode, style) {
-        Ok(_) => ExitCode::SUCCESS,
+        Ok(_) => match prepare_browser_image(inputs.yaml, mode, style) {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(code) => code,
+        },
         Err(code) => code,
     }
+}
+
+fn prepare_browser_image(
+    yaml: &YamlOwned,
+    mode: RunMode,
+    style: Style,
+) -> Result<Option<String>, ExitCode> {
+    if !pithos::config::browser_config(yaml)
+        .expect("validated config")
+        .enabled
+    {
+        return Ok(None);
+    }
+    pithos::browser::ensure_image(mode == RunMode::NoBuild, mode == RunMode::Rebuild, style)
+        .map(Some)
+        .map_err(|e| {
+            narrate(style, "» ERROR:", &e.to_string());
+            ExitCode::from(if matches!(e, pithos::browser::BrowserError::CacheMiss) {
+                4
+            } else {
+                1
+            })
+        })
 }
 
 /// Translate a completed child `ExitStatus` into a launcher exit byte per
@@ -870,6 +978,43 @@ fn run_run(
     let ensured = match ensure_image(inputs, mode, style) {
         Ok(e) => e,
         Err(code) => return code,
+    };
+    let browser_image = match prepare_browser_image(inputs.yaml, mode, style) {
+        Ok(image) => image,
+        Err(code) => return code,
+    };
+    let browser_run = if let Some(image) = browser_image {
+        match pithos::browser::BrowserRun::start(
+            pithos::config::browser_config(inputs.yaml).expect("validated config"),
+            &image,
+            &ensured.tag,
+        ) {
+            Ok(run) => {
+                if let Some(url) = run.viewer_url() {
+                    narrate(
+                        style,
+                        "» browser:",
+                        &format!(
+                            "viewer: {url} (enter the password from host file {}; do not share it in chat)",
+                            run.password_path().display()
+                        ),
+                    );
+                } else {
+                    narrate(
+                        style,
+                        "» browser:",
+                        "true headless Chromium ready; no viewer",
+                    );
+                }
+                Some(run)
+            }
+            Err(e) => {
+                narrate(style, "» ERROR:", &e.to_string());
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        None
     };
     let cwd = inputs.cwd;
     let session_root = match pithos::config::session_storage(inputs.yaml).expect("validated config")
@@ -918,9 +1063,15 @@ fn run_run(
             style,
             "» tmux:",
             &format!(
-                "observe from another terminal: docker exec -it pithos-{}-{} tmux attach -t pithos",
-                ensured.project,
-                std::process::id()
+                "observe from another terminal: docker exec -it {} tmux attach -t pithos",
+                browser_run
+                    .as_ref()
+                    .map(|run| run.dev_name())
+                    .unwrap_or_else(|| format!(
+                        "pithos-{}-{}",
+                        ensured.project,
+                        std::process::id()
+                    ))
             ),
         );
         wrapped = pithos::docker::tmux_wrap(&command);
@@ -939,6 +1090,7 @@ fn run_run(
         environment: pithos::docker::RunEnvironment {
             clipboard_url: clipboard_url.as_deref(),
             clipboard_shim: clipboard_bridge.as_ref().map(|bridge| bridge.shim_path()),
+            browser: browser_run.as_ref(),
         },
         command: effective_cmd,
     }) {
@@ -981,7 +1133,15 @@ fn summarize_config(yaml: &YamlOwned) -> String {
         1 => "extras.apt: 1 package".to_string(),
         n => format!("extras.apt: {n} packages"),
     };
-    format!("{tc_part}; {apt_part}")
+    let browser = pithos::config::browser_config(yaml).expect("validated config");
+    if browser.enabled {
+        format!(
+            "{tc_part}; {apt_part}; browser: {} (configured for next launch)",
+            browser.mode.as_str()
+        )
+    } else {
+        format!("{tc_part}; {apt_part}")
+    }
 }
 
 fn format_size(bytes: u64) -> String {
@@ -1974,6 +2134,41 @@ mod tests {
         let s = summarize_config(&yaml);
         assert!(s.contains("toolchains: none"), "{s}");
         assert!(s.contains("extras.apt: none"), "{s}");
+    }
+
+    #[test]
+    fn browser_run_freezes_client_image_while_disabled_keeps_existing_tag() {
+        assert_eq!(
+            run_image_reference(true, "pithos:project", "sha256:expected"),
+            "sha256:expected"
+        );
+        assert_eq!(
+            run_image_reference(false, "pithos:project", "sha256:expected"),
+            "pithos:project"
+        );
+    }
+
+    #[test]
+    fn summarize_config_reports_configured_browser_not_live_state() {
+        for mode in ["interactive", "headless"] {
+            let yaml = pithos::config::load(
+                format!("toolchains: {{}}\nbrowser: {{enabled: true, mode: {mode}}}").as_bytes(),
+            )
+            .unwrap();
+            assert!(
+                summarize_config(&yaml)
+                    .contains(&format!("browser: {mode} (configured for next launch)"))
+            );
+        }
+    }
+
+    #[test]
+    fn summarize_config_disabled_browser_preserves_existing_summary() {
+        let baseline = pithos::config::load(b"toolchains: {}").unwrap();
+        let disabled =
+            pithos::config::load(b"toolchains: {}\nbrowser: {enabled: false, mode: headless}")
+                .unwrap();
+        assert_eq!(summarize_config(&baseline), summarize_config(&disabled));
     }
 
     #[test]
