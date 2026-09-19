@@ -281,11 +281,13 @@ extension diagnostics, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 The base image bundles Node 24 for Pithos infrastructure and the Pi coding agent,
 but no Pi packages. A project's `toolchains.node` declaration overrides the
 project-facing Node runtime without removing that infrastructure installation.
-Pi is pinned by the `PI_VERSION` build argument in `Dockerfile.base` so the same
-commit always produces the same runtime. To read the version from an image:
+Pi and Bun are pinned by the `PI_VERSION` and `BUN_VERSION` build arguments in
+`Dockerfile.base` so the same commit always produces the same runtimes. To read
+the versions from an image:
 
 ```sh
-docker inspect --format '{{index .Config.Labels "dev.pithos.pi-version"}}' \
+docker inspect \
+  --format 'Pi {{index .Config.Labels "dev.pithos.pi-version"}}, Bun {{index .Config.Labels "dev.pithos.bun-version"}}' \
   ghcr.io/anton-kochev/pithos:base
 ```
 

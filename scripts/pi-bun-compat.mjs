@@ -2,8 +2,8 @@
 //
 // Pi's bundled CLI (dist/bundle/cli.js) calls
 // `node:worker_threads.markAsUncloneable` through undici's webidl helpers while
-// loading extensions. Bun 1.3.14 does not implement that function, so *any*
-// extension — even a no-op one — crashes the session before its factory runs:
+// loading extensions. Bun runtimes without that function crash the session
+// before an extension factory runs:
 //
 //     TypeError: webidl.util.markAsUncloneable is not a function
 //

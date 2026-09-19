@@ -21,10 +21,10 @@ pub const PI_BUN_COMPAT_PATH: &str = "/opt/pi-bun-compat.mjs";
 /// below) and for the tmux observability wrapper in [`crate::docker`], so
 /// the two can never drift apart.
 ///
-/// `--preload` is not optional: Bun 1.3.14 has no
-/// `node:worker_threads.markAsUncloneable`, and Pi's bundled CLI calls it
-/// while loading *any* extension, so without the shim the session dies before
-/// the first extension factory runs.
+/// `--preload` is retained as a compatibility fallback: Pi's bundled CLI calls
+/// `node:worker_threads.markAsUncloneable` while loading extensions, and Bun
+/// runtimes without that function otherwise die before the first extension
+/// factory runs. The shim leaves native implementations untouched.
 pub const PI_LAUNCH_ARGV: [&str; 4] =
     ["bun", "--preload", PI_BUN_COMPAT_PATH, "/opt/pi-npm/bin/pi"];
 
