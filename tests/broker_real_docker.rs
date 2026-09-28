@@ -55,41 +55,33 @@ pithos-browser goto http://pithos-app:3000
 pithos-browser snapshot
 "#;
 
-// Run inside the managed Pi container: drive a workspace app entirely through
-// the broker routes, then reach it from Pi over the run network.
+// Run inside the managed Pi container with the image's own Node: load the
+// mounted broker extension exactly as Pi does, then drive its five tools
+// against the live broker and reach the app over the run network.
 const APPS_PROBE: &str = r#"
-import json, urllib.request as u, urllib.error as e
-c = json.load(open('/run/pithos-broker/client.json'))
-def call(op, body):
-    req = u.Request(c['endpoint'] + '/v1/apps/' + op, data=json.dumps(body).encode(),
-                    headers={'Authorization': 'Bearer ' + c['token'], 'Content-Type': 'application/json'})
-    try:
-        r = u.urlopen(req, timeout=600)
-        return r.status, json.loads(r.read())
-    except e.HTTPError as err:
-        return err.code, json.loads(err.read())
-code, body = call('build', {'request_id': 'b1', 'app': 'web', 'dockerfile': 'app/Dockerfile', 'context': 'app'})
-print('build', code, body.get('error', 'ok'))
-code, body = call('run', {'request_id': 'r1', 'app': 'web'})
-print('run', code, body.get('error', 'ok'), body.get('detail', ''))
-host = body.get('host')
-# "running" is not "listening": HTTP readiness is the caller's job.
-import time
-for attempt in range(50):
-    try:
-        page = u.urlopen('http://%s:8080/' % host, timeout=10).read().decode()
-        break
-    except OSError:
-        time.sleep(0.2)
-print('page', page.strip())
-code, body = call('logs', {'app': 'web', 'tail': 20})
-print('logs', code, 'GET /' in body.get('text', ''))
-code, body = call('run', {'request_id': 'r2', 'app': 'web'})
-print('second run', code, body.get('error'))
-code, body = call('stop', {'request_id': 's1', 'app': 'web'})
-print('stop', code, body.get('stopped'))
-code, body = call('status', {'app': 'web'})
-print('status', code, body.get('running'), body.get('stopped'))
+const ext = (await import('/run/pithos-broker/extension.mjs')).default;
+const tools = new Map();
+ext({ registerTool: (t) => tools.set(t.name, t) });
+console.log('tools', [...tools.keys()].sort().join(','));
+const call = async (name, id, params) => {
+  try {
+    const r = await tools.get(name).execute(id, params, undefined, () => {}, {});
+    return r.content[0].text;
+  } catch (e) { return 'ERROR ' + e.message; }
+};
+console.log('build', await call('pithos_app_build', 'c1', { app: 'web', dockerfile: 'app/Dockerfile', context: 'app' }));
+const run = await call('pithos_app_run', 'c2', { app: 'web' });
+console.log('run', run);
+const host = run.match(/host (pithos-app-[0-9a-f]{32})/)[1];
+let page = '';
+for (let i = 0; i < 50 && !page; i++) {
+  try { page = await (await fetch(`http://${host}:8080/`)).text(); } catch { await new Promise(r => setTimeout(r, 200)); }
+}
+console.log('page', page.trim());
+console.log('logs', (await call('pithos_app_logs', 'c3', { app: 'web', tail: 20 })).includes('GET /'));
+console.log('second run', await call('pithos_app_run', 'c4', { app: 'web' }));
+console.log('stop', await call('pithos_app_stop', 'c5', { app: 'web' }));
+console.log('status', await call('pithos_app_status', 'c6', { app: 'web' }));
 "#;
 
 fn opted_in() -> bool {
@@ -223,7 +215,7 @@ fn broker_child() {
                     probes.push(vec!["bash", "-c", BROWSER_PROBE]);
                 }
                 if apps {
-                    probes.push(vec!["python3", "-c", APPS_PROBE]);
+                    probes.push(vec!["node", "--input-type=module", "-e", APPS_PROBE]);
                 }
                 for probe in probes {
                     let output = Command::new("docker")
@@ -452,13 +444,14 @@ fn docker_desktop_pi_builds_runs_reaches_and_stops_a_workspace_app() {
     let result = run_child_in_pty(&scratch.path().join("result"), "apps");
     eprintln!("{result}");
     for expected in [
-        "build 200 ok",
-        "run 200 ok ",
+        "tools pithos_app_build,pithos_app_logs,pithos_app_run,pithos_app_status,pithos_app_stop",
+        "build Built web",
+        "run web is running at host pithos-app-",
         "page hello from app",
-        "logs 200 True",
-        "second run 409 already_running",
-        "stop 200 True",
-        "status 200 False True",
+        "logs true",
+        "second run ERROR run failed: this app is already running",
+        "stop web stopped.",
+        "status web: stopped",
         "settled Complete",
     ] {
         assert!(result.contains(expected), "missing {expected:?}\n{result}");

@@ -49,3 +49,7 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm test
+
+      - name: Broker extension tests
+        working-directory: broker/extension
+        run: npm test

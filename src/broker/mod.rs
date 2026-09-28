@@ -12,6 +12,8 @@ pub mod bootstrap;
 pub mod browser;
 pub mod compose;
 pub mod credential;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod extension;
 pub mod grant;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod host;
