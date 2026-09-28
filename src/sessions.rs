@@ -93,6 +93,7 @@ pub fn migrate(workspace: &Path, merge: bool) -> io::Result<()> {
         .ok_or_else(|| io::Error::other("cannot derive project name"))?;
     let volume = format!("pithos-home-{project}");
     let image = format!("pithos:{project}");
+    let home_use = crate::docker::LegacyHomeUse::acquire_current(&volume)?;
     docker_output(&["volume", "inspect", &volume])?;
     docker_output(&["image", "inspect", &image])?;
     let filter = format!("volume={volume}");
@@ -141,7 +142,7 @@ pub fn migrate(workspace: &Path, merge: bool) -> io::Result<()> {
             "session import failed; source unchanged; completed files retained. Resolve the error and retry with --merge",
         ));
     }
-    Ok(())
+    home_use.finish()
 }
 
 #[cfg(test)]

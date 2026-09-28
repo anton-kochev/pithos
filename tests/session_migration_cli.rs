@@ -1,4 +1,6 @@
 #![cfg(unix)]
+#[path = "fixtures/canonical_temp.rs"]
+mod tempfile;
 use std::{fs, os::unix::fs::PermissionsExt};
 
 struct Fixture {
@@ -18,6 +20,7 @@ impl Fixture {
     fn command(&self) -> assert_cmd::Command {
         let mut cmd = assert_cmd::Command::cargo_bin("pithos").unwrap();
         cmd.current_dir(self.temp.path().join("project"))
+            .env("HOME", self.temp.path())
             .env("PATH", self.temp.path().join("bin"))
             .env("DOCKER_LOG", self.temp.path().join("docker.log"))
             .env_remove("FAIL")
@@ -43,6 +46,7 @@ fn launch_modes_and_info_use_policy_without_rewriting_pi_options() {
         fs::write(fixture.temp.path().join("bin/docker"), "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$DOCKER_LOG\"\ncase \"$1\" in\nimage|inspect) echo sha256:fake;;\nesac\n").unwrap();
         let mut cmd = assert_cmd::Command::cargo_bin("pithos").unwrap();
         cmd.current_dir(&project)
+            .env("HOME", fixture.temp.path())
             .env("PATH", fixture.temp.path().join("bin"))
             .env("DOCKER_LOG", fixture.temp.path().join("docker.log"))
             .args(["run", "--no-build", "--session-dir", "/explicit"])
@@ -97,6 +101,7 @@ fn home_initialization_failure_prevents_interactive_launch() {
     let output = assert_cmd::Command::cargo_bin("pithos")
         .unwrap()
         .current_dir(fixture.temp.path().join("project"))
+        .env("HOME", fixture.temp.path())
         .env("PATH", fixture.temp.path().join("bin"))
         .env("DOCKER_LOG", fixture.temp.path().join("docker.log"))
         .args(["run", "--no-build"])
