@@ -62,6 +62,14 @@ pub(crate) enum ProbeKind {
     Credential {
         source: String,
     },
+    /// The run's private bridge network. Not a container and has no image.
+    Network,
+    /// The detached Chromium sidecar on the run network.
+    Browser {
+        network: String,
+        server_source: String,
+        viewer: bool,
+    },
     Pi {
         home_volume: String,
         workspace: String,
@@ -69,7 +77,18 @@ pub(crate) enum ProbeKind {
         host_access: PiHostAccess,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gateway: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        browser: Option<PiBrowserSpec>,
     },
+}
+
+/// Pi's place on the run's browser network and its read-only client files.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PiBrowserSpec {
+    pub network: String,
+    pub client_source: String,
+    pub skills_source: String,
 }
 impl ProbeKind {
     fn valid(&self) -> bool {
@@ -79,12 +98,19 @@ impl ProbeKind {
                 crate::docker::VolumeName::new(volume).is_ok()
             }
             Self::Credential { source } => absolute_path(source),
+            Self::Network => true,
+            Self::Browser {
+                network,
+                server_source,
+                ..
+            } => probe_name(network) && absolute_path(server_source),
             Self::Pi {
                 home_volume,
                 workspace,
                 credential_source,
                 host_access,
                 gateway,
+                browser,
             } => {
                 let mapping_valid = match (host_access, gateway.as_deref()) {
                     (PiHostAccess::LinuxHostGateway, Some(value)) => value
@@ -98,9 +124,26 @@ impl ProbeKind {
                     && absolute_path(workspace)
                     && absolute_path(credential_source)
                     && !Path::new(credential_source).starts_with(workspace)
+                    && browser.as_ref().is_none_or(|b| {
+                        probe_name(&b.network)
+                            && [&b.client_source, &b.skills_source]
+                                .into_iter()
+                                .all(|p| absolute_path(p) && !Path::new(p).starts_with(workspace))
+                    })
             }
         }
     }
+}
+
+/// Every owned container and network name: `pithos-probe-<32 hex>`.
+pub(crate) fn probe_name(name: &str) -> bool {
+    name.strip_prefix("pithos-probe-")
+        .is_some_and(|v| v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Long-lived run services, live while Pi runs and removed at cleanup.
+pub(crate) fn is_service(operation: &ProbeKind) -> bool {
+    matches!(operation, ProbeKind::Network | ProbeKind::Browser { .. })
 }
 
 pub(crate) fn absolute_path(source: &str) -> bool {
@@ -173,6 +216,13 @@ impl Resource {
     pub fn reconciled_state(&self) -> State {
         if self.indeterminate {
             State::Indeterminate
+        } else if is_service(&self.spec.operation) && self.removed && self.local_reaped {
+            // A service succeeds by being owned, then removed intact.
+            if self.not_spawned {
+                State::Failed
+            } else {
+                State::Succeeded
+            }
         } else if self.removed
             && self.local_reaped
             && self
@@ -296,6 +346,28 @@ impl ResourceManifest {
     }
 
     /// Whether credentials/home-use evidence may be released (also reap children).
+    /// Settled apart from live run services (network, sidecar), which stay
+    /// owned while Pi runs. Pi admission uses this; release uses is_settled.
+    pub(crate) fn is_settled_except_services(&self) -> bool {
+        let live_service = |request: &str| {
+            self.snapshot.resources.iter().any(|r| {
+                r.request_id == request && is_service(&r.spec.operation) && !r.indeterminate
+            })
+        };
+        !self.poisoned
+            && self.validate().is_ok()
+            && self.snapshot.resources.iter().all(|r| {
+                (is_service(&r.spec.operation) && !r.indeterminate)
+                    || (r.removed && r.local_reaped && !r.indeterminate)
+            })
+            && self.journal.records().iter().all(|j| {
+                matches!(
+                    j.state(),
+                    State::Succeeded | State::Failed | State::Cancelled
+                ) || live_service(j.request_id())
+            })
+    }
+
     pub fn is_settled(&self) -> bool {
         !self.poisoned
             && self.validate().is_ok()
@@ -361,7 +433,11 @@ impl ResourceManifest {
                     || self.journal.get(&r.request_id).is_none_or(|j| {
                         j.state() != State::Succeeded || r.reconciled_state() == State::Succeeded
                     }))
-                && crate::docker::ImmutableImageId::new(&r.image).is_ok()
+                && (if r.spec.operation == ProbeKind::Network {
+                    r.image.is_empty()
+                } else {
+                    crate::docker::ImmutableImageId::new(&r.image).is_ok()
+                })
                 && r.spec.image == r.image
                 && crate::docker::HostIdentity::new(r.spec.uid, r.spec.gid).is_ok()
                 && r.daemon_id.len() <= 256
@@ -369,9 +445,7 @@ impl ResourceManifest {
                 && r.daemon_id
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
-                && r.name
-                    .strip_prefix("pithos-probe-")
-                    .is_some_and(|v| v.len() == 32 && v.bytes().all(|b| b.is_ascii_hexdigit()))
+                && probe_name(&r.name)
                 && r.labels == Resource::labels(&self.snapshot.run_id, &r.request_id, &r.name)
                 && r.observed_id
                     .as_ref()
@@ -573,6 +647,7 @@ mod tests {
             credential_source: "/credential".into(),
             host_access: PiHostAccess::LinuxHostGateway,
             gateway: None,
+            browser: None,
         };
         resource.digest = resource.spec.digest().unwrap();
         // Reproduce a durable legacy Pi intent with a matching old digest.

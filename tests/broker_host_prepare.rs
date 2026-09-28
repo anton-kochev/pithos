@@ -101,8 +101,8 @@ fn invalid_inputs_and_forged_home_leave_no_state_child() {
         return;
     };
     for bad in [
-        b"toolchains: {}\nsessions: {storage: volume}\nbrowser: {enabled: true}\n".as_slice(),
-        b"toolchains: {}\nsessions: {storage: volume}\npi: {extensions: {x: 'npm:1.0'}}\n",
+        b"toolchains: {}\nsessions: {storage: volume}\npi: {extensions: {x: 'npm:1.0'}}\n"
+            .as_slice(),
         b"not: [valid",
     ] {
         assert!(matches!(

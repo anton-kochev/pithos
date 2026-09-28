@@ -133,12 +133,41 @@ fn host_inputs_validation_child_fixture() {
             .pi_command(),
         launch
     );
-    for yaml in [
-        b"toolchains: {}\nsessions: {storage: volume}\nbrowser: {enabled: true}\n".as_slice(),
-        b"toolchains: {}\nsessions: {storage: volume}\npi: {version: '1.0', extensions: {x: 'npm:1.0'}}\n",
+    // Browser runs load the bundled skill from its read-only mount.
+    let skill = vec![
+        "--skill".to_string(),
+        "/run/pithos-browser/skills/browser-automation".into(),
+    ];
+    for (yaml, expected) in [
+        (
+            b"toolchains: {}\nsessions: {storage: volume}\nbrowser: {enabled: true}\n".as_slice(),
+            [launch.clone(), skill.clone()].concat(),
+        ),
+        (
+            b"toolchains: {}\nbrowser: {enabled: true, mode: headless}\n",
+            [project_launch.clone(), skill.clone()].concat(),
+        ),
+        (
+            b"toolchains: {}\nbrowser: {enabled: false}\n",
+            project_launch.clone(),
+        ),
     ] {
-        assert!(matches!(input(workspace.clone(), yaml).validate(), Err(HostError::Config)));
+        assert_eq!(
+            input(workspace.clone(), yaml)
+                .validate()
+                .unwrap()
+                .pi_command(),
+            expected
+        );
     }
+    assert!(matches!(
+        input(
+            workspace.clone(),
+            b"toolchains: {}\nsessions: {storage: volume}\npi: {version: '1.0', extensions: {x: 'npm:1.0'}}\n"
+        )
+        .validate(),
+        Err(HostError::Config)
+    ));
     assert_eq!(fs::read_dir(&run).unwrap().count(), 0);
     assert_eq!(fs::read_dir(&lease).unwrap().count(), 0);
 }

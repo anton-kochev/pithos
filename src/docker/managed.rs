@@ -288,6 +288,10 @@ impl BridgeNetwork {
 
 impl ImageInfo {
     fn supported(&self, identity: HostIdentity) -> bool {
+        self.supported_as(identity, "pi", "/home/pi")
+    }
+
+    fn supported_as(&self, identity: HostIdentity, account: &str, home: &str) -> bool {
         if self.user != identity.docker_user() {
             return false;
         }
@@ -307,9 +311,9 @@ impl ImageInfo {
                 return false;
             }
         }
-        env.get("HOME") == Some(&"/home/pi")
-            && env.get("USER") == Some(&"pi")
-            && env.get("LOGNAME") == Some(&"pi")
+        env.get("HOME") == Some(&home)
+            && env.get("USER") == Some(&account)
+            && env.get("LOGNAME") == Some(&account)
     }
 }
 
@@ -943,6 +947,17 @@ impl ManagedDocker {
         staging_root: &Path,
     ) -> Result<ImmutableImageId, PreflightError> {
         image_build::ensure(self, yaml, pithos, identity, workspace, staging_root)
+    }
+
+    /// Resolve or build the identity Chromium sidecar image through the frozen
+    /// selection only. Same staging rules as [`Self::ensure_identity_image`].
+    pub fn ensure_browser_image(
+        &mut self,
+        identity: HostIdentity,
+        workspace: &Path,
+        staging_root: &Path,
+    ) -> Result<ImmutableImageId, PreflightError> {
+        image_build::ensure_browser(self, identity, workspace, staging_root)
     }
 
     /// Establish the daemon ID on first call; later calls must match it.

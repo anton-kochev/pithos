@@ -24,7 +24,9 @@ pub use image::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use managed::image_cache as managed_image_cache;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use managed::probes::{PiInputs, ProbeError as OwnedProbeError};
+pub use managed::probes::{
+    BrowserInputs, PiBrowser, PiInputs, ProbeError as OwnedProbeError, RunNetwork,
+};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use managed::{
     ImmutableImageId, ManagedDocker, PreflightChildState, PreflightError, ReadOnlyPreflight,

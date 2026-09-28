@@ -5,7 +5,9 @@
 
 use super::{
     grant::{Action, HostGrant},
-    runtime::{BrokerRuntime, RuntimeBuildFailure, RuntimeError, RuntimePoll, RuntimeSetup},
+    runtime::{
+        BrokerRuntime, RuntimeBrowser, RuntimeBuildFailure, RuntimeError, RuntimePoll, RuntimeSetup,
+    },
     state::HostRunState,
     transport::{BrokerEndpoint, HostAccess},
 };
@@ -84,11 +86,14 @@ pub struct ValidatedHostInputs {
     project: String,
     volume: VolumeName,
     sessions: SessionStorage,
+    browser: config::BrowserConfig,
 }
 
 /// Container path of project-stored sessions: `<workspace>/.pi/sessions`
 /// through the `/workspace` bind, the same host folder legacy runs use.
 const PROJECT_SESSION_DIR: &str = "/workspace/.pi/sessions";
+/// The bundled skill, mounted read-only for browser-enabled runs.
+const BROWSER_SKILL: &str = "/run/pithos-browser/skills/browser-automation";
 
 fn trusted_directory(path: &Path, private: bool) -> bool {
     if !path.is_absolute()
@@ -130,21 +135,18 @@ fn validate_project(
     let project = crate::project::name_from_path(workspace).ok_or(HostError::Workspace)?;
     let yaml = config::load(pithos).map_err(|_| HostError::Config)?;
     config::session_storage(&yaml).map_err(|_| HostError::Config)?;
-    if config::browser_config(&yaml)
-        .map_err(|_| HostError::Config)?
-        .enabled
-        || yaml.as_mapping().is_some_and(|mapping| {
-            mapping.iter().any(|(key, value)| {
-                key.as_str() == Some("pi")
-                    && value.as_mapping().is_some_and(|pi| {
-                        pi.iter().any(|(key, extensions)| {
-                            key.as_str() == Some("extensions")
-                                && extensions.as_mapping().is_some_and(|m| !m.is_empty())
-                        })
+    config::browser_config(&yaml).map_err(|_| HostError::Config)?;
+    if yaml.as_mapping().is_some_and(|mapping| {
+        mapping.iter().any(|(key, value)| {
+            key.as_str() == Some("pi")
+                && value.as_mapping().is_some_and(|pi| {
+                    pi.iter().any(|(key, extensions)| {
+                        key.as_str() == Some("extensions")
+                            && extensions.as_mapping().is_some_and(|m| !m.is_empty())
                     })
-            })
+                })
         })
-    {
+    }) {
         return Err(HostError::Config);
     }
     let identity = HostIdentity::effective().map_err(|_| HostError::Identity)?;
@@ -269,6 +271,7 @@ impl HostInputs {
             }
         }
         let sessions = config::session_storage(&yaml).map_err(|_| HostError::Config)?;
+        let browser = config::browser_config(&yaml).map_err(|_| HostError::Config)?;
         Ok(ValidatedHostInputs {
             input: self,
             yaml,
@@ -276,6 +279,7 @@ impl HostInputs {
             project,
             volume,
             sessions,
+            browser,
         })
     }
 }
@@ -286,6 +290,9 @@ impl ValidatedHostInputs {
         let mut command: Vec<String> = PI_LAUNCH_ARGV.iter().map(|arg| (*arg).into()).collect();
         if self.sessions == SessionStorage::Project {
             command.extend(["--session-dir".into(), PROJECT_SESSION_DIR.into()]);
+        }
+        if self.browser.enabled {
+            command.extend(["--skill".into(), BROWSER_SKILL.into()]);
         }
         command
     }
@@ -358,6 +365,21 @@ impl ValidatedHostInputs {
             Ok(image) => image,
             Err(_) => return Err(HostFailure::prelease(HostError::Image, signals, docker)),
         };
+        let browser = if self.browser.enabled {
+            match docker.ensure_browser_image(
+                self.identity,
+                &self.input.workspace,
+                &self.input.stage_root,
+            ) {
+                Ok(image) => Some(RuntimeBrowser {
+                    image,
+                    mode: self.browser.mode,
+                }),
+                Err(_) => return Err(HostFailure::prelease(HostError::Image, signals, docker)),
+            }
+        } else {
+            None
+        };
         let endpoint = match offline {
             Some(endpoint) => endpoint,
             None => {
@@ -400,6 +422,7 @@ impl ValidatedHostInputs {
             workspace: self.input.workspace,
             command,
             interactive_limits: self.input.interactive_limits,
+            browser,
         };
         let mut runtime = match BrokerRuntime::begin_with_docker(grant, endpoint, setup, docker) {
             Ok(runtime) => runtime,
@@ -498,6 +521,10 @@ impl HostCoordinator {
     }
     pub fn run_until_terminal(&mut self, interval: Duration) -> RuntimePoll {
         self.runtime.run_until_terminal(interval)
+    }
+    /// Interactive browser runs: the loopback viewer URL and password file.
+    pub fn browser_viewer(&self) -> Option<(&str, PathBuf)> {
+        self.runtime.browser_viewer()
     }
     /// Only a completely reconciled run has a publishable exit code.
     pub fn terminal_exit_code(&self) -> Option<u8> {

@@ -6,6 +6,8 @@
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod app;
 pub mod bootstrap;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod browser;
 pub mod compose;
 pub mod credential;
 pub mod grant;

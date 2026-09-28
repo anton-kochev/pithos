@@ -108,6 +108,7 @@ else:
             workspace: self.root.path().join("workspace"),
             command: vec!["pi".into()],
             interactive_limits: InteractiveLimits::default(),
+            browser: None,
         }
     }
     fn endpoint(&self) -> BrokerEndpoint {
