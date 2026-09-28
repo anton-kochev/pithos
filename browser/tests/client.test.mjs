@@ -6,7 +6,7 @@ import path from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
-import { invoke, argumentsFor, redact, validateEndpoint } from '../client/client.mjs';
+import { invoke, argumentsFor, redact, validateEndpoint, privateConnection } from '../client/client.mjs';
 
 const token = 'a'.repeat(64);
 const endpoint = `ws://browser:3000/${token}`;
@@ -28,6 +28,15 @@ test('only the owned remote endpoint and commands are accepted', () => {
   assert.deepEqual(argumentsFor(['fill', 'e2', 'hello'], '/tmp/artifacts'), ['fill', 'e2', 'hello']);
   assert.deepEqual(argumentsFor(['screenshot', '--filename=page.png'], '/tmp/artifacts'), ['screenshot', '--filename=/tmp/artifacts/page.png']);
   assert.throws(() => argumentsFor(['screenshot', '--filename=../x.png'], '/tmp/artifacts'));
+});
+test('connection file must be private; Docker Desktop binds it as root', () => {
+  const file = {isFile:()=>true, uid:501, mode:0o100600, size:100};
+  assert.equal(privateConnection(file, 501), true);
+  // Docker Desktop shows every bind-mounted host file as root-owned.
+  assert.equal(privateConnection({...file, uid:0}, 501), true);
+  for (const bad of [{uid:502}, {mode:0o100640}, {mode:0o100604}, {size:4097}, {isFile:()=>false}]) {
+    assert.equal(privateConnection({...file, ...bad}, 501), false, JSON.stringify(bad));
+  }
 });
 test('redaction removes complete and embedded capabilities', () => {
   const result = redact(`failed ${endpoint} path /${token}`, endpoint);

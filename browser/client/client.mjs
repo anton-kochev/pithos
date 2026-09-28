@@ -27,6 +27,11 @@ export function redact(text, endpoint) {
   const token = endpoint.split('/').at(-1);
   return String(text ?? '').split(endpoint).join('[browser connection]').split(token).join('[capability]').replace(/wss?:\/\/[^\s<>"']+/g, '[browser connection]');
 }
+// The connection file must be a small private regular file owned by this
+// user or by root: Docker Desktop shows every bind-mounted host file as root.
+export function privateConnection(info, uid) {
+  return info.isFile() && (info.uid === uid || info.uid === 0) && !(info.mode & 0o077) && info.size <= 4096;
+}
 async function privateDirectory(directory) {
   await mkdir(directory, { mode: 0o700, recursive: true });
   const info = await lstat(directory);
@@ -51,7 +56,7 @@ export async function invoke(input, { root = '/tmp/pithos-browser', config = '/r
   let endpoint;
   try {
     const info = await handle.stat();
-    if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.size > 4096) throw new Error('Browser connection file is not private');
+    if (!privateConnection(info, process.getuid())) throw new Error('Browser connection file is not private');
     const settings = JSON.parse(await handle.readFile('utf8'));
     if (Object.keys(settings).join() !== 'endpoint') throw new Error('Invalid browser connection file');
     endpoint = validateEndpoint(settings.endpoint);
