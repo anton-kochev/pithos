@@ -23,3 +23,6 @@
 /.pithos.d/
 /.pi/sessions/
 /node_modules
+
+# Python bytecode (helper tests)
+__pycache__/
