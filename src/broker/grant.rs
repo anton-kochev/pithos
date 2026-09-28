@@ -68,9 +68,8 @@ impl HostGrant {
 
     /// Freeze explicit host approval for all recognized workspace actions.
     ///
-    /// This grants an authority ceiling, not a ready-to-use broker: the CLI
-    /// still refuses before launch until the workspace workflow is verified.
-    /// Only a trusted host entry point may construct and retain it.
+    /// This grants an authority ceiling; each route still checks its own
+    /// action. Only a trusted host entry point may construct and retain it.
     pub fn workspace() -> Self {
         Self {
             permissions: Self::STATUS

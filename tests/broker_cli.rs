@@ -8,8 +8,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::{TempDir, tempdir};
 
-const NOT_READY: &str = "pithos: broker status is not ready: host admission, secure transport, and unified shutdown are not verified; no broker was started\n";
-
 struct Fixture {
     root: TempDir,
     project: PathBuf,
@@ -20,9 +18,11 @@ struct Fixture {
 impl Fixture {
     fn new(config: Option<&str>) -> Self {
         let root = tempdir().unwrap();
-        let project = root.path().join("project");
-        let home = root.path().join("home");
-        let bin = root.path().join("bin");
+        // The coordinator trusts only canonical paths (macOS TMPDIR is a symlink).
+        let base = root.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("home");
+        let bin = base.join("bin");
         for path in [&project, &home, &bin] {
             fs::create_dir(path).unwrap();
         }
@@ -121,68 +121,120 @@ fn fake_docker_records_invocations_even_without_home() {
     assert_eq!(fs::read_to_string(log).unwrap(), "info fixture-canary\n");
 }
 
+const USAGE_LINE: &str = "» usage: pithos [run | build | info | sessions | clean | rebuild-base | help | version] [options]\n";
+
 #[test]
-fn granted_cli_is_unconditionally_gated_despite_config_home_and_environment() {
-    for config in [
-        "toolchains: [malformed-secret-canary\n",
-        "toolchains: {}\nbroker: {enabled: true}\ndocker: {enabled: true}\n",
-        "toolchains: {}\nbrowser: {enabled: true}\n",
-    ] {
-        let fixture = Fixture::new(Some(config));
+fn granted_cli_rejects_options_managed_pi_cannot_honor() {
+    for grant in ["--broker=status", "--broker=workspace"] {
+        for extra in [
+            vec!["--tmux"],
+            vec!["--no-build"],
+            vec!["--rebuild"],
+            vec!["--pi", "argv-secret-canary"],
+            vec!["--", "bash"],
+            vec!["bash"],
+            vec!["--unknown-secret-canary"],
+        ] {
+            let fixture = Fixture::new(Some("toolchains: {}\n"));
+            let before = fixture.snapshot();
+            let result = fixture
+                .command()
+                .arg("run")
+                .arg(grant)
+                .args(&extra)
+                .assert()
+                .code(2);
+            assert!(result.get_output().stdout.is_empty());
+            assert_eq!(
+                String::from_utf8_lossy(&result.get_output().stderr),
+                format!("» ERROR: {BROKER_ONLY}\n{USAGE_LINE}"),
+                "{grant} {extra:?}"
+            );
+            assert_eq!(fixture.snapshot(), before);
+        }
+    }
+}
+
+const BROKER_ONLY: &str = "--broker launches only managed Pi; it cannot be combined with --tmux, --rebuild, --no-build, Pi arguments or a container command";
+
+#[test]
+fn granted_cli_without_config_fails_without_prompt_or_side_effects() {
+    for grant in ["--broker=status", "--broker=workspace"] {
+        let fixture = Fixture::new(None);
         let before = fixture.snapshot();
         let result = fixture
             .command()
-            .env(
-                "HOME",
-                fixture.root.path().join("absent-home-secret-canary"),
-            )
-            .env("PITHOS_BROKER", "status")
-            .env("PITHOS_BROKER_READY", "1")
-            .env("PITHOS_BROKER_TOKEN", "credential-secret-canary")
-            .env("DOCKER_HOST", "unix:///docker-secret-canary.sock")
-            .args([
-                "--tmux",
-                "--broker=status",
-                "--no-build",
-                "--pi",
-                "argv-secret-canary",
-            ])
+            .args(["run", grant])
             .write_stdin("y\n")
             .assert()
-            .code(1);
+            .code(2);
         assert!(result.get_output().stdout.is_empty());
         assert_eq!(
             String::from_utf8_lossy(&result.get_output().stderr),
-            NOT_READY
+            "» ERROR: .pithos not found; --broker needs an existing project config\n"
         );
         assert_eq!(fixture.snapshot(), before);
     }
 }
 
 #[test]
-fn workspace_grant_refuses_before_config_prompt_docker_or_private_state() {
-    for config in [None, Some("malformed: [config-secret-canary\n")] {
-        let fixture = Fixture::new(config);
-        let before = fixture.snapshot();
+fn granted_cli_reports_malformed_config_without_side_effects() {
+    let fixture = Fixture::new(Some("toolchains: {}\nunknown: true\n"));
+    let before = fixture.snapshot();
+    let legacy = fixture
+        .command()
+        .arg("run")
+        .assert()
+        .code(2)
+        .get_output()
+        .clone();
+    for grant in ["--broker=status", "--broker=workspace"] {
+        let result = fixture.command().args(["run", grant]).assert().code(2);
+        assert_eq!(result.get_output().stdout, legacy.stdout);
+        assert_eq!(result.get_output().stderr, legacy.stderr);
+        assert_eq!(fixture.snapshot(), before);
+    }
+}
+
+#[test]
+fn granted_cli_refuses_unsupported_config_before_host_state() {
+    let fixture = Fixture::new(Some(
+        "toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    pi-web-access: \"npm:0.10.7\"\n",
+    ));
+    let before = fixture.snapshot();
+    let result = fixture
+        .command()
+        .args(["--broker=workspace"])
+        .assert()
+        .code(1);
+    assert!(result.get_output().stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&result.get_output().stderr),
+        "» ERROR: broker: host project configuration is unsupported for managed Pi\n"
+    );
+    assert_eq!(fixture.snapshot(), before);
+}
+
+#[test]
+fn granted_cli_dispatches_to_the_host_coordinator() {
+    // The fake docker is a symlink to /bin/sh and HOME has no Desktop socket,
+    // so the frozen Docker selection refuses: proof the coordinator ran,
+    // without any Docker call or secret echo.
+    for grant in ["--broker=status", "--broker=workspace"] {
+        let fixture = Fixture::new(Some("toolchains: {}\n"));
         let result = fixture
             .command()
-            .env(
-                "HOME",
-                fixture.root.path().join("absent-home-secret-canary"),
-            )
-            .env("PITHOS_BROKER_READY", "1")
             .env("PITHOS_BROKER_TOKEN", "credential-secret-canary")
-            .env("DOCKER_HOST", "unix:///docker-secret-canary.sock")
-            .args(["run", "--broker=workspace", "--pi", "argv-secret-canary"])
-            .write_stdin("y\n")
+            .args(["run", grant])
             .assert()
             .code(1);
         assert!(result.get_output().stdout.is_empty());
         assert_eq!(
             String::from_utf8_lossy(&result.get_output().stderr),
-            "pithos: broker workspace is not ready: workspace build, Compose, exec, and lifecycle integration are not verified; no broker was started\n"
+            "» ERROR: broker: host Docker selection unavailable\n"
         );
-        assert_eq!(fixture.snapshot(), before);
+        assert!(!fixture.home.join("docker-calls").exists());
+        assert!(!fixture.project.join(".pithos.d").exists());
     }
 }
 
@@ -261,20 +313,4 @@ fn ungranted_opaque_tails_preserve_the_legacy_config_path() {
         assert_eq!(result.get_output().stderr, baseline.stderr);
         assert_eq!(fixture.snapshot(), before);
     }
-}
-
-#[test]
-fn granted_cli_refuses_before_missing_config_prompt_or_side_effects() {
-    let fixture = Fixture::new(None);
-    let before = fixture.snapshot();
-    let result = fixture
-        .command()
-        .args(["run", "--broker=status", "--pi", "argv-secret-canary"])
-        .assert()
-        .code(1);
-    let output = result.get_output();
-    assert!(output.stdout.is_empty());
-    assert_eq!(String::from_utf8_lossy(&output.stderr), NOT_READY);
-    // Includes project/HOME/temp artifacts, credentials, socket files and Docker log.
-    assert_eq!(fixture.snapshot(), before);
 }
