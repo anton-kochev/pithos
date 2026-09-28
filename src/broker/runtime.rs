@@ -8,6 +8,7 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use super::{
+    browser::BrowserFiles,
     credential::RunCredential,
     grant::{Action, HostGrant},
     resources::ResourceManifest,
@@ -15,9 +16,10 @@ use super::{
     transport::{BrokerEndpoint, HostAccess},
 };
 use crate::{
+    config::BrowserMode,
     docker::{
-        HomeLease, HostIdentity, ImmutableImageId, ManagedDocker, PiInputs, PreflightChildState,
-        VolumeName,
+        BrowserInputs, HomeLease, HostIdentity, ImmutableImageId, ManagedDocker, PiBrowser,
+        PiInputs, PreflightChildState, VolumeName,
     },
     lifecycle::{
         InteractiveChild, InteractiveLimits, InteractivePoll, InteractiveReport, Outcome, Shutdown,
@@ -32,6 +34,14 @@ const HOME_REQUEST: &str = "runtime-home-v1";
 const PROVISION_REQUEST: &str = "runtime-provision-v1";
 const CREDENTIAL_REQUEST: &str = "runtime-credential-v1";
 const PI_REQUEST: &str = "runtime-pi-v1";
+const NETWORK_REQUEST: &str = "runtime-network-v1";
+const BROWSER_REQUEST: &str = "runtime-browser-v1";
+
+/// The host-built Chromium sidecar image and the configured mode.
+pub struct RuntimeBrowser {
+    pub image: ImmutableImageId,
+    pub mode: BrowserMode,
+}
 
 /// Trusted, host-owned selections for one run. None are read from project input.
 pub struct RuntimeSetup {
@@ -48,6 +58,8 @@ pub struct RuntimeSetup {
     pub workspace: PathBuf,
     pub command: Vec<String>,
     pub interactive_limits: InteractiveLimits,
+    /// Browser-enabled runs start the sidecar on an owned run network.
+    pub browser: Option<RuntimeBrowser>,
 }
 
 /// Runtime lifecycle. `Ready` means the managed Pi was durably launched and is
@@ -144,6 +156,9 @@ pub struct BrokerRuntime {
     manifest: Option<ResourceManifest>,
     credential: Option<RunCredential>,
     credential_cleaned: bool,
+    browser_files: Option<BrowserFiles>,
+    browser_files_cleaned: bool,
+    viewer: Option<String>,
     lease: Option<HomeLease>,
     child: Option<InteractiveChild>,
     pending_pi_report: Option<InteractiveReport>,
@@ -157,6 +172,8 @@ pub struct BrokerRuntime {
 
 struct RuntimeInputs {
     manifest_directory: PathBuf,
+    run_directory: PathBuf,
+    browser: Option<RuntimeBrowser>,
     run_id: String,
     volume: VolumeName,
     image: ImmutableImageId,
@@ -250,6 +267,8 @@ impl BrokerRuntime {
         };
         let inputs = RuntimeInputs {
             manifest_directory: setup.manifest_directory.clone(),
+            run_directory: setup.run_directory.clone(),
+            browser: setup.browser,
             run_id: setup.run_id.clone(),
             volume: setup.volume,
             image: setup.image,
@@ -275,6 +294,9 @@ impl BrokerRuntime {
             // safely settle a pre-credential manifest/reconciliation failure
             // once the original run's durable resources are reconciled.
             credential_cleaned: true,
+            browser_files: None,
+            browser_files_cleaned: true,
+            viewer: None,
             lease: Some(lease),
             child: Some(child),
             pending_pi_report: None,
@@ -380,6 +402,48 @@ impl BrokerRuntime {
                     self.setup.identity,
                 )
                 .map_err(|_| RuntimeError::Admission)?;
+            // Sidecar first: Pi's browser client needs it healthy. Its files
+            // are debt from the first write until cleanup removes them.
+            let network = match &self.setup.browser {
+                None => None,
+                Some(browser) => {
+                    self.browser_files_cleaned = false;
+                    let files = self.browser_files.insert(
+                        BrowserFiles::create(&self.setup.run_directory, browser.mode)
+                            .map_err(|_| RuntimeError::Admission)?,
+                    );
+                    let network = docker
+                        .create_run_network(manifest, NETWORK_REQUEST)
+                        .map_err(|_| RuntimeError::Admission)?;
+                    let interactive = browser.mode == BrowserMode::Interactive;
+                    docker
+                        .start_browser(
+                            manifest,
+                            BROWSER_REQUEST,
+                            &network,
+                            BrowserInputs {
+                                image: &browser.image,
+                                identity: self.setup.identity,
+                                server: &files.server(),
+                                seccomp: &files.seccomp(),
+                                viewer: interactive,
+                            },
+                        )
+                        .map_err(|_| RuntimeError::Admission)?;
+                    if interactive {
+                        self.viewer = Some(
+                            docker
+                                .browser_viewer(manifest, BROWSER_REQUEST)
+                                .map_err(|_| RuntimeError::Admission)?,
+                        );
+                    }
+                    Some(network)
+                }
+            };
+            let paths = self
+                .browser_files
+                .as_ref()
+                .map(|files| (files.client(), files.skills()));
             docker
                 .start_pi(
                     manifest,
@@ -393,6 +457,13 @@ impl BrokerRuntime {
                         credential,
                         command: &self.setup.command,
                         host_access: self.host_access,
+                        browser: network.as_ref().zip(paths.as_ref()).map(
+                            |(network, (client, skills))| PiBrowser {
+                                network,
+                                client,
+                                skills,
+                            },
+                        ),
                     },
                 )
                 .map_err(|_| RuntimeError::Admission)
@@ -682,6 +753,18 @@ impl BrokerRuntime {
             self.phase = RuntimePhase::RecoveryRequired;
             return RuntimePoll::RecoveryRequired;
         }
+        // Only after reconciliation: containers bound these files.
+        if let Some(files) = self.browser_files.as_mut() {
+            if files.cleanup().is_err() {
+                self.phase = RuntimePhase::RecoveryRequired;
+                return RuntimePoll::RecoveryRequired;
+            }
+            self.browser_files = None;
+            self.browser_files_cleaned = true;
+        } else if !self.browser_files_cleaned {
+            self.phase = RuntimePhase::RecoveryRequired;
+            return RuntimePoll::RecoveryRequired;
+        }
         let Some(lease) = self.lease.take() else {
             self.phase = RuntimePhase::RecoveryRequired;
             return RuntimePoll::RecoveryRequired;
@@ -725,6 +808,12 @@ impl BrokerRuntime {
                 Err(_) => return RuntimePoll::RecoveryRequired,
             }
         }
+    }
+
+    /// Interactive browser runs: the loopback viewer URL and password file.
+    pub fn browser_viewer(&self) -> Option<(&str, PathBuf)> {
+        let viewer = self.viewer.as_deref()?;
+        Some((viewer, self.browser_files.as_ref()?.password()?))
     }
 
     pub fn local_addr(&self) -> SocketAddr {

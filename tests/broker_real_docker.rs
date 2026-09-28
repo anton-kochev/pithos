@@ -42,6 +42,19 @@ import os
 print('sessions writable', os.access('/workspace/.pi/sessions', os.W_OK))
 "#;
 
+// Run inside the browser-enabled Pi container: serve a page from Pi and
+// read it back through the sidecar's Chromium under the legacy alias.
+const BROWSER_PROBE: &str = r#"
+set -e
+mkdir -p /tmp/site
+echo '<html><head><title>acceptance</title></head><body><h1>hello from pi</h1></body></html>' > /tmp/site/index.html
+nohup python3 -m http.server 3000 --bind 0.0.0.0 --directory /tmp/site >/tmp/site.log 2>&1 &
+sleep 1
+pithos-browser open
+pithos-browser goto http://pithos-app:3000
+pithos-browser snapshot
+"#;
+
 fn opted_in() -> bool {
     std::env::var("PITHOS_BROKER_DOCKER_TEST").as_deref() == Ok("1")
 }
@@ -75,15 +88,13 @@ impl Drop for HomeVolume {
     }
 }
 
-fn project() -> (tempfile::TempDir, PathBuf, Vec<u8>) {
+fn project(pithos: &[u8]) -> (tempfile::TempDir, PathBuf, Vec<u8>) {
     let parent = tempfile::tempdir_in(fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
     let workspace = fs::canonicalize(parent.path()).unwrap().join(PROJECT);
     fs::create_dir(&workspace).unwrap();
     fs::set_permissions(&workspace, fs::Permissions::from_mode(0o755)).unwrap();
-    // The default config: project-stored sessions.
-    let pithos = b"toolchains: {}\n".to_vec();
-    fs::write(workspace.join(".pithos"), &pithos).unwrap();
-    (parent, workspace, pithos)
+    fs::write(workspace.join(".pithos"), pithos).unwrap();
+    (parent, workspace, pithos.to_vec())
 }
 
 fn managed_containers() -> Vec<String> {
@@ -93,6 +104,19 @@ fn managed_containers() -> Vec<String> {
         .collect()
 }
 
+fn managed_networks() -> Vec<String> {
+    docker(&[
+        "network",
+        "ls",
+        "-q",
+        "--filter",
+        "label=io.pithos.probe.run",
+    ])
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
 /// Runs in a PTY child: the production host path, with a probe executed inside
 /// the live managed Pi container while this process keeps serving status.
 #[test]
@@ -100,7 +124,14 @@ fn broker_child() {
     let Ok(result_path) = std::env::var("PITHOS_BROKER_CHILD") else {
         return;
     };
-    let (_parent, workspace, pithos) = project();
+    let browser = std::env::var("PITHOS_BROKER_CHILD_MODE").as_deref() == Ok("browser");
+    // Default config (project-stored sessions), plus the sidecar when asked.
+    let config: &[u8] = if browser {
+        b"toolchains: {}\nbrowser: {enabled: true}\n"
+    } else {
+        b"toolchains: {}\n"
+    };
+    let (_parent, workspace, pithos) = project(config);
     let inputs = HostInputs::prepare(HostGrant::workspace(), workspace, pithos).unwrap();
     let mut coordinator = match inputs.start(HostGrant::workspace()) {
         Ok(coordinator) => coordinator,
@@ -111,6 +142,18 @@ fn broker_child() {
             return;
         }
     };
+    let viewer = coordinator.browser_viewer().map(|(url, password)| {
+        let status = Command::new("curl")
+            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", url])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        format!(
+            "viewer {} {status} password-file {}",
+            url.starts_with("http://127.0.0.1:"),
+            password.exists()
+        )
+    });
     let probe: Arc<Mutex<Option<String>>> = Arc::default();
     let sink = probe.clone();
     std::thread::spawn(move || {
@@ -120,20 +163,27 @@ fn broker_child() {
                 "ps",
                 "-q",
                 "--filter",
-                "label=io.pithos.probe.run",
+                "label=io.pithos.probe.request=runtime-pi-v1",
                 "--filter",
                 "status=running",
             ]);
             if let Some(id) = running.lines().next() {
-                let output = Command::new("docker")
-                    .args(["exec", id, "python3", "-c", PROBE])
-                    .output()
-                    .unwrap();
-                break format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                let mut result = String::new();
+                let mut probes = vec![vec!["python3", "-c", PROBE]];
+                if browser {
+                    probes.push(vec!["bash", "-c", BROWSER_PROBE]);
+                }
+                for probe in probes {
+                    let output = Command::new("docker")
+                        .arg("exec")
+                        .arg(id)
+                        .args(probe)
+                        .output()
+                        .unwrap();
+                    result.push_str(&String::from_utf8_lossy(&output.stdout));
+                    result.push_str(&String::from_utf8_lossy(&output.stderr));
+                }
+                break result;
             }
             if Instant::now() > deadline {
                 break "no running managed Pi container".into();
@@ -159,10 +209,15 @@ fn broker_child() {
     coordinator.request_shutdown(ShutdownReason::Requested);
     let settled = coordinator.run_until_terminal(Duration::from_millis(20));
     let _ = coordinator.close_signals();
-    fs::write(&result_path, format!("{outcome}\nsettled {settled:?}\n")).unwrap();
+    let viewer = viewer.unwrap_or_else(|| "viewer none".into());
+    fs::write(
+        &result_path,
+        format!("{outcome}\n{viewer}\nsettled {settled:?}\n"),
+    )
+    .unwrap();
 }
 
-fn run_child_in_pty(result: &Path) -> String {
+fn run_child_in_pty(result: &Path, mode: &str) -> String {
     let (mut master, mut slave) = (-1, -1);
     // SAFETY: valid descriptor outputs; no optional name/termios/winsize storage.
     assert_eq!(
@@ -196,6 +251,7 @@ fn run_child_in_pty(result: &Path) -> String {
     command
         .args(["--exact", "broker_child", "--nocapture"])
         .env("PITHOS_BROKER_CHILD", result)
+        .env("PITHOS_BROKER_CHILD_MODE", mode)
         .stdin(slave_file.try_clone().unwrap())
         .stdout(slave_file.try_clone().unwrap())
         .stderr(slave_file);
@@ -258,7 +314,7 @@ fn docker_desktop_pi_reaches_broker_and_run_settles_clean() {
     );
     let _home = HomeVolume::absent();
     let scratch = tempfile::tempdir().unwrap();
-    let result = run_child_in_pty(&scratch.path().join("result"));
+    let result = run_child_in_pty(&scratch.path().join("result"), "status");
     eprintln!("{result}");
     assert!(result.contains("authorized 200"), "{result}");
     assert!(result.contains("\"phase\":\"ready\""), "{result}");
@@ -300,4 +356,30 @@ fn sha256_hex(value: &str) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+#[test]
+#[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
+fn docker_desktop_pi_drives_chromium_on_the_run_network() {
+    assert!(
+        opted_in(),
+        "explicit real-Docker acceptance opt-in required"
+    );
+    assert!(
+        managed_containers().is_empty() && managed_networks().is_empty(),
+        "stale managed resources present; refusing to run"
+    );
+    let _home = HomeVolume::absent();
+    let scratch = tempfile::tempdir().unwrap();
+    let result = run_child_in_pty(&scratch.path().join("result"), "browser");
+    eprintln!("{result}");
+    assert!(result.contains("authorized 200"), "{result}");
+    assert!(result.contains("hello from pi"), "{result}");
+    assert!(
+        result.contains("viewer true 200 password-file true"),
+        "{result}"
+    );
+    assert!(result.contains("settled Complete"), "{result}");
+    assert!(managed_containers().is_empty(), "container left behind");
+    assert!(managed_networks().is_empty(), "network left behind");
 }

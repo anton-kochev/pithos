@@ -12,7 +12,10 @@ use pithos::{
         runtime::{BrokerRuntime, RuntimePhase, RuntimePoll, RuntimeSetup},
         transport::{BrokerEndpoint, HostAccess},
     },
-    docker::{HomeLease, HostIdentity, ImmutableImageId, ManagedDocker, PiInputs, VolumeName},
+    docker::{
+        HomeLease, HostIdentity, ImmutableImageId, ManagedDocker, OwnedProbeError, PiBrowser,
+        PiInputs, VolumeName,
+    },
     dockerfile::PI_LAUNCH_ARGV,
     lifecycle::{InteractiveChild, InteractiveLimits, InteractivePoll, Shutdown, ShutdownReason},
 };
@@ -91,11 +94,25 @@ with (root/'calls').open('a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if a[0]=='info':
     emit({'id':'foreign' if mode('changed-daemon') else 'daemon-one','os_type':'linux','security_options':[]})
     if mode('remove-interpreter'): (root/'python').unlink()
-elif a[:2]==['network','inspect']:
+elif a[:2]==['network','inspect'] and a[-1]!='e'*64:
     gateway=(root/'gateway').read_text()
     if mode('bridge-changed'): gateway='10.255.255.254' if gateway!='10.255.255.254' else '10.255.255.253'
     emit({'name':'bridge','driver':'bridge','scope':'local','internal':False,'enable_ipv6':False,
           'ipam':{'Driver':'default','Options':None,'Config':[{'Subnet':(root/'subnet').read_text(),'Gateway':gateway}]}})
+elif a[:2]==['network','create']:
+    labels=dict(a[i+1].split('=',1) for i,v in enumerate(a) if v=='--label')
+    n={'id':'e'*64,'name':a[-1],'driver':'bridge','scope':'local','internal':False,'attachable':False,'ingress':False,'labels':labels}
+    (root/'network.json').write_text(json.dumps(n)); print(n['id'])
+elif a[:2]==['network','ls']:
+    n=json.loads((root/'network.json').read_text()) if (root/'network.json').exists() else None
+    if n and opt('--filter') in ['id='+n['id'],'name=^'+n['name']+'$']: emit(n['id'])
+elif a[:2]==['network','inspect'] and a[-1]=='e'*64:
+    n=json.loads((root/'network.json').read_text())
+    c=json.loads((root/'container.json').read_text()) if (root/'container.json').exists() else None
+    emit(dict(n,containers={c['id']:{}} if c and c['host']['NetworkMode']==n['name'] else {}))
+elif a[:2]==['network','rm']:
+    assert a[-1]=='e'*64 and not (root/'container.json').exists(), 'network in use'
+    (root/'network.json').unlink()
 elif a[:2]==['image','ls'] and mode('host-coordinator'):
     assert '--no-trunc' in a and opt('--filter')=='label=io.pithos.broker.identity-fingerprint='+__FINGERPRINT__
     emit(__IMAGE__)
@@ -154,10 +171,19 @@ elif a[0]=='run':
     assert '--entrypoint='+entry in a
     if pi:
         assert all(os.isatty(fd) for fd in [0,1,2]) and os.tcgetpgrp(0)==os.getpgrp()
-        assert '-it' in a and '--read-only' not in a and '--network=bridge' in a
+        assert '-it' in a and '--read-only' not in a
+        if mode('browser'):
+            network=json.loads((root/'network.json').read_text())['name']
+            assert '--network=bridge' not in a and opt('--network')==network and opt('--network-alias')=='pithos-app'
+        else:
+            assert '--network=bridge' in a and '--network' not in a
         assert opt('--workdir')=='/workspace'
-        assert len(mounts)==3
+        assert len(mounts)==(5 if mode('browser') else 3)
         by={m['Destination']:m for m in mounts}
+        if mode('browser'):
+            assert by['/run/pithos-browser/client.json']['Source']==str(root/'browser-run/client.json')
+            assert by['/run/pithos-browser/skills']['Source']==str(root/'browser-run/skills')
+            assert not by['/run/pithos-browser/client.json']['RW'] and not by['/run/pithos-browser/skills']['RW']
         assert by['/workspace']['Source']==str(root/'work,\"space') and by['/workspace']['RW']
         assert by['/home/pi']['Name']==home_volume() and by['/home/pi']['RW']
         assert by['/run/pithos-broker/client.json']['Source']==str(root/'credential/broker-client.json')
@@ -171,7 +197,7 @@ elif a[0]=='run':
         assert all(i<a.index(__IMAGE__) for i in extra_host_indices)
         assert not any(k.startswith('DOCKER_') or k.startswith('PITHOS_') for k in os.environ)
         if mode('host-coordinator'): assert (set(os.environ) - set(('__CF_USER_TEXT_ENCODING','SDKROOT','CPATH','LIBRARY_PATH','MANPATH'))).issubset({'LC_CTYPE'})
-        assert cmd==(__PI_LAUNCH_ARGV__ if mode('host-coordinator') else ['pi','private-host-prompt'] if mode('explicit') else ['pi','--session-dir','/home/pi/.pi/agent/sessions'])
+        assert cmd==(__PI_LAUNCH_ARGV__ if mode('host-coordinator') else ['pi','private-host-prompt'] if mode('explicit') else ['pi','--skill','/run/pithos-browser/skills/browser-automation'] if mode('browser') else ['pi','--session-dir','/home/pi/.pi/agent/sessions'])
         credential=json.loads((root/'credential/broker-client.json').read_text())
         token=credential['token']; endpoint=credential['endpoint']
         environment=json.dumps(dict(os.environ))
@@ -185,7 +211,7 @@ elif a[0]=='run':
     cid=format(len(manifest['resources']),'064x')
     c={'id':cid,'name':'/'+r['name'],'image':__IMAGE__,
        'config':{'Image':__IMAGE__,'User':__USER__,'Entrypoint':[entry],'Cmd':cmd,'Labels':labels,'Volumes':None,'Tty':pi,'OpenStdin':pi,'AttachStdin':pi,'AttachStdout':pi,'AttachStderr':pi,'StdinOnce':pi,'WorkingDir':'/workspace' if pi else ''},
-       'host':{'NetworkMode':'bridge' if pi else 'none','ReadonlyRootfs':not pi,'Privileged':False,'AutoRemove':False,'RestartPolicy':{'Name':'no','MaximumRetryCount':0},'CapDrop':['ALL'],'SecurityOpt':['no-new-privileges'],'CapAdd':None,'GroupAdd':None,'Binds':None,'Devices':None,'PidMode':'','IpcMode':'private','UsernsMode':'','Mounts':hosts,'ExtraHosts':extra_hosts or None},
+       'host':{'NetworkMode':(opt('--network') if mode('browser') else 'bridge') if pi else 'none','ReadonlyRootfs':not pi,'Privileged':False,'AutoRemove':False,'RestartPolicy':{'Name':'no','MaximumRetryCount':0},'CapDrop':['ALL'],'SecurityOpt':['no-new-privileges'],'CapAdd':None,'GroupAdd':None,'Binds':None,'Devices':None,'PidMode':'','IpcMode':'private','UsernsMode':'','Mounts':hosts,'ExtraHosts':extra_hosts or None},
        'mounts':mounts,'state':{'Status':'running' if pi and mode('detached') else 'exited','Running':pi and mode('detached'),'ExitCode':0,'Error':'','OOMKilled':False,'Dead':False}}
     if pi and mode('engine-failed'): c['state']['ExitCode']=7
     # Docker Desktop may record shared host paths under its VM mount.
@@ -289,6 +315,20 @@ else: sys.exit(99)
             "http://127.0.0.1:12345",
         )
         .unwrap()
+    }
+    /// Private run files the host writes for a browser-enabled Pi.
+    fn browser_files(&self) -> (PathBuf, PathBuf) {
+        let dir = self.root.path().join("browser-run");
+        let skills = dir.join("skills");
+        fs::create_dir_all(skills.join("browser-automation")).unwrap();
+        for path in [&dir, &skills] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(skills.join("browser-automation/SKILL.md"), "skill").unwrap();
+        let client = dir.join("client.json");
+        fs::write(&client, "{}").unwrap();
+        fs::set_permissions(&client, fs::Permissions::from_mode(0o600)).unwrap();
+        (client, skills)
     }
     fn admit(&self, docker: &mut ManagedDocker, m: &mut ResourceManifest, c: &RunCredential) {
         docker
@@ -477,6 +517,7 @@ fn pi_fixture() {
                 workspace: f.workspace(),
                 command: Vec::new(),
                 interactive_limits: InteractiveLimits::default(),
+                browser: None,
             },
         )
         .unwrap();
@@ -659,6 +700,10 @@ fn pi_fixture() {
         lease.finish().unwrap();
         return;
     }
+    if mode.starts_with("browser") {
+        browser_fixture(&f, &mode);
+        return;
+    }
     let shutdown = Shutdown::new();
     let mut docker = f.docker(shutdown.clone());
     let mut m = f.manifest();
@@ -725,6 +770,7 @@ fn pi_fixture() {
                     HostAccess::Offline
                 }
             },
+            browser: None,
         },
     );
     if mode == "intent-storage-failure" {
@@ -881,6 +927,7 @@ fn pi_fixture() {
                     credential: &c,
                     command: &command,
                     host_access: HostAccess::Offline,
+                    browser: None,
                 }
             )
             .is_err(),
@@ -889,6 +936,106 @@ fn pi_fixture() {
     assert!(!f.root.path().join("container.json").exists());
     c.cleanup().unwrap();
     lease.finish().unwrap();
+}
+
+/// Pi on the run's browser network: only a network this manifest owns is
+/// accepted, and cleanup removes Pi before the network.
+fn browser_fixture(f: &Fixture, mode: &str) {
+    let shutdown = Shutdown::new();
+    let mut docker = f.docker(shutdown.clone());
+    let mut m = f.manifest();
+    let mut c = f.credential();
+    let volume = VolumeName::new("pi-home").unwrap();
+    let lease = HomeLease::broker(&f.root.path().join("leases"), &volume).unwrap();
+    f.admit(&mut docker, &mut m, &c);
+    f.mode("browser");
+    let (client, skills) = f.browser_files();
+    let other_dir = f.root.path().join("other-run");
+    fs::create_dir(&other_dir).unwrap();
+    fs::set_permissions(&other_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut other = ResourceManifest::open(&other_dir, "run-2").unwrap();
+    let network = if mode == "browser-foreign-network" {
+        docker.create_run_network(&mut other, "network-1").unwrap()
+    } else {
+        docker.create_run_network(&mut m, "network-1").unwrap()
+    };
+    let mut child = InteractiveChild::new(InteractiveLimits::default(), shutdown.clone()).unwrap();
+    let command: Vec<String> = [
+        "pi",
+        "--skill",
+        "/run/pithos-browser/skills/browser-automation",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let start = docker.start_pi(
+        &mut m,
+        &mut child,
+        "pi-1",
+        PiInputs {
+            volume: &volume,
+            image: &image(),
+            identity: identity(),
+            workspace: &f.workspace(),
+            credential: &c,
+            command: &command,
+            host_access: HostAccess::Offline,
+            browser: Some(PiBrowser {
+                network: &network,
+                client: &client,
+                skills: &skills,
+            }),
+        },
+    );
+    if mode == "browser-foreign-network" {
+        assert!(
+            matches!(start, Err(OwnedProbeError::Admission)),
+            "{start:?}"
+        );
+        assert!(!child.is_in_flight());
+        assert!(!f.root.path().join("pi-ran").exists());
+        docker.reconcile_resources(&mut other).unwrap();
+        c.cleanup().unwrap();
+        lease.finish().unwrap();
+        return;
+    }
+    start.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let report = loop {
+        match child.poll() {
+            InteractivePoll::Finished(report) => break report,
+            InteractivePoll::Running => {}
+            other => panic!("unexpected Pi poll: {other:?}"),
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    };
+    assert!(f.root.path().join("pi-ran").exists());
+    docker.record_pi_exit(&mut m, "pi-1", &report).unwrap();
+    docker.reconcile_resources(&mut m).unwrap();
+    assert!(m.is_settled());
+    assert!(m.records().iter().all(|r| r.state() == State::Succeeded));
+    let calls: Vec<Vec<String>> = fs::read_to_string(f.root.path().join("calls"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let at = |cmd: [&str; 2]| calls.iter().rposition(|c| c.windows(2).any(|w| w == cmd));
+    let (container_rm, network_rm) = (
+        at(["container", "rm"]).unwrap(),
+        at(["network", "rm"]).unwrap(),
+    );
+    assert!(
+        container_rm < network_rm,
+        "Pi must be removed before its network"
+    );
+    c.cleanup().unwrap();
+    lease.finish().unwrap();
+}
+
+#[test]
+fn browser_pi_joins_only_its_own_run_network_and_leaves_first() {
+    run_fixture("browser");
+    run_fixture("browser-foreign-network");
 }
 
 // Fake Docker calls race fixed runtime limits; unbounded parallel load flakes.
@@ -1142,6 +1289,7 @@ fn start_requires_matching_probes_and_rechecks_host_paths_and_home_before_intent
                         credential: &c,
                         command: &[],
                         host_access: HostAccess::Offline,
+                        browser: None,
                     }
                 )
                 .is_err()
@@ -1269,6 +1417,7 @@ fn start_requires_matching_probes_and_rechecks_host_paths_and_home_before_intent
                 },
                 command: &command,
                 host_access: HostAccess::Offline,
+                browser: None,
             },
         );
         assert!(result.is_err(), "{mode}");
@@ -1331,6 +1480,7 @@ fn workspace_cannot_mutate_a_frozen_docker_selection_alias() {
                     credential: &c,
                     command: &[],
                     host_access: HostAccess::Offline,
+                    browser: None,
                 }
             )
             .is_err()

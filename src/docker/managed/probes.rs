@@ -11,13 +11,16 @@ use crate::broker::transport::HostAccess;
 use crate::broker::{
     journal::State,
     resources::{
-        PiExit, PiHostAccess, ProbeKind, ProbeSpec, Resource, ResourceError, ResourceManifest,
-        absolute_path, full_id, hex,
+        PiBrowserSpec, PiExit, PiHostAccess, ProbeKind, ProbeSpec, Resource, ResourceError,
+        ResourceManifest, absolute_path, full_id, hex,
     },
 };
 use crate::lifecycle::{InteractiveChild, InteractiveError, InteractiveReport};
 use serde_json::{Value, json};
 use std::os::unix::process::ExitStatusExt;
+
+mod browser;
+pub use browser::{BrowserInputs, RunNetwork};
 
 /// Host-selected inputs for the fixed managed Pi container, never HTTP input.
 /// The caller holds its HomeLease until local and daemon ownership settle.
@@ -29,6 +32,18 @@ pub struct PiInputs<'a> {
     pub credential: &'a crate::broker::credential::RunCredential,
     pub command: &'a [String],
     pub host_access: crate::broker::transport::HostAccess,
+    /// Browser-enabled runs: Pi joins the owned run network instead of the
+    /// default bridge and gets the read-only browser client files.
+    pub browser: Option<PiBrowser<'a>>,
+}
+
+/// The run network plus private host files for Pi's browser client.
+pub struct PiBrowser<'a> {
+    pub network: &'a RunNetwork,
+    /// Private `client.json` with the sidecar capability URL.
+    pub client: &'a Path,
+    /// Directory holding the bundled skill, mounted read-only.
+    pub skills: &'a Path,
 }
 
 /// Validated Pi policy plus transient argv; only the digest reaches storage.
@@ -131,6 +146,9 @@ fn command_digest(value: &Value) -> Result<String, ProbeError> {
     let bytes = serde_json::to_vec(value).map_err(|_| ProbeError::Indeterminate)?;
     Ok(hex(&Sha256::digest(bytes)))
 }
+/// Where Pi finds the sidecar capability URL and the bundled skill.
+const PI_BROWSER_CLIENT: &str = "/run/pithos-browser/client.json";
+const PI_BROWSER_SKILLS: &str = "/run/pithos-browser/skills";
 const HOME_LABEL: &str = "io.pithos.broker.home";
 const HOME_LABEL_VALUE: &str = "provisioned";
 
@@ -159,7 +177,9 @@ fn mount_arg(operation: &ProbeKind) -> Result<Option<String>, ProbeError> {
         ProbeKind::Provision { volume } => {
             Ok(Some(format!("type=volume,source={volume},target=/home/pi")))
         }
-        ProbeKind::Pi { .. } => Err(ProbeError::Indeterminate),
+        ProbeKind::Pi { .. } | ProbeKind::Network | ProbeKind::Browser { .. } => {
+            Err(ProbeError::Indeterminate)
+        }
         ProbeKind::Credential { source } => {
             let mut value =
                 crate::sessions::bind_mount(Path::new(source), "/run/pithos-broker/client.json")
@@ -169,6 +189,15 @@ fn mount_arg(operation: &ProbeKind) -> Result<Option<String>, ProbeError> {
                 value.into_string().map_err(|_| ProbeError::Credential)?,
             ))
         }
+    }
+}
+fn expected_network(operation: &ProbeKind) -> &str {
+    match operation {
+        ProbeKind::Pi {
+            browser: Some(b), ..
+        } => &b.network,
+        ProbeKind::Pi { .. } => "bridge",
+        _ => "none",
     }
 }
 fn extra_hosts_match(operation: &ProbeKind, actual: &Value) -> bool {
@@ -220,16 +249,28 @@ fn mounts_match(r: &Resource, actual: &Value, configured: &Value) -> bool {
         ProbeKind::Credential { source } => {
             vec![bind(source, "/run/pithos-broker/client.json", true)]
         }
+        ProbeKind::Browser { server_source, .. } => {
+            vec![bind(server_source, browser::SERVER_TARGET, true)]
+        }
+        ProbeKind::Network => return false,
         ProbeKind::Pi {
             home_volume,
             workspace,
             credential_source,
+            browser,
             ..
-        } => vec![
-            home(home_volume, false),
-            bind(workspace, "/workspace", false),
-            bind(credential_source, "/run/pithos-broker/client.json", true),
-        ],
+        } => {
+            let mut expected = vec![
+                home(home_volume, false),
+                bind(workspace, "/workspace", false),
+                bind(credential_source, "/run/pithos-broker/client.json", true),
+            ];
+            if let Some(b) = browser {
+                expected.push(bind(&b.client_source, PI_BROWSER_CLIENT, true));
+                expected.push(bind(&b.skills_source, PI_BROWSER_SKILLS, true));
+            }
+            expected
+        }
     };
     let Some(mounts) = actual.as_array().filter(|a| a.len() == expected.len()) else {
         return false;
@@ -415,7 +456,8 @@ impl ManagedDocker {
                         .any(|j| j.request_id() == r.request_id && j.state() == State::Succeeded)
             })
         };
-        if !resources.is_settled()
+        // The run network and sidecar are live owned services, not debt here.
+        if !resources.is_settled_except_services()
             || !admitted(&ProbeKind::Account)
             || !admitted(&ProbeKind::Home {
                 volume: inputs.volume.as_str().into(),
@@ -426,6 +468,38 @@ impl ManagedDocker {
         {
             return Err(ProbeError::Admission);
         }
+        let browser = match &inputs.browser {
+            None => None,
+            Some(b) => {
+                let owned = resources.resources().iter().any(|r| {
+                    r.spec.operation == ProbeKind::Network
+                        && r.name == b.network.name()
+                        && r.observed_id.is_some()
+                        && !r.removed
+                        && !r.indeterminate
+                });
+                if !owned {
+                    return Err(ProbeError::Admission);
+                }
+                browser::private_file(b.client)?;
+                trusted_directory(b.skills)?;
+                let [client, skills] = [b.client, b.skills].map(|p| p.to_str().map(str::to_owned));
+                let (Some(client_source), Some(skills_source)) = (client, skills) else {
+                    return Err(ProbeError::Failed);
+                };
+                if [&client_source, &skills_source]
+                    .iter()
+                    .any(|p| !absolute_path(p) || Path::new(p).starts_with(&workspace.resolved))
+                {
+                    return Err(ProbeError::Workspace);
+                }
+                Some(PiBrowserSpec {
+                    network: b.network.name().to_owned(),
+                    client_source,
+                    skills_source,
+                })
+            }
+        };
         self.probe_image(inputs.image, inputs.identity)?;
         let program = if inputs.command.is_empty() {
             #[derive(Deserialize)]
@@ -484,6 +558,7 @@ impl ManagedDocker {
                         }
                         _ => None,
                     },
+                    browser: browser.clone(),
                 },
                 &program,
             )?,
@@ -520,7 +595,6 @@ impl ManagedDocker {
             "run",
             "-it",
             "--pull=never",
-            "--network=bridge",
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
             "--entrypoint=/usr/local/bin/entrypoint.sh",
@@ -536,6 +610,18 @@ impl ManagedDocker {
             "--name".into(),
             r.name.clone(),
         ]);
+        // A container cannot join the default bridge and a user network at
+        // once. With a browser, Pi lives only on the run network, where the
+        // sidecar reaches its dev servers under the legacy alias.
+        match &browser {
+            Some(b) => args.extend([
+                "--network".into(),
+                b.network.clone(),
+                "--network-alias".into(),
+                crate::browser::DEV_ALIAS.into(),
+            ]),
+            None => args.push("--network=bridge".into()),
+        }
         for (key, value) in &r.labels {
             args.extend(["--label".into(), format!("{key}={value}")]);
         }
@@ -559,6 +645,20 @@ impl ManagedDocker {
                 .into_string()
                 .map_err(|_| ProbeError::Credential)?,
         ]);
+        if let Some(b) = &browser {
+            for (source, target) in [
+                (&b.client_source, PI_BROWSER_CLIENT),
+                (&b.skills_source, PI_BROWSER_SKILLS),
+            ] {
+                let mut mount = crate::sessions::bind_mount(Path::new(source), target)
+                    .map_err(|_| ProbeError::Failed)?;
+                mount.push(",readonly");
+                args.extend([
+                    "--mount".into(),
+                    mount.into_string().map_err(|_| ProbeError::Failed)?,
+                ]);
+            }
+        }
         if let HostAccess::LinuxHostGateway(observed) = inputs.host_access {
             args.extend([
                 "--add-host".into(),
@@ -675,7 +775,10 @@ impl ManagedDocker {
             return Err(PreflightError::ChildPending.into());
         }
         let mut budget = CleanupBudget::new();
-        for mut r in resources.resources().to_vec() {
+        // Containers first: a network cannot be removed while one is attached.
+        let mut ordered = resources.resources().to_vec();
+        ordered.sort_by_key(|r| r.spec.operation == ProbeKind::Network);
+        for mut r in ordered {
             if std::time::Instant::now() >= budget.deadline {
                 return Err(ProbeError::Indeterminate);
             }
@@ -1190,6 +1293,9 @@ impl ManagedDocker {
         id: &str,
         budget: &mut CleanupBudget,
     ) -> Result<Option<i64>, ProbeError> {
+        if matches!(r.spec.operation, ProbeKind::Browser { .. }) {
+            return self.inspect_browser(r, id, budget).map(|(exit, _)| exit);
+        }
         let bytes =
             self.control_query(&["container", "inspect", "--format", CONTAINER, id], budget)?;
         let v: Value = serde_json::from_slice(&bytes).map_err(|_| ProbeError::Indeterminate)?;
@@ -1221,7 +1327,7 @@ impl ManagedDocker {
             || command_digest(&c["Cmd"])? != r.spec.program_digest
             || !labels_match(&r.labels, &c["Labels"])
             || !null_or_empty_object(&c["Volumes"])
-            || h["NetworkMode"] != if pi { "bridge" } else { "none" }
+            || h["NetworkMode"] != expected_network(&r.spec.operation)
             || h["ReadonlyRootfs"] != !pi
             || h["Privileged"] != false
             || h["AutoRemove"] != false
@@ -1257,6 +1363,9 @@ impl ManagedDocker {
         r: &mut Resource,
         budget: &mut CleanupBudget,
     ) -> Result<Option<i64>, ProbeError> {
+        if r.spec.operation == ProbeKind::Network {
+            return self.cleanup_network(resources, r, budget).map(|()| None);
+        }
         if self.selection_digest() != r.selection {
             return Err(PreflightError::Changed.into());
         }

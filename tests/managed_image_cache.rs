@@ -313,15 +313,24 @@ fn failures_are_static_and_do_not_lose_the_owned_handle() {
 }
 
 #[test]
-fn browser_enabled_rejected_without_any_docker_call() {
+fn browser_enabled_config_is_resolved_like_any_other() {
     let f = Fixture::new();
     let bytes = b"toolchains: {}\nbrowser:\n  enabled: true\n";
     let yaml = pithos::config::load(bytes.as_slice()).unwrap();
-    assert_eq!(
-        f.managed().resolve_identity_image(&yaml, bytes, identity()),
-        Err(PreflightError::Unsupported)
-    );
-    assert!(f.calls().is_empty());
+    let base = pithos::docker::ImmutableImageId::new(&id('a')).unwrap();
+    let browser =
+        pithos::docker::managed_image_cache::fingerprint(&yaml, bytes, identity(), &base).unwrap();
+    let plain = pithos::docker::managed_image_cache::fingerprint(
+        &pithos::config::load(PROJECT).unwrap(),
+        PROJECT,
+        identity(),
+        &base,
+    )
+    .unwrap();
+    // The emitted client layer names the asset fingerprint, so the key moves.
+    assert_ne!(browser, plain);
+    let _ = f.managed().resolve_identity_image(&yaml, bytes, identity());
+    assert!(!f.calls().is_empty());
 }
 
 #[test]
@@ -340,7 +349,7 @@ fn invalid_raw_and_disagreeing_yaml_never_query_docker() {
         (
             PROJECT,
             b"toolchains: {}\nbrowser:\n  enabled: true\n".as_slice(),
-            PreflightError::Unsupported,
+            PreflightError::InvalidInput,
         ),
         (
             b"toolchains: {}\nbrowser:\n  enabled: true\n".as_slice(),

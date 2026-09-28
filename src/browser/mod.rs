@@ -30,7 +30,7 @@ const LABEL: &str = "dev.pithos.browser-run";
 /// `include_subdomains`, so Chromium upgraded `http://app:3000` and failed with
 /// `ERR_SSL_PROTOCOL_ERROR` against a sidecar that serves no TLS. The upgrade is
 /// compiled into the browser and is not disabled by `HttpsUpgrades` being off.
-const DEV_ALIAS: &str = "pithos-app";
+pub(crate) const DEV_ALIAS: &str = "pithos-app";
 const SIDECAR_ALIAS: &str = "browser";
 /// gTLDs preloaded as HTTPS-only, which a bare alias must never equal.
 #[cfg(test)]

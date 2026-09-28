@@ -144,10 +144,13 @@ sys.stdout.write((root/key).read_text())
         fs::write(self.dir.path().join(name), value).unwrap();
     }
     fn valid_candidate(&self) {
-        let yaml = pithos::config::load(RAW).unwrap();
+        self.valid_candidate_for(RAW);
+    }
+    fn valid_candidate_for(&self, raw: &[u8]) {
+        let yaml = pithos::config::load(raw).unwrap();
         let hash = pithos::docker::managed_image_cache::fingerprint(
             &yaml,
-            RAW,
+            raw,
             identity(),
             &ImmutableImageId::new(&id('a')).unwrap(),
         )
@@ -247,16 +250,24 @@ fn miss_builds_only_private_embedded_context_with_pinned_base_and_verifies_image
     assert!(!files.contains("secret"));
     assert!(!files.contains("workspace"));
     for c in f.calls() {
+        // Builds get a private copy of the frozen config inside the stage.
+        let config = if c["args"][0] == "build" {
+            let copy = PathBuf::from(c["global"][3].as_str().unwrap());
+            assert!(copy.starts_with(&f.stage) && !copy.starts_with(&context));
+            json!(copy)
+        } else {
+            json!(f.config)
+        };
         assert_eq!(
             c["global"],
             json!([
                 "--host",
                 format!("unix://{}", f.socket.display()),
                 "--config",
-                f.config
+                config
             ])
         );
-        assert_eq!(c["cwd"], json!(f.config));
+        assert_eq!(c["cwd"], config);
         let env = c["env"].as_object().unwrap();
         if c["args"][0] == "build" {
             // Buildx state goes to a private per-build dir, never the frozen
@@ -278,6 +289,43 @@ fn miss_builds_only_private_embedded_context_with_pinned_base_and_verifies_image
             assert!(env.keys().all(|k| k == "LC_CTYPE"));
         }
     }
+}
+
+#[test]
+fn browser_enabled_builds_the_client_layer_from_embedded_assets() {
+    let raw = b"toolchains: {}\nbrowser:\n  enabled: true\n";
+    let f = Fixture::new();
+    f.valid_candidate_for(raw);
+    let got = f
+        .docker()
+        .ensure_identity_image(
+            &pithos::config::load(raw).unwrap(),
+            raw,
+            identity(),
+            &f.workspace,
+            &f.stage,
+        )
+        .unwrap();
+    assert_eq!(got.as_str(), id('b'));
+    let dockerfile = fs::read_to_string(f.dir.path().join("dockerfile")).unwrap();
+    assert!(dockerfile.contains("COPY browser/client/ /opt/pithos-browser/client/"));
+    assert!(dockerfile.contains(&pithos::browser::assets::fingerprint()));
+    let files: Vec<String> =
+        serde_json::from_str(&fs::read_to_string(f.dir.path().join("context-files")).unwrap())
+            .unwrap();
+    for needed in [
+        "browser/package.json",
+        "browser/package-lock.json",
+        "browser/client/pithos-browser",
+    ] {
+        assert!(files.iter().any(|p| p == needed), "missing {needed}");
+    }
+    // Run-scoped secrets are written per run, never baked into the image.
+    assert!(
+        !files
+            .iter()
+            .any(|p| p.ends_with("server.json") || p.ends_with("client.json"))
+    );
 }
 
 #[test]
@@ -327,18 +375,6 @@ fn unsafe_stage_and_invalid_input_never_query_docker() {
     assert_eq!(
         docker.ensure_identity_image(&yaml, b"toolchains: [", identity(), &f.workspace, &f.stage),
         Err(PreflightError::InvalidInput)
-    );
-    assert!(f.calls().is_empty());
-    let browser = b"toolchains: {}\nbrowser:\n  enabled: true\n";
-    assert_eq!(
-        docker.ensure_identity_image(
-            &pithos::config::load(browser).unwrap(),
-            browser,
-            identity(),
-            &f.workspace,
-            &f.stage
-        ),
-        Err(PreflightError::Unsupported)
     );
     assert!(f.calls().is_empty());
 }

@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 
 /// Label namespace is deliberately disjoint from legacy images.
 pub const LABEL_KEY: &str = "io.pithos.broker.identity-fingerprint";
+/// The identity Chromium sidecar image; never interchangeable with Pi's.
+pub const BROWSER_LABEL_KEY: &str = "io.pithos.broker.browser-fingerprint";
 const DOMAIN: &[u8] = b"pithos-managed-pi-identity-cache-v1\0";
 pub(super) const BASE: &str = r#"{"id":{{json .Id}}}"#;
 const LIST: &str = "{{json .ID}}";
@@ -143,8 +145,8 @@ fn frame(hash: &mut Sha256, bytes: &[u8]) {
 
 /// Compute the v1 managed Pi cache key from the validated raw configuration
 /// and the exact local base image ID. `yaml` must agree with the parsed raw
-/// bytes; browser-enabled configurations are unsupported here. This is
-/// distinct from the legacy image fingerprint.
+/// bytes. A browser client layer is covered by the emitted Dockerfile, which
+/// names the asset fingerprint. This is distinct from the legacy fingerprint.
 pub fn fingerprint(
     yaml: &YamlOwned,
     pithos: &[u8],
@@ -157,12 +159,6 @@ pub fn fingerprint(
 
 fn validated_config(yaml: &YamlOwned, pithos: &[u8]) -> Result<YamlOwned, PreflightError> {
     let parsed = crate::config::load(pithos).map_err(|_| PreflightError::InvalidInput)?;
-    if crate::config::browser_config(&parsed)
-        .map_err(|_| PreflightError::InvalidInput)?
-        .enabled
-    {
-        return Err(PreflightError::Unsupported);
-    }
     if &parsed != yaml {
         return Err(PreflightError::InvalidInput);
     }
@@ -221,7 +217,32 @@ pub(super) fn resolve_with_base(
     let parsed = validated_config(yaml, pithos)?;
     let base = inspect_base(docker)?;
     let hash = fingerprint_validated(&parsed, pithos, identity, &base)?;
-    let filter = format!("label={LABEL_KEY}={hash}");
+    let Some(id) = unique_labelled(docker, LABEL_KEY, &hash)? else {
+        return Ok((None, base));
+    };
+    verify_candidate(docker, &id, identity, &hash)?;
+    Ok((Some(id), base))
+}
+
+/// The cached identity browser image for `hash`, verified, if any.
+pub(super) fn resolve_browser(
+    docker: &mut ManagedDocker,
+    identity: HostIdentity,
+    hash: &str,
+) -> Result<Option<ImmutableImageId>, PreflightError> {
+    let Some(id) = unique_labelled(docker, BROWSER_LABEL_KEY, hash)? else {
+        return Ok(None);
+    };
+    verify_browser_candidate(docker, &id, identity, hash)?;
+    Ok(Some(id))
+}
+
+fn unique_labelled(
+    docker: &mut ManagedDocker,
+    key: &str,
+    hash: &str,
+) -> Result<Option<ImmutableImageId>, PreflightError> {
+    let filter = format!("label={key}={hash}");
     let bytes = docker.query(&[
         "image",
         "ls",
@@ -234,15 +255,14 @@ pub(super) fn resolve_with_base(
     let text = std::str::from_utf8(&bytes).map_err(|_| PreflightError::InvalidResponse)?;
     let mut ids = text.lines();
     let Some(first) = ids.next() else {
-        return Ok((None, base));
+        return Ok(None);
     };
     let id: String = serde_json::from_str(first).map_err(|_| PreflightError::InvalidResponse)?;
     let id = ImmutableImageId::new(&id).map_err(|_| PreflightError::InvalidResponse)?;
     if ids.next().is_some() {
         return Err(PreflightError::InvalidResponse);
     }
-    verify_candidate(docker, &id, identity, &hash)?;
-    Ok((Some(id), base))
+    Ok(Some(id))
 }
 
 pub(super) fn inspect_base(docker: &mut ManagedDocker) -> Result<ImmutableImageId, PreflightError> {
@@ -258,6 +278,31 @@ pub(super) fn verify_candidate(
     identity: HostIdentity,
     hash: &str,
 ) -> Result<(), PreflightError> {
+    verify_labelled(docker, id, identity, (LABEL_KEY, hash), ("pi", "/home/pi"))
+}
+
+pub(super) fn verify_browser_candidate(
+    docker: &mut ManagedDocker,
+    id: &ImmutableImageId,
+    identity: HostIdentity,
+    hash: &str,
+) -> Result<(), PreflightError> {
+    verify_labelled(
+        docker,
+        id,
+        identity,
+        (BROWSER_LABEL_KEY, hash),
+        ("browser", "/tmp/browser-home"),
+    )
+}
+
+fn verify_labelled(
+    docker: &mut ManagedDocker,
+    id: &ImmutableImageId,
+    identity: HostIdentity,
+    (key, hash): (&str, &str),
+    (account, home): (&str, &str),
+) -> Result<(), PreflightError> {
     let bytes = docker.query(&["image", "inspect", "--format", INSPECT, id.as_str()])?;
     let info: Candidate =
         serde_json::from_slice(&bytes).map_err(|_| PreflightError::InvalidResponse)?;
@@ -267,7 +312,7 @@ pub(super) fn verify_candidate(
     if info
         .labels
         .as_ref()
-        .and_then(|labels| labels.get(LABEL_KEY))
+        .and_then(|labels| labels.get(key))
         .map(String::as_str)
         != Some(hash)
         || info
@@ -279,7 +324,7 @@ pub(super) fn verify_candidate(
             user: info.user,
             env: info.env,
         })
-        .supported(identity)
+        .supported_as(identity, account, home)
     {
         return Err(PreflightError::Unsupported);
     }
