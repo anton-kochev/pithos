@@ -1,4 +1,5 @@
-//! Explicit host-only coordinator for a single managed Pi run. No CLI activation.
+//! Explicit host-only coordinator for a single managed Pi run, driven by
+//! `pithos --broker=...`.
 //! Callers retain construction failures and poll their prelease Docker child or
 //! recovery runtime; dropping an unsettled owner does not reap or reconcile.
 #![cfg(any(target_os = "linux", target_os = "macos"))]

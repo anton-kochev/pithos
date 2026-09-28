@@ -84,6 +84,10 @@ console.log('stop', await call('pithos_app_stop', 'c5', { app: 'web' }));
 console.log('status', await call('pithos_app_status', 'c6', { app: 'web' }));
 "#;
 
+/// The tests share one project name and home volume, and each refuses to
+/// start while another's managed resources exist: run them one at a time.
+static SERIAL: Mutex<()> = Mutex::new(());
+
 fn opted_in() -> bool {
     std::env::var("PITHOS_BROKER_DOCKER_TEST").as_deref() == Ok("1")
 }
@@ -262,71 +266,16 @@ fn broker_child() {
 }
 
 fn run_child_in_pty(result: &Path, mode: &str) -> String {
-    let (mut master, mut slave) = (-1, -1);
-    // SAFETY: valid descriptor outputs; no optional name/termios/winsize storage.
-    assert_eq!(
-        unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        },
-        0
-    );
-    // SAFETY: successful openpty returned new, exclusively owned descriptors.
-    let (mut master_file, slave_file) =
-        unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
-    for fd in [master, slave] {
-        // SAFETY: owned live descriptors; keep the master out of children.
-        assert_ne!(
-            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
-            -1
-        );
-    }
-    // SAFETY: owned master; nonblocking bounded output collection.
-    assert_ne!(
-        unsafe { libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK) },
-        -1
-    );
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", "broker_child", "--nocapture"])
         .env("PITHOS_BROKER_CHILD", result)
-        .env("PITHOS_BROKER_CHILD_MODE", mode)
-        .stdin(slave_file.try_clone().unwrap())
-        .stdout(slave_file.try_clone().unwrap())
-        .stderr(slave_file);
-    // SAFETY: only async-signal-safe calls after fork; the child gets its own
-    // session with the PTY slave as controlling terminal.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let mut child = command.spawn().unwrap();
+        .env("PITHOS_BROKER_CHILD_MODE", mode);
+    let (mut child, mut master) = spawn_in_pty(command);
     let deadline = Instant::now() + Duration::from_secs(600);
     let mut output = Vec::new();
     loop {
-        let mut buffer = [0; 4096];
-        loop {
-            match master_file.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => output.extend_from_slice(&buffer[..n]),
-                Err(e)
-                    if e.kind() == io::ErrorKind::WouldBlock
-                        || e.raw_os_error() == Some(libc::EIO) =>
-                {
-                    break;
-                }
-                Err(e) => panic!("PTY read: {e}"),
-            }
-        }
+        drain(&mut master, &mut output);
         if output.len() > 1024 * 1024 {
             output.drain(..output.len() - 64 * 1024);
         }
@@ -348,6 +297,7 @@ fn run_child_in_pty(result: &Path, mode: &str) -> String {
 #[test]
 #[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
 fn docker_desktop_pi_reaches_broker_and_run_settles_clean() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     assert!(
         opted_in(),
         "explicit real-Docker acceptance opt-in required"
@@ -405,6 +355,7 @@ fn sha256_hex(value: &str) -> String {
 #[test]
 #[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
 fn docker_desktop_pi_drives_chromium_on_the_run_network() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     assert!(
         opted_in(),
         "explicit real-Docker acceptance opt-in required"
@@ -431,6 +382,7 @@ fn docker_desktop_pi_drives_chromium_on_the_run_network() {
 #[test]
 #[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
 fn docker_desktop_pi_builds_runs_reaches_and_stops_a_workspace_app() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     assert!(
         opted_in(),
         "explicit real-Docker acceptance opt-in required"
@@ -458,4 +410,196 @@ fn docker_desktop_pi_builds_runs_reaches_and_stops_a_workspace_app() {
     }
     assert!(managed_containers().is_empty(), "container left behind");
     assert!(managed_networks().is_empty(), "network left behind");
+}
+
+/// Opens a PTY, starts `command` as a session leader on it, and returns the
+/// child with the nonblocking master.
+fn spawn_in_pty(mut command: Command) -> (std::process::Child, File) {
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: valid descriptor outputs; no optional name/termios/winsize storage.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    // SAFETY: successful openpty returned new, exclusively owned descriptors.
+    let (master_file, slave_file) =
+        unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+    for fd in [master, slave] {
+        // SAFETY: owned live descriptors; keep the master out of children.
+        assert_ne!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+            -1
+        );
+    }
+    // SAFETY: owned master; nonblocking bounded output collection.
+    assert_ne!(
+        unsafe { libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK) },
+        -1
+    );
+    command
+        .stdin(slave_file.try_clone().unwrap())
+        .stdout(slave_file.try_clone().unwrap())
+        .stderr(slave_file);
+    // SAFETY: only async-signal-safe calls after fork.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    (command.spawn().unwrap(), master_file)
+}
+
+fn drain(master: &mut File, output: &mut Vec<u8>) {
+    let mut buffer = [0; 4096];
+    loop {
+        match master.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => output.extend_from_slice(&buffer[..n]),
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.raw_os_error() == Some(libc::EIO) =>
+            {
+                break;
+            }
+            Err(e) => panic!("PTY read: {e}"),
+        }
+    }
+}
+
+fn running_pi() -> Option<String> {
+    docker(&[
+        "ps",
+        "-q",
+        "--filter",
+        "label=io.pithos.probe.request=runtime-pi-v1",
+        "--filter",
+        "status=running",
+    ])
+    .lines()
+    .next()
+    .map(str::to_owned)
+}
+
+#[test]
+#[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
+fn docker_desktop_cli_workspace_run_shows_viewer_and_settles_when_pi_quits() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    use std::io::Write;
+    assert!(
+        opted_in(),
+        "explicit real-Docker acceptance opt-in required"
+    );
+    assert!(
+        managed_containers().is_empty() && managed_networks().is_empty(),
+        "stale managed resources present; refusing to run"
+    );
+    let _home = HomeVolume::absent();
+    let (_parent, workspace, _) = project(b"toolchains: {}\nbrowser: {enabled: true}\n");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pithos"));
+    command
+        .current_dir(&workspace)
+        .arg("--broker=workspace")
+        .env("NO_COLOR", "1");
+    let (mut child, mut master) = spawn_in_pty(command);
+    let mut output = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(600);
+    let mut pi = None;
+    let mut quit_sent: Option<Instant> = None;
+    let mut terminated = false;
+    let (mut seen, mut quiet_since) = (0, Instant::now());
+    // Keep draining until exit: macOS holds a closing TTY until it is read.
+    let status = loop {
+        drain(&mut master, &mut output);
+        if let Some(status) = child.try_wait().unwrap() {
+            drain(&mut master, &mut output);
+            break status;
+        }
+        if output.len() != seen {
+            (seen, quiet_since) = (output.len(), Instant::now());
+        }
+        if pi.is_none() {
+            pi = running_pi();
+        }
+        // Once Pi's TUI has settled, quit Pi itself.
+        if pi.is_some() && quit_sent.is_none() && quiet_since.elapsed() > Duration::from_secs(5) {
+            master.write_all(b"/quit\r").unwrap();
+            quit_sent = Some(Instant::now());
+        }
+        if !terminated && Instant::now() >= deadline {
+            // SAFETY: child is unreaped and owns its isolated session.
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+            terminated = true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let text = String::from_utf8_lossy(&output).into_owned();
+    let tail = &text[text.len().saturating_sub(8192)..];
+    let plain = String::from_utf8_lossy(&strip_ansi(&output)).into_owned();
+    eprintln!(
+        "--- screen ---\n{}",
+        &plain[plain.len().saturating_sub(6000)..]
+    );
+    assert!(!terminated, "deadline; SIGTERM sent:\n{tail}");
+    assert!(pi.is_some(), "managed Pi never ran:\n{tail}");
+    // Pi's own loader picked up the mounted broker extension and the skill.
+    for expected in [
+        "[Extensions]",
+        "extension.mjs",
+        "[Skills]",
+        "browser-automation",
+    ] {
+        assert!(
+            plain.contains(expected),
+            "missing {expected:?} on Pi's screen"
+        );
+    }
+    assert!(
+        !plain.contains("Failed to load extension"),
+        "extension load error"
+    );
+    assert!(
+        text.contains("» browser: viewer: http://127.0.0.1:"),
+        "no viewer line:\n{tail}"
+    );
+    assert!(status.success(), "exit {status:?}:\n{tail}");
+    assert!(managed_containers().is_empty(), "container left behind");
+    assert!(managed_networks().is_empty(), "network left behind");
+}
+
+/// Drops CSI/OSC escape sequences so the TTY text can be read and matched.
+fn strip_ansi(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'[' => {
+                    i += 2;
+                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                        i += 1;
+                    }
+                }
+                b']' => {
+                    while i < bytes.len() && bytes[i] != 0x07 && bytes[i] != b'\\' {
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    out
 }

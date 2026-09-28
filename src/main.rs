@@ -53,6 +53,7 @@ const USAGE: &str = "usage: pithos [run | build | info | sessions | clean | rebu
 // Never reflect a broker flag's untrusted value in host usage diagnostics.
 const BROKER_USAGE: &str =
     "--broker requires exactly one --broker=status or --broker=workspace in the run option prefix";
+const BROKER_ONLY: &str = "--broker launches only managed Pi; it cannot be combined with --tmux, --rebuild, --no-build, Pi arguments or a container command";
 
 // Content written when the user accepts the prompt to create a missing `.pithos`.
 // Mirrors the example in the prompt narration; validates cleanly through `pithos::config::load`.
@@ -204,7 +205,8 @@ impl Subcommand {
                     target = RunTarget::Command(rest[i + 1..].to_vec());
                     break;
                 }
-                "--broker=status" if grant.is_none() => grant = Some(HostGrant::status_only()),
+                // Status alone cannot launch Pi: approve one managed Pi run.
+                "--broker=status" if grant.is_none() => grant = Some(HostGrant::managed_pi_run()),
                 "--broker=workspace" if grant.is_none() => grant = Some(HostGrant::workspace()),
                 s if s == "--broker" || s.starts_with("--broker=") => {
                     return Self::Reject {
@@ -242,6 +244,13 @@ impl Subcommand {
             }
             i += 1;
         }
+        let bare_pi = matches!(&target, RunTarget::Pi(tail) if tail.is_empty());
+        if grant.is_some() && (tmux || mode != RunMode::Default || !bare_pi) {
+            return Self::Reject {
+                kind: RejectKind::Usage,
+                value: BROKER_ONLY.into(),
+            };
+        }
         Self::Run {
             mode,
             target,
@@ -269,23 +278,14 @@ impl Subcommand {
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let subcommand = Subcommand::from_args(&args);
-    // Host approval is not release readiness. Keep this unconditional gate
-    // ahead of signal handlers and every launch-side discovery or resource.
-    if let Subcommand::Run {
-        grant: Some(grant), ..
-    } = &subcommand
-    {
-        if grant.permits(Action::Build) {
-            eprintln!(
-                "pithos: broker workspace is not ready: workspace build, Compose, exec, and lifecycle integration are not verified; no broker was started"
-            );
-        } else {
-            eprintln!(
-                "pithos: broker status is not ready: host admission, secure transport, and unified shutdown are not verified; no broker was started"
-            );
-        }
-        return ExitCode::from(1);
-    }
+    // Broker runs own their signals and resources; they never enter the
+    // legacy launch path, its signal handlers or its Dockerfile emission.
+    let subcommand = match subcommand {
+        Subcommand::Run {
+            grant: Some(grant), ..
+        } => return run_broker(grant, Style::detect()),
+        other => other,
+    };
     if pithos::browser::install_signal_handlers().is_err() {
         eprintln!("pithos: cannot install signal cleanup handlers");
         return ExitCode::from(1);
@@ -294,6 +294,99 @@ fn main() -> ExitCode {
     pithos::browser::signal_exit()
         .map(ExitCode::from)
         .unwrap_or(result)
+}
+
+/// One managed Pi run under an explicit host grant. The coordinator owns
+/// Docker selection, images, the broker and cleanup; this only reports.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn run_broker(grant: HostGrant, style: Style) -> ExitCode {
+    use pithos::broker::{host::HostInputs, runtime::RuntimePoll};
+    use std::time::Duration;
+
+    let cwd = match env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            narrate(style, "» ERROR:", &format!("cannot read cwd: {e}"));
+            return ExitCode::from(1);
+        }
+    };
+    // No prompt: a broker run never writes project files on the host's behalf.
+    let pithos_bytes = match fs::read(cwd.join(".pithos")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            narrate(
+                style,
+                "» ERROR:",
+                ".pithos not found; --broker needs an existing project config",
+            );
+            return ExitCode::from(2);
+        }
+        Err(e) => {
+            narrate(style, "» ERROR:", &format!("cannot read .pithos: {e}"));
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(e) = pithos::config::load(&pithos_bytes) {
+        narrate(style, "» ERROR:", &format!("{e}"));
+        return ExitCode::from(2);
+    }
+    let fail = |error: &dyn std::fmt::Display| {
+        narrate(style, "» ERROR:", &format!("broker: {error}"));
+        ExitCode::from(1)
+    };
+    // Preparation and start each consume one approval; reissue the same one.
+    let reissued = if grant.permits(Action::Build) {
+        HostGrant::workspace()
+    } else {
+        HostGrant::managed_pi_run()
+    };
+    let inputs = match HostInputs::prepare(reissued, cwd, pithos_bytes) {
+        Ok(inputs) => inputs,
+        Err(e) => return fail(&e),
+    };
+    let mut coordinator = match inputs.start(grant) {
+        Ok(coordinator) => coordinator,
+        Err(mut failure) => {
+            let code = fail(&failure.error);
+            let settled = loop {
+                match failure.poll_cleanup() {
+                    RuntimePoll::Running => std::thread::sleep(Duration::from_millis(20)),
+                    other => break other,
+                }
+            };
+            if settled != RuntimePoll::Complete {
+                narrate(
+                    style,
+                    "» ERROR:",
+                    "broker: cleanup did not complete; managed resources may need recovery",
+                );
+            }
+            return code;
+        }
+    };
+    if let Some((url, password)) = coordinator.browser_viewer() {
+        narrate(
+            style,
+            "» browser:",
+            &format!(
+                "viewer: {url} (enter the password from host file {}; do not share it in chat)",
+                password.display()
+            ),
+        );
+    }
+    let settled = coordinator.run_until_terminal(Duration::from_millis(20));
+    let _ = coordinator.close_signals();
+    match coordinator.terminal_exit_code() {
+        Some(code) => ExitCode::from(code),
+        None => {
+            narrate(
+                style,
+                "» ERROR:",
+                &format!("broker: run ended as {settled:?}; managed resources may need recovery"),
+            );
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn launch(subcommand: Subcommand) -> ExitCode {
@@ -565,11 +658,9 @@ fn help_text() -> String {
          \n\
          Options:\n  \
            run:    --rebuild, --no-build, --tmux, --pi <args...>, -- <cmd...>\n  \
-                   --broker=status (recognized but unavailable)\n    \
-                   --broker=workspace (recognized but unavailable)\n    \
-                     Both always refuse before launch; no broker service is started.\n    \
-                     Status host admission, secure transport, and unified shutdown remain unverified.\n    \
-                     Workspace build, Compose, exec, and lifecycle integration remain unverified.\n  \
+                   --broker=status     Managed Pi with a read-only broker status endpoint\n    \
+                   --broker=workspace  Managed Pi that can also build, run and stop project apps\n    \
+                     Both launch only Pi: no --tmux, --rebuild, --no-build or arguments.\n  \
            build:  --rebuild\n\
          \n\
          Pi arguments:\n  \
@@ -1723,19 +1814,23 @@ mod tests {
     }
 
     #[test]
-    fn broker_prefix_supports_implicit_run_and_existing_options() {
+    fn broker_prefix_rejects_options_managed_pi_cannot_honor() {
         for argv in [
-            vec!["pithos", "--broker=status", "--tmux", "--no-build"],
-            vec!["pithos", "run", "--no-build", "--tmux", "--broker=status"],
+            vec!["pithos", "--broker=status", "--tmux"],
+            vec!["pithos", "run", "--no-build", "--broker=status"],
+            vec!["pithos", "run", "--broker=workspace", "--rebuild"],
+            vec!["pithos", "--broker=workspace", "--pi", "--session", "x"],
+            vec!["pithos", "--broker=workspace", "--session", "secret-canary"],
+            vec!["pithos", "run", "--broker=status", "--", "bash"],
+            vec!["pithos", "run", "--broker=workspace", "bash"],
         ] {
             assert_eq!(
                 Subcommand::from_args(&args(&argv)),
-                Subcommand::Run {
-                    mode: RunMode::NoBuild,
-                    target: RunTarget::Pi(vec![]),
-                    tmux: true,
-                    grant: Some(HostGrant::status_only()),
-                }
+                Subcommand::Reject {
+                    kind: RejectKind::Usage,
+                    value: BROKER_ONLY.into(),
+                },
+                "{argv:?}"
             );
         }
     }
@@ -1821,14 +1916,16 @@ mod tests {
     }
 
     #[test]
-    fn broker_prefix_grants_status() {
+    fn broker_prefix_grants_status_with_a_managed_pi_run() {
+        // Status alone cannot launch Pi; the flag approves one managed Pi run
+        // plus read-only status, and never the workspace app actions.
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--broker=status"])),
             Subcommand::Run {
                 mode: RunMode::Default,
                 target: RunTarget::Pi(vec![]),
                 tmux: false,
-                grant: Some(HostGrant::status_only()),
+                grant: Some(HostGrant::managed_pi_run()),
             }
         );
     }
@@ -1836,21 +1933,16 @@ mod tests {
     #[test]
     fn broker_prefix_grants_workspace_with_implicit_or_explicit_run() {
         for argv in [
-            vec!["pithos", "--broker=workspace", "--tmux", "--no-build"],
-            vec![
-                "pithos",
-                "run",
-                "--no-build",
-                "--tmux",
-                "--broker=workspace",
-            ],
+            vec!["pithos", "--broker=workspace"],
+            vec!["pithos", "run", "--broker=workspace"],
+            vec!["pithos", "run", "--broker=workspace", "--pi"],
         ] {
             assert_eq!(
                 Subcommand::from_args(&args(&argv)),
                 Subcommand::Run {
-                    mode: RunMode::NoBuild,
+                    mode: RunMode::Default,
                     target: RunTarget::Pi(vec![]),
-                    tmux: true,
+                    tmux: false,
                     grant: Some(HostGrant::workspace()),
                 }
             );
@@ -2238,11 +2330,18 @@ mod tests {
     }
 
     #[test]
-    fn help_text_marks_broker_status_recognized_but_unavailable() {
+    fn help_text_documents_broker_launches() {
         let text = help_text();
-        assert!(text.contains("--broker=status (recognized but unavailable)"));
-        assert!(text.contains("--broker=workspace (recognized but unavailable)"));
-        assert!(text.contains("Both always refuse before launch; no broker service is started."));
+        assert!(
+            text.contains("--broker=status     Managed Pi with a read-only broker status endpoint")
+        );
+        assert!(text.contains(
+            "--broker=workspace  Managed Pi that can also build, run and stop project apps"
+        ));
+        assert!(
+            text.contains("Both launch only Pi: no --tmux, --rebuild, --no-build or arguments.")
+        );
+        assert!(!text.contains("unavailable"));
     }
 
     #[test]
