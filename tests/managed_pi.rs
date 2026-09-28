@@ -89,6 +89,8 @@ a=sys.argv[5:]
 def emit(v): print(json.dumps(v))
 def opt(k): return a[a.index(k)+1]
 def mode(k): return (root/k).exists()
+# A workspace-grant coordinator always puts Pi on the owned run network.
+def on_network(): return mode('network') or mode('host-coordinator')
 def home_volume(): return __HOST_VOLUME__ if mode('host-coordinator') else 'pi-home'
 with (root/'calls').open('a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if a[0]=='info':
@@ -172,7 +174,7 @@ elif a[0]=='run':
     if pi:
         assert all(os.isatty(fd) for fd in [0,1,2]) and os.tcgetpgrp(0)==os.getpgrp()
         assert '-it' in a and '--read-only' not in a
-        if mode('browser'):
+        if on_network():
             network=json.loads((root/'network.json').read_text())['name']
             assert '--network=bridge' not in a and opt('--network')==network and opt('--network-alias')=='pithos-app'
         else:
@@ -211,7 +213,7 @@ elif a[0]=='run':
     cid=format(len(manifest['resources']),'064x')
     c={'id':cid,'name':'/'+r['name'],'image':__IMAGE__,
        'config':{'Image':__IMAGE__,'User':__USER__,'Entrypoint':[entry],'Cmd':cmd,'Labels':labels,'Volumes':None,'Tty':pi,'OpenStdin':pi,'AttachStdin':pi,'AttachStdout':pi,'AttachStderr':pi,'StdinOnce':pi,'WorkingDir':'/workspace' if pi else ''},
-       'host':{'NetworkMode':(opt('--network') if mode('browser') else 'bridge') if pi else 'none','ReadonlyRootfs':not pi,'Privileged':False,'AutoRemove':False,'RestartPolicy':{'Name':'no','MaximumRetryCount':0},'CapDrop':['ALL'],'SecurityOpt':['no-new-privileges'],'CapAdd':None,'GroupAdd':None,'Binds':None,'Devices':None,'PidMode':'','IpcMode':'private','UsernsMode':'','Mounts':hosts,'ExtraHosts':extra_hosts or None},
+       'host':{'NetworkMode':(opt('--network') if on_network() else 'bridge') if pi else 'none','ReadonlyRootfs':not pi,'Privileged':False,'AutoRemove':False,'RestartPolicy':{'Name':'no','MaximumRetryCount':0},'CapDrop':['ALL'],'SecurityOpt':['no-new-privileges'],'CapAdd':None,'GroupAdd':None,'Binds':None,'Devices':None,'PidMode':'','IpcMode':'private','UsernsMode':'','Mounts':hosts,'ExtraHosts':extra_hosts or None},
        'mounts':mounts,'state':{'Status':'running' if pi and mode('detached') else 'exited','Running':pi and mode('detached'),'ExitCode':0,'Error':'','OOMKilled':False,'Dead':False}}
     if pi and mode('engine-failed'): c['state']['ExitCode']=7
     # Docker Desktop may record shared host paths under its VM mount.
@@ -483,7 +485,8 @@ fn pi_fixture() {
         drop(coordinator);
         let manifest = ResourceManifest::open(&f.root.path().join("run"), "host-run").unwrap();
         assert!(manifest.is_settled());
-        assert_eq!(manifest.records().len(), 4);
+        // Account, home, credential, the workspace run network, and Pi.
+        assert_eq!(manifest.records().len(), 5);
         let lease = HomeLease::broker(&lease_root, &volume).unwrap();
         lease.finish().unwrap();
         return;
@@ -518,6 +521,7 @@ fn pi_fixture() {
                 command: Vec::new(),
                 interactive_limits: InteractiveLimits::default(),
                 browser: None,
+                stage_root: None,
             },
         )
         .unwrap();
@@ -700,7 +704,7 @@ fn pi_fixture() {
         lease.finish().unwrap();
         return;
     }
-    if mode.starts_with("browser") {
+    if mode.starts_with("browser") || mode == "network-only" {
         browser_fixture(&f, &mode);
         return;
     }
@@ -770,6 +774,7 @@ fn pi_fixture() {
                     HostAccess::Offline
                 }
             },
+            network: None,
             browser: None,
         },
     );
@@ -927,6 +932,7 @@ fn pi_fixture() {
                     credential: &c,
                     command: &command,
                     host_access: HostAccess::Offline,
+                    network: None,
                     browser: None,
                 }
             )
@@ -948,7 +954,12 @@ fn browser_fixture(f: &Fixture, mode: &str) {
     let volume = VolumeName::new("pi-home").unwrap();
     let lease = HomeLease::broker(&f.root.path().join("leases"), &volume).unwrap();
     f.admit(&mut docker, &mut m, &c);
-    f.mode("browser");
+    // Every mode joins the run network; only "browser" modes add its files.
+    f.mode("network");
+    let with_files = mode != "network-only";
+    if with_files {
+        f.mode("browser");
+    }
     let (client, skills) = f.browser_files();
     let other_dir = f.root.path().join("other-run");
     fs::create_dir(&other_dir).unwrap();
@@ -960,13 +971,21 @@ fn browser_fixture(f: &Fixture, mode: &str) {
         docker.create_run_network(&mut m, "network-1").unwrap()
     };
     let mut child = InteractiveChild::new(InteractiveLimits::default(), shutdown.clone()).unwrap();
-    let command: Vec<String> = [
-        "pi",
-        "--skill",
-        "/run/pithos-browser/skills/browser-automation",
-    ]
-    .map(str::to_owned)
-    .to_vec();
+    let command: Vec<String> = if !with_files {
+        vec![
+            "pi".into(),
+            "--session-dir".into(),
+            "/home/pi/.pi/agent/sessions".into(),
+        ]
+    } else {
+        [
+            "pi",
+            "--skill",
+            "/run/pithos-browser/skills/browser-automation",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    };
     let start = docker.start_pi(
         &mut m,
         &mut child,
@@ -979,8 +998,8 @@ fn browser_fixture(f: &Fixture, mode: &str) {
             credential: &c,
             command: &command,
             host_access: HostAccess::Offline,
-            browser: Some(PiBrowser {
-                network: &network,
+            network: Some(&network),
+            browser: with_files.then_some(PiBrowser {
                 client: &client,
                 skills: &skills,
             }),
@@ -1036,6 +1055,11 @@ fn browser_fixture(f: &Fixture, mode: &str) {
 fn browser_pi_joins_only_its_own_run_network_and_leaves_first() {
     run_fixture("browser");
     run_fixture("browser-foreign-network");
+}
+
+#[test]
+fn workspace_pi_joins_the_run_network_without_browser_files() {
+    run_fixture("network-only");
 }
 
 // Fake Docker calls race fixed runtime limits; unbounded parallel load flakes.
@@ -1289,6 +1313,7 @@ fn start_requires_matching_probes_and_rechecks_host_paths_and_home_before_intent
                         credential: &c,
                         command: &[],
                         host_access: HostAccess::Offline,
+                        network: None,
                         browser: None,
                     }
                 )
@@ -1417,6 +1442,7 @@ fn start_requires_matching_probes_and_rechecks_host_paths_and_home_before_intent
                 },
                 command: &command,
                 host_access: HostAccess::Offline,
+                network: None,
                 browser: None,
             },
         );
@@ -1480,6 +1506,7 @@ fn workspace_cannot_mutate_a_frozen_docker_selection_alias() {
                     credential: &c,
                     command: &[],
                     host_access: HostAccess::Offline,
+                    network: None,
                     browser: None,
                 }
             )

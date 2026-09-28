@@ -423,6 +423,7 @@ impl ValidatedHostInputs {
             command,
             interactive_limits: self.input.interactive_limits,
             browser,
+            stage_root: Some(self.input.stage_root),
         };
         let mut runtime = match BrokerRuntime::begin_with_docker(grant, endpoint, setup, docker) {
             Ok(runtime) => runtime,

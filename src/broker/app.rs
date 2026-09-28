@@ -61,6 +61,40 @@ fn valid_name(value: &str, max: usize) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
+/// A logical app name the agent may use: bounded DNS-like, never a
+/// reserved role or the broker's own prefix.
+/// A literal app command: at most 32 non-empty tokens, no control bytes.
+pub(crate) fn valid_app_command(command: &[String]) -> bool {
+    command.len() <= 32
+        && command
+            .iter()
+            .all(|arg| !arg.is_empty() && arg.len() <= 256 && !arg.chars().any(char::is_control))
+        && command.iter().map(String::len).sum::<usize>() <= 4096
+}
+
+pub(crate) fn valid_app_name(logical: &str) -> bool {
+    valid_name(logical, 32)
+        && !matches!(logical, "pi" | "browser" | "broker")
+        && !logical.starts_with("pithos-")
+}
+
+/// The app's stable host name on the run network for this run and app.
+/// Both components are framed before hashing so boundaries cannot collide;
+/// the first 128 bits keep the DNS label bounded without raw identities.
+pub(crate) fn app_host(run: &str, logical: &str) -> String {
+    let mut hasher = Sha256::new();
+    for component in [run, logical] {
+        hasher.update((component.len() as u64).to_be_bytes());
+        hasher.update(component.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let suffix: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("pithos-app-{suffix}")
+}
+
 pub(crate) struct AppLaunchPlan {
     image: HostIssuedAppImage,
     run: String,
@@ -80,9 +114,7 @@ impl AppLaunchPlan {
             || !run
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            || !valid_name(logical, 32)
-            || matches!(logical, "pi" | "browser" | "broker")
-            || logical.starts_with("pithos-")
+            || !valid_app_name(logical)
         {
             return Err(AppPlanError::Identity);
         }
@@ -108,19 +140,7 @@ impl AppLaunchPlan {
     /// configuration must be preflighted separately for anonymous volumes.
     pub(crate) fn docker_run_argv(&self) -> Vec<String> {
         // Fixed options and at most 32 literal command tokens; no caller Docker flags.
-        // Frame both components before hashing so boundaries cannot collide.
-        // The first 128 bits keep names bounded without embedding raw identities.
-        let mut hasher = Sha256::new();
-        for component in [&self.run, &self.logical] {
-            hasher.update((component.len() as u64).to_be_bytes());
-            hasher.update(component.as_bytes());
-        }
-        let digest = hasher.finalize();
-        let suffix: String = digest[..16]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let name = format!("pithos-app-{suffix}");
+        let name = app_host(&self.run, &self.logical);
         let mut argv = vec![
             "run".into(),
             "--name".into(),

@@ -3,6 +3,8 @@
 //! observations do not grant containers Docker authority or prove admission.
 
 // Offline plan only; no production launch path consumes it yet.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod api;
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod app;
 pub mod bootstrap;

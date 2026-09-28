@@ -70,6 +70,7 @@ impl Fixture {
             command: vec!["pi".into()],
             interactive_limits: InteractiveLimits::default(),
             browser: None,
+            stage_root: None,
         }
     }
 
@@ -402,4 +403,57 @@ fn wildcard_listener_is_rejected_before_home_or_credential_evidence() {
     assert!(BrokerEndpoint::offline(listener).is_err());
     assert!(!fixture.credential_path().exists());
     assert!(!Path::new(&fixture.root.path().join("leases")).exists());
+}
+
+fn app_status_request(runtime: &BrokerRuntime, token: &str) -> String {
+    let body = r#"{"app":"api"}"#;
+    format!(
+        "POST /v1/apps/status HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        runtime.advertised_authority(),
+        body.len()
+    )
+}
+
+#[test]
+fn app_routes_need_the_workspace_grant_and_a_ready_run() {
+    for (grant, expected) in [
+        (HostGrant::managed_pi_run(), "HTTP/1.1 403 Forbidden\r\n"),
+        // Before Pi is admitted there is no run network to put apps on.
+        (
+            HostGrant::workspace(),
+            "HTTP/1.1 503 Service Unavailable\r\n",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut runtime =
+            BrokerRuntime::begin(grant, offline_endpoint(listener), fixture.setup()).unwrap();
+        let mut client = connect(runtime.local_addr());
+        client
+            .write_all(app_status_request(&runtime, &fixture.token()).as_bytes())
+            .unwrap();
+        let response = String::from_utf8(read_until_closed(&mut client, &mut runtime)).unwrap();
+        assert!(response.starts_with(expected), "{response}");
+        // A wrong token is still refused before any grant decision.
+        let mut client = connect(runtime.local_addr());
+        client
+            .write_all(app_status_request(&runtime, &"0".repeat(64)).as_bytes())
+            .unwrap();
+        let response = String::from_utf8(read_until_closed(&mut client, &mut runtime)).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 401 Unauthorized"),
+            "{response}"
+        );
+        assert_eq!(
+            runtime.request_shutdown(ShutdownReason::Requested),
+            RuntimePoll::Complete
+        );
+        HomeLease::broker(
+            &fixture.root.path().join("leases"),
+            &VolumeName::new("pi-home").unwrap(),
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    }
 }

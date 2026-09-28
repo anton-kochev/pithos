@@ -238,7 +238,7 @@ struct Response {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Step {
+pub(super) enum Step {
     Pending,
     Blocked(Instant),
     Finished,
@@ -339,6 +339,11 @@ impl Protocol {
     }
 }
 
+/// The authorized 200 status response for `snapshot`.
+pub(super) fn status_response(snapshot: Snapshot) -> Vec<u8> {
+    response_bytes(Ok(()), snapshot)
+}
+
 fn response_bytes(decision: Result<(), Rejection>, snapshot: Snapshot) -> Vec<u8> {
     let (status, body) = match decision {
         Ok(()) => {
@@ -373,7 +378,7 @@ fn response_bytes(decision: Result<(), Rejection>, snapshot: Snapshot) -> Vec<u8
     ).into_bytes()
 }
 
-fn poll_write(
+pub(super) fn poll_write(
     writer: &mut impl Write,
     response: &[u8],
     position: &mut usize,
@@ -442,7 +447,7 @@ fn validate_limits(limits: Limits) -> Result<(), StatusError> {
 
 // Same narrow authority syntax as RunCredential's HTTP endpoint. Validation
 // proves syntax only, not ownership, routing, binding or secure transport.
-fn validate_host(authority: &str) -> Result<(), StatusError> {
+pub(super) fn validate_host(authority: &str) -> Result<(), StatusError> {
     let valid = || {
         if authority.len() > 57 {
             return None;
@@ -467,10 +472,10 @@ fn validate_host(authority: &str) -> Result<(), StatusError> {
     valid().ok_or(StatusError::InvalidHost)
 }
 
-struct CloseOnExit<S: Borrow<TcpStream>>(S);
+pub(super) struct CloseOnExit<S: Borrow<TcpStream>>(pub(super) S);
 
 impl<S: Borrow<TcpStream>> CloseOnExit<S> {
-    fn close(&self) {
+    pub(super) fn close(&self) {
         // Separate halves: after a peer FIN, macOS fails `Both` with ENOTCONN
         // and never sends our FIN, leaving the client waiting for EOF.
         let _ = self.0.borrow().shutdown(SocketShutdown::Write);
@@ -536,8 +541,16 @@ fn parse_head(head: &[u8], token: &[u8], host: &str, max_fields: usize) -> Resul
     let candidate = authorization
         .and_then(|value| value.strip_prefix(" Bearer "))
         .ok_or(Rejection::Unauthorized)?;
-    if candidate.len() != 64 || !candidate.bytes().all(is_lower_hex) || token.len() != 64 {
+    if !bearer_matches(candidate, token) {
         return Err(Rejection::Unauthorized);
+    }
+    Ok(())
+}
+
+/// Whether a Bearer value is exactly the 64-hex run token.
+pub(super) fn bearer_matches(candidate: &str, token: &[u8]) -> bool {
+    if candidate.len() != 64 || !candidate.bytes().all(is_lower_hex) || token.len() != 64 {
+        return false;
     }
     // Fixed 64-byte work with no mismatch-dependent exit. black_box discourages
     // replacement with an early-exit equality; this is not a formal compiler or
@@ -546,17 +559,14 @@ fn parse_head(head: &[u8], token: &[u8], host: &str, max_fields: usize) -> Resul
     for (&candidate_byte, &expected_byte) in candidate.as_bytes().iter().zip(token) {
         difference |= std::hint::black_box(candidate_byte ^ expected_byte);
     }
-    if std::hint::black_box(difference) != 0 {
-        return Err(Rejection::Unauthorized);
-    }
-    Ok(())
+    std::hint::black_box(difference) == 0
 }
 
 fn is_lower_hex(b: u8) -> bool {
     b.is_ascii_digit() || matches!(b, b'a'..=b'f')
 }
 
-fn is_field_name_byte(b: u8) -> bool {
+pub(super) fn is_field_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 

@@ -330,3 +330,42 @@ fn verify_labelled(
     }
     Ok(())
 }
+
+const APP_INSPECT: &str = r#"{"id":{{json .Id}},"volumes":{{json (index .Config "Volumes")}},"labels":{{json (index .Config "Labels")}}}"#;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AppCandidate {
+    id: String,
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    volumes: Option<BTreeMap<String, serde_json::Value>>,
+    #[serde(deserialize_with = "unique_labels")]
+    labels: Option<BTreeMap<String, String>>,
+}
+
+/// A project app image built for this run and app, without `VOLUME`s (Docker
+/// would create anonymous volumes for them on every run).
+pub(crate) fn verify_app(
+    docker: &mut ManagedDocker,
+    id: &ImmutableImageId,
+    run: &str,
+    app: &str,
+) -> Result<(), PreflightError> {
+    let bytes = docker.query(&["image", "inspect", "--format", APP_INSPECT, id.as_str()])?;
+    let info: AppCandidate =
+        serde_json::from_slice(&bytes).map_err(|_| PreflightError::InvalidResponse)?;
+    if info.id != id.as_str() {
+        return Err(PreflightError::Changed);
+    }
+    let labels = info.labels.unwrap_or_default();
+    if labels.get("io.pithos.broker.app.run").map(String::as_str) != Some(run)
+        || labels
+            .get("io.pithos.broker.app.logical")
+            .map(String::as_str)
+            != Some(app)
+        || info.volumes.is_some_and(|volumes| !volumes.is_empty())
+    {
+        return Err(PreflightError::Unsupported);
+    }
+    Ok(())
+}

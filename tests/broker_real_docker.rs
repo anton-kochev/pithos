@@ -55,6 +55,43 @@ pithos-browser goto http://pithos-app:3000
 pithos-browser snapshot
 "#;
 
+// Run inside the managed Pi container: drive a workspace app entirely through
+// the broker routes, then reach it from Pi over the run network.
+const APPS_PROBE: &str = r#"
+import json, urllib.request as u, urllib.error as e
+c = json.load(open('/run/pithos-broker/client.json'))
+def call(op, body):
+    req = u.Request(c['endpoint'] + '/v1/apps/' + op, data=json.dumps(body).encode(),
+                    headers={'Authorization': 'Bearer ' + c['token'], 'Content-Type': 'application/json'})
+    try:
+        r = u.urlopen(req, timeout=600)
+        return r.status, json.loads(r.read())
+    except e.HTTPError as err:
+        return err.code, json.loads(err.read())
+code, body = call('build', {'request_id': 'b1', 'app': 'web', 'dockerfile': 'app/Dockerfile', 'context': 'app'})
+print('build', code, body.get('error', 'ok'))
+code, body = call('run', {'request_id': 'r1', 'app': 'web'})
+print('run', code, body.get('error', 'ok'), body.get('detail', ''))
+host = body.get('host')
+# "running" is not "listening": HTTP readiness is the caller's job.
+import time
+for attempt in range(50):
+    try:
+        page = u.urlopen('http://%s:8080/' % host, timeout=10).read().decode()
+        break
+    except OSError:
+        time.sleep(0.2)
+print('page', page.strip())
+code, body = call('logs', {'app': 'web', 'tail': 20})
+print('logs', code, 'GET /' in body.get('text', ''))
+code, body = call('run', {'request_id': 'r2', 'app': 'web'})
+print('second run', code, body.get('error'))
+code, body = call('stop', {'request_id': 's1', 'app': 'web'})
+print('stop', code, body.get('stopped'))
+code, body = call('status', {'app': 'web'})
+print('status', code, body.get('running'), body.get('stopped'))
+"#;
+
 fn opted_in() -> bool {
     std::env::var("PITHOS_BROKER_DOCKER_TEST").as_deref() == Ok("1")
 }
@@ -124,7 +161,9 @@ fn broker_child() {
     let Ok(result_path) = std::env::var("PITHOS_BROKER_CHILD") else {
         return;
     };
-    let browser = std::env::var("PITHOS_BROKER_CHILD_MODE").as_deref() == Ok("browser");
+    let mode = std::env::var("PITHOS_BROKER_CHILD_MODE").unwrap_or_default();
+    let browser = mode == "browser";
+    let apps = mode == "apps";
     // Default config (project-stored sessions), plus the sidecar when asked.
     let config: &[u8] = if browser {
         b"toolchains: {}\nbrowser: {enabled: true}\n"
@@ -132,6 +171,16 @@ fn broker_child() {
         b"toolchains: {}\n"
     };
     let (_parent, workspace, pithos) = project(config);
+    if apps {
+        let app = workspace.join("app");
+        fs::create_dir(&app).unwrap();
+        fs::write(
+            app.join("Dockerfile"),
+            "FROM python:3.12-alpine\nWORKDIR /srv\nCOPY index.html .\nCMD [\"python3\", \"-m\", \"http.server\", \"8080\"]\n",
+        )
+        .unwrap();
+        fs::write(app.join("index.html"), "hello from app\n").unwrap();
+    }
     let inputs = HostInputs::prepare(HostGrant::workspace(), workspace, pithos).unwrap();
     let mut coordinator = match inputs.start(HostGrant::workspace()) {
         Ok(coordinator) => coordinator,
@@ -157,7 +206,7 @@ fn broker_child() {
     let probe: Arc<Mutex<Option<String>>> = Arc::default();
     let sink = probe.clone();
     std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(if apps { 900 } else { 60 });
         let result = loop {
             let running = docker(&[
                 "ps",
@@ -172,6 +221,9 @@ fn broker_child() {
                 let mut probes = vec![vec!["python3", "-c", PROBE]];
                 if browser {
                     probes.push(vec!["bash", "-c", BROWSER_PROBE]);
+                }
+                if apps {
+                    probes.push(vec!["python3", "-c", APPS_PROBE]);
                 }
                 for probe in probes {
                     let output = Command::new("docker")
@@ -192,7 +244,7 @@ fn broker_child() {
         };
         *sink.lock().unwrap() = Some(result);
     });
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(if apps { 900 } else { 120 });
     let outcome = loop {
         match coordinator.poll() {
             Ok(RuntimePoll::Running) => {}
@@ -380,6 +432,37 @@ fn docker_desktop_pi_drives_chromium_on_the_run_network() {
         "{result}"
     );
     assert!(result.contains("settled Complete"), "{result}");
+    assert!(managed_containers().is_empty(), "container left behind");
+    assert!(managed_networks().is_empty(), "network left behind");
+}
+
+#[test]
+#[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
+fn docker_desktop_pi_builds_runs_reaches_and_stops_a_workspace_app() {
+    assert!(
+        opted_in(),
+        "explicit real-Docker acceptance opt-in required"
+    );
+    assert!(
+        managed_containers().is_empty() && managed_networks().is_empty(),
+        "stale managed resources present; refusing to run"
+    );
+    let _home = HomeVolume::absent();
+    let scratch = tempfile::tempdir().unwrap();
+    let result = run_child_in_pty(&scratch.path().join("result"), "apps");
+    eprintln!("{result}");
+    for expected in [
+        "build 200 ok",
+        "run 200 ok ",
+        "page hello from app",
+        "logs 200 True",
+        "second run 409 already_running",
+        "stop 200 True",
+        "status 200 False True",
+        "settled Complete",
+    ] {
+        assert!(result.contains(expected), "missing {expected:?}\n{result}");
+    }
     assert!(managed_containers().is_empty(), "container left behind");
     assert!(managed_networks().is_empty(), "network left behind");
 }

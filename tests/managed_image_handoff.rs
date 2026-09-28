@@ -109,6 +109,7 @@ else:
             command: vec!["pi".into()],
             interactive_limits: InteractiveLimits::default(),
             browser: None,
+            stage_root: None,
         }
     }
     fn endpoint(&self) -> BrokerEndpoint {
