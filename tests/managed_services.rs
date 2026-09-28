@@ -647,3 +647,53 @@ fn tampered_app_is_quarantined_never_removed() {
     assert!(docker.reconcile_resources(&mut manifest).is_err());
     assert!(!f.mutations().contains(&"container rm".to_string()));
 }
+
+/// Fake-boundary end-to-end for the browser-tests-an-app flow: Chromium and
+/// the app share one run network, only the loopback viewer is published, and
+/// cleanup removes both containers before that network.
+#[test]
+fn app_and_sidecar_share_the_run_network_and_only_the_viewer_is_published() {
+    let f = Fixture::new();
+    let mut docker = f.docker();
+    let mut manifest = f.manifest();
+    let network = docker
+        .create_run_network(&mut manifest, "network-1")
+        .unwrap();
+    let (image, server, seccomp, viewer) = f.inputs(true);
+    docker
+        .start_browser(
+            &mut manifest,
+            "browser-1",
+            &network,
+            BrowserInputs {
+                image: &image,
+                identity: identity(),
+                server: &server,
+                seccomp: &seccomp,
+                viewer,
+            },
+        )
+        .unwrap();
+    let host = run_app(&mut docker, &mut manifest, &network, "app-1").unwrap();
+    let runs: Vec<Vec<String>> = f.calls().into_iter().filter(|c| c[0] == "run").collect();
+    assert_eq!(runs.len(), 2);
+    let value = |args: &[String], flag: &str| -> Vec<String> {
+        args.windows(2)
+            .filter(|w| w[0] == flag)
+            .map(|w| w[1].clone())
+            .collect()
+    };
+    for args in &runs {
+        assert_eq!(value(args, "--network"), [network.name()]);
+    }
+    assert_eq!(value(&runs[0], "-p"), ["127.0.0.1::6080"]);
+    assert!(value(&runs[1], "-p").is_empty() && value(&runs[1], "--publish").is_empty());
+    assert_eq!(value(&runs[1], "--network-alias"), [host]);
+    assert_eq!(f.live(), 3);
+    docker.reconcile_resources(&mut manifest).unwrap();
+    assert!(manifest.is_settled());
+    assert_eq!(f.live(), 0);
+    let mutations = f.mutations();
+    assert_eq!(mutations.last().map(String::as_str), Some("network rm"));
+    assert_eq!(mutations.iter().filter(|m| *m == "container rm").count(), 2);
+}

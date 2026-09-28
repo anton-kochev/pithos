@@ -88,6 +88,134 @@ console.log('status', await call('pithos_app_status', 'c6', { app: 'web' }));
 /// start while another's managed resources exist: run them one at a time.
 static SERIAL: Mutex<()> = Mutex::new(());
 
+/// A minimal ASP.NET Core app, built by the broker from `src/Api/Dockerfile`.
+const DOTNET_APP: [(&str, &str); 3] = [
+    (
+        "Api.csproj",
+        r#"<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+</Project>
+"#,
+    ),
+    (
+        "Program.cs",
+        r#"var app = WebApplication.Create(args);
+app.MapGet("/", () => Results.Content(
+    "<html><head><title>pithos dotnet</title></head><body><h1>hello from aspnet</h1></body></html>",
+    "text/html"));
+app.Run();
+"#,
+    ),
+    (
+        "Dockerfile",
+        "FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build\n\
+         WORKDIR /src\n\
+         COPY Api.csproj .\n\
+         RUN dotnet restore\n\
+         COPY Program.cs .\n\
+         RUN dotnet publish -c Release -o /out --no-restore\n\
+         FROM mcr.microsoft.com/dotnet/aspnet:8.0\n\
+         WORKDIR /app\n\
+         COPY --from=build /out .\n\
+         ENV ASPNETCORE_HTTP_PORTS=8080 DOTNET_EnableDiagnostics=0\n\
+         ENTRYPOINT [\"dotnet\", \"Api.dll\"]\n",
+    ),
+];
+
+// In Pi, through the mounted extension: build and run the .NET app, then
+// retry HTTP until Kestrel listens ("running" is not "listening").
+const DOTNET_UP: &str = r#"
+const ext = (await import('/run/pithos-broker/extension.mjs')).default;
+const tools = new Map();
+ext({ registerTool: (t) => tools.set(t.name, t) });
+const call = async (name, id, params) => {
+  try { return (await tools.get(name).execute(id, params, undefined, () => {}, {})).content[0].text; }
+  catch (e) { return 'ERROR ' + e.message; }
+};
+console.log('build', await call('pithos_app_build', 'd1', { app: 'api', dockerfile: 'src/Api/Dockerfile', context: 'src/Api' }));
+const run = await call('pithos_app_run', 'd2', { app: 'api' });
+console.log('run', run);
+const host = run.match(/host (pithos-app-[0-9a-f]{32})/)?.[1];
+let page = '';
+for (let i = 0; i < 150 && host && !page; i++) {
+  try { page = await (await fetch(`http://${host}:8080/`)).text(); } catch { await new Promise(r => setTimeout(r, 200)); }
+}
+console.log('host', host);
+console.log('ready', page.includes('hello from aspnet'));
+"#;
+
+// In Pi: Chromium in the sidecar opens the app by its generated host name.
+const DOTNET_BROWSE: &str = r#"
+set -e
+pithos-browser open
+pithos-browser goto "http://$1:8080/"
+pithos-browser snapshot
+pithos-browser screenshot --filename=dotnet.png
+head -c 8 /tmp/pithos-browser/artifacts/dotnet.png | od -An -tx1 | tr -d ' 
+'; echo ' png-magic'
+"#;
+
+const DOTNET_DOWN: &str = r#"
+const ext = (await import('/run/pithos-broker/extension.mjs')).default;
+const tools = new Map();
+ext({ registerTool: (t) => tools.set(t.name, t) });
+const call = async (name, id, params) => {
+  try { return (await tools.get(name).execute(id, params, undefined, () => {}, {})).content[0].text; }
+  catch (e) { return 'ERROR ' + e.message; }
+};
+console.log('logs', (await call('pithos_app_logs', 'd3', { app: 'api', tail: 50 })).includes('Now listening on'));
+console.log('stop', await call('pithos_app_stop', 'd4', { app: 'api' }));
+console.log('status', await call('pithos_app_status', 'd5', { app: 'api' }));
+"#;
+
+fn exec_in(id: &str, args: &[&str]) -> String {
+    let output = Command::new("docker")
+        .arg("exec")
+        .arg(id)
+        .args(args)
+        .output()
+        .unwrap();
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// The .NET flow from inside Pi, plus a host-side check that no managed
+/// container publishes a port other than the sidecar's loopback viewer.
+fn dotnet_probe(pi: &str) -> String {
+    let mut result = exec_in(pi, &["node", "--input-type=module", "-e", DOTNET_UP]);
+    let host = result
+        .lines()
+        .find_map(|l| l.strip_prefix("host pithos-app-"))
+        .map(|hash| format!("pithos-app-{hash}"));
+    for id in docker(&["ps", "-q", "--filter", "label=io.pithos.probe.run"]).lines() {
+        result.push_str(&docker(&[
+            "inspect",
+            "--format",
+            r#"ports {{index .Config.Labels "io.pithos.probe.request"}} {{json .HostConfig.PortBindings}}"#,
+            id,
+        ]));
+    }
+    if let Some(host) = host {
+        result.push_str(&exec_in(
+            pi,
+            &["bash", "-c", DOTNET_BROWSE, "browse", &host],
+        ));
+    }
+    result.push_str(&exec_in(
+        pi,
+        &["node", "--input-type=module", "-e", DOTNET_DOWN],
+    ));
+    result
+}
+
 fn opted_in() -> bool {
     std::env::var("PITHOS_BROKER_DOCKER_TEST").as_deref() == Ok("1")
 }
@@ -160,8 +288,9 @@ fn broker_child() {
     let mode = std::env::var("PITHOS_BROKER_CHILD_MODE").unwrap_or_default();
     let browser = mode == "browser";
     let apps = mode == "apps";
+    let dotnet = mode == "dotnet";
     // Default config (project-stored sessions), plus the sidecar when asked.
-    let config: &[u8] = if browser {
+    let config: &[u8] = if browser || dotnet {
         b"toolchains: {}\nbrowser: {enabled: true}\n"
     } else {
         b"toolchains: {}\n"
@@ -176,6 +305,13 @@ fn broker_child() {
         )
         .unwrap();
         fs::write(app.join("index.html"), "hello from app\n").unwrap();
+    }
+    if dotnet {
+        let api = workspace.join("src/Api");
+        fs::create_dir_all(&api).unwrap();
+        for (name, content) in DOTNET_APP {
+            fs::write(api.join(name), content).unwrap();
+        }
     }
     let inputs = HostInputs::prepare(HostGrant::workspace(), workspace, pithos).unwrap();
     let mut coordinator = match inputs.start(HostGrant::workspace()) {
@@ -202,7 +338,7 @@ fn broker_child() {
     let probe: Arc<Mutex<Option<String>>> = Arc::default();
     let sink = probe.clone();
     std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(if apps { 900 } else { 60 });
+        let deadline = Instant::now() + Duration::from_secs(if apps || dotnet { 900 } else { 60 });
         let result = loop {
             let running = docker(&[
                 "ps",
@@ -221,6 +357,9 @@ fn broker_child() {
                 if apps {
                     probes.push(vec!["node", "--input-type=module", "-e", APPS_PROBE]);
                 }
+                if dotnet {
+                    probes.clear();
+                }
                 for probe in probes {
                     let output = Command::new("docker")
                         .arg("exec")
@@ -231,6 +370,9 @@ fn broker_child() {
                     result.push_str(&String::from_utf8_lossy(&output.stdout));
                     result.push_str(&String::from_utf8_lossy(&output.stderr));
                 }
+                if dotnet {
+                    result.push_str(&dotnet_probe(id));
+                }
                 break result;
             }
             if Instant::now() > deadline {
@@ -240,7 +382,7 @@ fn broker_child() {
         };
         *sink.lock().unwrap() = Some(result);
     });
-    let deadline = Instant::now() + Duration::from_secs(if apps { 900 } else { 120 });
+    let deadline = Instant::now() + Duration::from_secs(if apps || dotnet { 900 } else { 120 });
     let outcome = loop {
         match coordinator.poll() {
             Ok(RuntimePoll::Running) => {}
@@ -602,4 +744,53 @@ fn strip_ansi(bytes: &[u8]) -> Vec<u8> {
         i += 1;
     }
     out
+}
+
+#[test]
+#[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
+fn docker_desktop_pi_builds_a_dotnet_app_and_chromium_browses_it() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        opted_in(),
+        "explicit real-Docker acceptance opt-in required"
+    );
+    assert!(
+        managed_containers().is_empty() && managed_networks().is_empty(),
+        "stale managed resources present; refusing to run"
+    );
+    let _home = HomeVolume::absent();
+    let scratch = tempfile::tempdir().unwrap();
+    let result = run_child_in_pty(&scratch.path().join("result"), "dotnet");
+    eprintln!("{result}");
+    for expected in [
+        "build Built api",
+        "run api is running at host pithos-app-",
+        "ready true",
+        "hello from aspnet",
+        "89504e470d0a1a0a png-magic",
+        "logs true",
+        "stop api stopped.",
+        "status api: stopped",
+        "settled Complete",
+    ] {
+        assert!(result.contains(expected), "missing {expected:?}\n{result}");
+    }
+    // Only the sidecar publishes, and only its loopback viewer.
+    let ports: Vec<&str> = result.lines().filter(|l| l.starts_with("ports ")).collect();
+    assert!(
+        ports.iter().any(|l| l.starts_with("ports app-")),
+        "{result}"
+    );
+    for line in &ports {
+        if line.starts_with("ports app-") || line.starts_with("ports runtime-pi") {
+            assert!(line.ends_with("{}") || line.ends_with("null"), "{line}");
+        } else {
+            assert!(
+                !line.contains("0.0.0.0") && !line.contains("\"HostIp\":\"\""),
+                "{line}"
+            );
+        }
+    }
+    assert!(managed_containers().is_empty(), "container left behind");
+    assert!(managed_networks().is_empty(), "network left behind");
 }
