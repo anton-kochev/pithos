@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use saphyr::YamlOwned;
 
+use pithos::broker::grant::{Action, HostGrant};
 use pithos::output::{Style, narrate};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -49,6 +50,10 @@ enum RunTarget {
 // Short usage line for fail-fast reject paths. `pithos help` prints the full usage.
 const USAGE: &str = "usage: pithos [run | build | info | sessions | clean | rebuild-base | help | version] [options]";
 
+// Never reflect a broker flag's untrusted value in host usage diagnostics.
+const BROKER_USAGE: &str =
+    "--broker requires exactly one --broker=status or --broker=workspace in the run option prefix";
+
 // Content written when the user accepts the prompt to create a missing `.pithos`.
 // Mirrors the example in the prompt narration; validates cleanly through `pithos::config::load`.
 const MINIMAL_PITHOS: &str = "toolchains: {}\n";
@@ -62,6 +67,7 @@ enum Subcommand {
         mode: RunMode,
         target: RunTarget,
         tmux: bool,
+        grant: Option<HostGrant>,
     },
     Info,
     SessionsMigrate {
@@ -186,6 +192,7 @@ impl Subcommand {
         let mut mode = RunMode::Default;
         let mut target = RunTarget::Pi(Vec::new());
         let mut tmux = false;
+        let mut grant = None;
         let mut i = 0;
         while i < rest.len() {
             match rest[i].as_str() {
@@ -196,6 +203,14 @@ impl Subcommand {
                 "--" => {
                     target = RunTarget::Command(rest[i + 1..].to_vec());
                     break;
+                }
+                "--broker=status" if grant.is_none() => grant = Some(HostGrant::status_only()),
+                "--broker=workspace" if grant.is_none() => grant = Some(HostGrant::workspace()),
+                s if s == "--broker" || s.starts_with("--broker=") => {
+                    return Self::Reject {
+                        kind: RejectKind::Usage,
+                        value: BROKER_USAGE.into(),
+                    };
                 }
                 "--tmux" => tmux = true,
                 "--rebuild" => match mode {
@@ -227,7 +242,12 @@ impl Subcommand {
             }
             i += 1;
         }
-        Self::Run { mode, target, tmux }
+        Self::Run {
+            mode,
+            target,
+            tmux,
+            grant,
+        }
     }
 
     fn requires_daemon(&self) -> bool {
@@ -247,20 +267,37 @@ impl Subcommand {
 }
 
 fn main() -> ExitCode {
+    let args: Vec<String> = env::args().collect();
+    let subcommand = Subcommand::from_args(&args);
+    // Host approval is not release readiness. Keep this unconditional gate
+    // ahead of signal handlers and every launch-side discovery or resource.
+    if let Subcommand::Run {
+        grant: Some(grant), ..
+    } = &subcommand
+    {
+        if grant.permits(Action::Build) {
+            eprintln!(
+                "pithos: broker workspace is not ready: workspace build, Compose, exec, and lifecycle integration are not verified; no broker was started"
+            );
+        } else {
+            eprintln!(
+                "pithos: broker status is not ready: host admission, secure transport, and unified shutdown are not verified; no broker was started"
+            );
+        }
+        return ExitCode::from(1);
+    }
     if pithos::browser::install_signal_handlers().is_err() {
         eprintln!("pithos: cannot install signal cleanup handlers");
         return ExitCode::from(1);
     }
-    let result = launch();
+    let result = launch(subcommand);
     pithos::browser::signal_exit()
         .map(ExitCode::from)
         .unwrap_or(result)
 }
 
-fn launch() -> ExitCode {
+fn launch(subcommand: Subcommand) -> ExitCode {
     let style = Style::detect();
-    let args: Vec<String> = env::args().collect();
-    let subcommand = Subcommand::from_args(&args);
 
     // Fail fast on parser rejections before any I/O — typos like `pithos buidl`
     // or `pithos build --nope` shouldn't require a `.pithos` file or mutate
@@ -369,7 +406,9 @@ fn launch() -> ExitCode {
     };
     match subcommand {
         Subcommand::Build { rebuild } => run_build(inputs, rebuild, style),
-        Subcommand::Run { mode, target, tmux } => run_run(inputs, mode, &target, tmux, style),
+        Subcommand::Run {
+            mode, target, tmux, ..
+        } => run_run(inputs, mode, &target, tmux, style),
         Subcommand::Info => run_info(&cwd, &yaml, &pithos_bytes, &dockerfile_content, style),
         Subcommand::SessionsMigrate { merge } => match pithos::sessions::migrate(&cwd, merge) {
             Ok(()) => ExitCode::SUCCESS,
@@ -526,6 +565,11 @@ fn help_text() -> String {
          \n\
          Options:\n  \
            run:    --rebuild, --no-build, --tmux, --pi <args...>, -- <cmd...>\n  \
+                   --broker=status (recognized but unavailable)\n    \
+                   --broker=workspace (recognized but unavailable)\n    \
+                     Both always refuse before launch; no broker service is started.\n    \
+                     Status host admission, secure transport, and unified shutdown remain unverified.\n    \
+                     Workspace build, Compose, exec, and lifecycle integration remain unverified.\n  \
            build:  --rebuild\n\
          \n\
          Pi arguments:\n  \
@@ -1632,6 +1676,188 @@ mod tests {
     }
 
     #[test]
+    fn broker_prefix_rejects_malformed_flags_without_echoing_values() {
+        for flag in [
+            "--broker",
+            "--broker=",
+            "--broker=unsupported-secret-canary",
+            "--broker=STATUS",
+            "--broker=status,exec",
+            "--broker=status\nsecret-canary",
+            "--broker=WORKSPACE",
+            "--broker=workspace,exec",
+            "--broker=workspace\nsecret-canary",
+        ] {
+            assert_eq!(
+                Subcommand::from_args(&args(&["pithos", "run", flag])),
+                Subcommand::Reject {
+                    kind: RejectKind::Usage,
+                    value: BROKER_USAGE.into(),
+                },
+                "malformed flag must not be forwarded"
+            );
+        }
+    }
+
+    #[test]
+    fn broker_prefix_rejects_duplicate_flags() {
+        for rest in [
+            vec!["--broker=status", "--broker=status"],
+            vec!["--broker=status", "--tmux", "--broker=status"],
+            vec!["--broker=status", "--broker=secret-canary"],
+            vec!["--broker=status", "--broker"],
+            vec!["--broker=workspace", "--broker=workspace"],
+            vec!["--broker=workspace", "--tmux", "--broker=status"],
+            vec!["--broker=status", "--broker=workspace"],
+            vec!["--broker=workspace", "--broker=secret-canary"],
+            vec!["--broker=workspace", "--broker"],
+        ] {
+            assert_eq!(
+                Subcommand::parse_run(&args(&rest)),
+                Subcommand::Reject {
+                    kind: RejectKind::Usage,
+                    value: BROKER_USAGE.into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn broker_prefix_supports_implicit_run_and_existing_options() {
+        for argv in [
+            vec!["pithos", "--broker=status", "--tmux", "--no-build"],
+            vec!["pithos", "run", "--no-build", "--tmux", "--broker=status"],
+        ] {
+            assert_eq!(
+                Subcommand::from_args(&args(&argv)),
+                Subcommand::Run {
+                    mode: RunMode::NoBuild,
+                    target: RunTarget::Pi(vec![]),
+                    tmux: true,
+                    grant: Some(HostGrant::status_only()),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn broker_flags_in_opaque_tails_never_grant_or_reject() {
+        let tail = args(&[
+            "--broker=workspace",
+            "--broker=status",
+            "--broker=status",
+            "--broker=unsupported",
+            "--broker",
+            "--tmux",
+            "space and newline\ncanary",
+        ]);
+        for (boundary, is_pi, keep_boundary) in [
+            ("--pi", true, false),
+            ("--", false, false),
+            ("--unknown-extension", true, true),
+            ("--brokerish=status", true, true),
+            ("bash", false, true),
+        ] {
+            let mut argv = args(&["pithos", "run", boundary]);
+            argv.extend(tail.iter().cloned());
+            let mut expected = Vec::new();
+            if keep_boundary {
+                expected.push(boundary.to_string());
+            }
+            expected.extend(tail.iter().cloned());
+            assert_eq!(
+                Subcommand::from_args(&argv),
+                Subcommand::Run {
+                    mode: RunMode::Default,
+                    target: if is_pi {
+                        RunTarget::Pi(expected)
+                    } else {
+                        RunTarget::Command(expected)
+                    },
+                    tmux: false,
+                    grant: None,
+                },
+                "host parsing crossed {boundary}"
+            );
+        }
+    }
+
+    #[test]
+    fn broker_grant_is_absent_by_default() {
+        for argv in [
+            vec!["pithos"],
+            vec!["pithos", "run"],
+            vec!["pithos", "--tmux", "--rebuild"],
+        ] {
+            assert!(matches!(
+                Subcommand::from_args(&args(&argv)),
+                Subcommand::Run { grant: None, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn broker_flag_remains_rejected_by_other_subcommands() {
+        for command in [
+            vec!["build"],
+            vec!["help"],
+            vec!["version"],
+            vec!["info"],
+            vec!["clean"],
+            vec!["rebuild-base"],
+            vec!["sessions", "migrate"],
+        ] {
+            let mut argv = args(&["pithos"]);
+            argv.extend(args(&command));
+            argv.push("--broker=status".into());
+            assert_eq!(
+                Subcommand::from_args(&argv),
+                Subcommand::Reject {
+                    kind: RejectKind::Flag,
+                    value: "--broker=status".into(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn broker_prefix_grants_status() {
+        assert_eq!(
+            Subcommand::from_args(&args(&["pithos", "run", "--broker=status"])),
+            Subcommand::Run {
+                mode: RunMode::Default,
+                target: RunTarget::Pi(vec![]),
+                tmux: false,
+                grant: Some(HostGrant::status_only()),
+            }
+        );
+    }
+
+    #[test]
+    fn broker_prefix_grants_workspace_with_implicit_or_explicit_run() {
+        for argv in [
+            vec!["pithos", "--broker=workspace", "--tmux", "--no-build"],
+            vec![
+                "pithos",
+                "run",
+                "--no-build",
+                "--tmux",
+                "--broker=workspace",
+            ],
+        ] {
+            assert_eq!(
+                Subcommand::from_args(&args(&argv)),
+                Subcommand::Run {
+                    mode: RunMode::NoBuild,
+                    target: RunTarget::Pi(vec![]),
+                    tmux: true,
+                    grant: Some(HostGrant::workspace()),
+                }
+            );
+        }
+    }
+
+    #[test]
     fn from_args_build_without_flag() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "build"])),
@@ -1664,6 +1890,7 @@ mod tests {
             Subcommand::from_args(&args(&["pithos"])),
             Subcommand::Run {
                 mode: RunMode::Default,
+                grant: None,
                 target: RunTarget::Pi(vec![]),
                 tmux: false,
             }
@@ -1687,6 +1914,7 @@ mod tests {
             Subcommand::from_args(&args(&["pithos", "run", "--tmux", "--rebuild"])),
             Subcommand::Run {
                 mode: RunMode::Rebuild,
+                grant: None,
                 target: RunTarget::Pi(vec![]),
                 tmux: true,
             }
@@ -1720,6 +1948,7 @@ mod tests {
                     "01a0335e".to_string(),
                     "Continue from here".to_string(),
                 ]),
+                grant: None,
                 tmux: false,
             }
         );
@@ -1749,6 +1978,7 @@ mod tests {
                     "-p".to_string(),
                     "Review this".to_string(),
                 ]),
+                grant: None,
                 tmux: false,
             }
         );
@@ -1760,6 +1990,7 @@ mod tests {
             Subcommand::from_args(&args(&["pithos", "--plan", "carefully"])),
             Subcommand::Run {
                 mode: RunMode::Default,
+                grant: None,
                 target: RunTarget::Pi(vec!["--plan".to_string(), "carefully".to_string()]),
                 tmux: false,
             }
@@ -1778,6 +2009,7 @@ mod tests {
             ])),
             Subcommand::Run {
                 mode: RunMode::NoBuild,
+                grant: None,
                 target: RunTarget::Pi(vec!["--session".to_string(), "01a0335e".to_string(),]),
                 tmux: true,
             }
@@ -1802,6 +2034,7 @@ mod tests {
                     "--rebuild".to_string(),
                     "--tmux".to_string(),
                 ]),
+                grant: None,
                 tmux: false,
             }
         );
@@ -1813,6 +2046,7 @@ mod tests {
             Subcommand::from_args(&args(&["pithos", "--pi", "Review this repository"])),
             Subcommand::Run {
                 mode: RunMode::Default,
+                grant: None,
                 target: RunTarget::Pi(vec!["Review this repository".to_string()]),
                 tmux: false,
             }
@@ -1825,6 +2059,7 @@ mod tests {
             Subcommand::from_args(&args(&["pithos", "--pi", "--", "- bullet point"])),
             Subcommand::Run {
                 mode: RunMode::Default,
+                grant: None,
                 target: RunTarget::Pi(vec!["--".to_string(), "- bullet point".to_string()]),
                 tmux: false,
             }
@@ -1837,6 +2072,7 @@ mod tests {
             Subcommand::from_args(&args(&["pithos", "--pi", "--tmux", "--rebuild"])),
             Subcommand::Run {
                 mode: RunMode::Default,
+                grant: None,
                 target: RunTarget::Pi(vec!["--tmux".to_string(), "--rebuild".to_string(),]),
                 tmux: false,
             }
@@ -1854,6 +2090,7 @@ mod tests {
                     "-lc".to_string(),
                     "echo hi".to_string(),
                 ]),
+                grant: None,
                 tmux: false,
             }
         );
@@ -1865,6 +2102,7 @@ mod tests {
             Subcommand::from_args(&args(&["pithos", "run", "--tmux", "--", "bash"])),
             Subcommand::Run {
                 mode: RunMode::Default,
+                grant: None,
                 target: RunTarget::Command(vec!["bash".to_string()]),
                 tmux: true,
             }
@@ -1882,6 +2120,7 @@ mod tests {
                     "--".to_string(),
                     "- bullet point".to_string(),
                 ]),
+                grant: None,
                 tmux: false,
             }
         );
@@ -1996,6 +2235,14 @@ mod tests {
         ] {
             assert!(t.contains(name), "help missing subcommand {name:?}: {t}");
         }
+    }
+
+    #[test]
+    fn help_text_marks_broker_status_recognized_but_unavailable() {
+        let text = help_text();
+        assert!(text.contains("--broker=status (recognized but unavailable)"));
+        assert!(text.contains("--broker=workspace (recognized but unavailable)"));
+        assert!(text.contains("Both always refuse before launch; no broker service is started."));
     }
 
     #[test]

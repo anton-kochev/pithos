@@ -508,6 +508,8 @@ impl BrowserRun {
         }
     }
     pub fn prepare_skill_mount(&self, image: &str, project: &str) -> io::Result<()> {
+        let home_use =
+            crate::docker::LegacyHomeUse::acquire_current(&format!("pithos-home-{project}"))?;
         self.run_helper(args(&[
             "run",
             "--rm",
@@ -522,7 +524,8 @@ impl BrowserRun {
             image,
             "-c",
             include_str!("prepare_skill.py"),
-        ]), "browser skill mount collision or permissions error at ~/.agents/skills/pithos-browser; user content was not replaced")
+        ]), "browser skill mount collision or permissions error at ~/.agents/skills/pithos-browser; user content was not replaced")?;
+        home_use.finish()
     }
     pub fn spawn_dev(&self, command: &mut Command) -> io::Result<Child> {
         let _operation = OPERATION.lock().unwrap();

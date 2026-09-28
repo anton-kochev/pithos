@@ -90,6 +90,51 @@ pub fn extract_to(context: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Opt-in browser Dockerfile with a late identity overlay. Runtime hardening and
+/// the legacy asset bundle are unchanged. This is not launch admission.
+pub fn dockerfile_with_identity(identity: crate::docker::HostIdentity) -> String {
+    let mut out = include_str!("../../browser/runtime/Dockerfile").to_owned();
+    out.push_str(&crate::docker::identity_overlay(
+        identity,
+        crate::docker::ImageRole::Browser,
+    ));
+    out
+}
+
+/// Materialize opt-in browser assets and helper in a caller-owned build context.
+/// Only this context's `browser/runtime/Dockerfile` receives the identity overlay.
+pub fn extract_with_identity_to(
+    context: &Path,
+    identity: crate::docker::HostIdentity,
+) -> io::Result<()> {
+    extract_to(context)?;
+    crate::embed::extract_identity_to(context)?;
+    fs::write(
+        context.join("browser/runtime/Dockerfile"),
+        dockerfile_with_identity(identity),
+    )
+}
+
+/// Identity-specific browser cache material, including the legacy assets,
+/// generated Dockerfile (role/UID/GID) and exact build-helper bytes.
+pub fn fingerprint_with_identity(identity: crate::docker::HostIdentity) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"pithos-browser-identity-v1\0");
+    for bytes in [
+        fingerprint().as_bytes(),
+        dockerfile_with_identity(identity).as_bytes(),
+        crate::embed::IDENTITY_IMAGE_PY,
+    ] {
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

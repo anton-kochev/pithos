@@ -149,6 +149,18 @@ pub fn emit(yaml: &YamlOwned) -> String {
     out
 }
 
+/// Opt-in image-build overlay applied after all toolchain and Pi installation.
+/// Same validated-config precondition as [`emit`]. Pair with
+/// [`crate::embed::extract_with_identity_to`]. The legacy launch path remains unwired.
+pub fn emit_with_identity(yaml: &YamlOwned, identity: crate::docker::HostIdentity) -> String {
+    let mut out = emit(yaml);
+    out.push_str(&crate::docker::identity_overlay(
+        identity,
+        crate::docker::ImageRole::Pi,
+    ));
+    out
+}
+
 fn sorted_toolchains(yaml: &YamlOwned) -> BTreeMap<String, String> {
     // BTreeMap yields sort-by-key for free — determinism is structural.
     // All .expect() calls document the validation contract.

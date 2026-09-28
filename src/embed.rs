@@ -18,6 +18,9 @@ pub const ENTRYPOINT_SH: &[u8] = include_bytes!("../entrypoint.sh");
 /// shim changes.
 pub const PI_BUN_COMPAT_MJS: &[u8] = include_bytes!("../scripts/pi-bun-compat.mjs");
 
+/// Fixed build-only identity helper. Never invoke against a host or existing home.
+pub const IDENTITY_IMAGE_PY: &[u8] = include_bytes!("docker/identity_image.py");
+
 /// Materialize the docker build context into `dest`. Resulting tree:
 ///
 /// ```text
@@ -49,6 +52,20 @@ pub fn extract_to(dest: &Path) -> io::Result<()> {
         fs::create_dir_all(dest.join("pi-config").join(sub))?;
     }
     Ok(())
+}
+
+/// Extract only the fixed identity helper into a caller-owned build context.
+/// This never executes it and must not be used as a runtime home repair.
+pub fn extract_identity_to(dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    fs::write(dest.join("identity_image.py"), IDENTITY_IMAGE_PY)
+}
+
+/// Opt-in Pi build context; the legacy [`extract_to`] bundle is unchanged.
+/// As with [`extract_to`], `dest` must be a caller-owned build staging directory.
+pub fn extract_with_identity_to(dest: &Path) -> io::Result<()> {
+    extract_to(dest)?;
+    extract_identity_to(dest)
 }
 
 /// Installer content for the named toolchain, used by [`crate::fingerprint::compute`].

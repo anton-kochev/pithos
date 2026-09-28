@@ -36,7 +36,7 @@ pub struct RunRequest<'a> {
 /// Legacy convenience API (volume-backed sessions); use `run_request` for
 /// project-local session persistence.
 /// Spawn `docker run` with the flag set defined by FR-501, inheriting the
-/// caller's TTY. Blocks until the container exits; returns the exit status
+/// caller's TTY. Blocks until the Docker client exits; returns its exit status
 /// for the caller to translate into the launcher's exit code.
 ///
 /// `pithos_repo` is the host path whose `pi-config/` subtree gets
@@ -86,6 +86,11 @@ pub fn run(
 }
 
 /// Launch a project container from a grouped request.
+///
+/// Outstanding home-use evidence remains unless a bounded engine query proves
+/// the final container absent on an unchanged supported CLI selection. Detach,
+/// query/settlement failures and mutable named contexts retain evidence without
+/// changing the observed interactive exit status.
 pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, RunError> {
     let mut args = assemble_run_args(
         request.image_tag,
@@ -99,6 +104,9 @@ pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, 
     if let Some(root) = request.session_root {
         insert_session_mount(&mut args, root)?;
     }
+    let home_use =
+        super::LegacyHomeUse::acquire_current(&format!("pithos-home-{}", request.project))?;
+    let completion = HomeCompletion::capture();
     initialize_home(
         request.image_tag,
         request.project,
@@ -121,6 +129,7 @@ pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, 
         let mut next_check = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if let Some(status) = child.try_wait()? {
+                finish_home_use(home_use, status, &args, completion);
                 return Ok(status);
             }
             if std::time::Instant::now() >= next_check {
@@ -139,7 +148,238 @@ pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, 
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
-    Ok(command.status()?)
+    let status = command.status()?;
+    finish_home_use(home_use, status, &args, completion);
+    Ok(status)
+}
+
+fn finish_home_use(
+    home_use: super::LegacyHomeUse,
+    status: std::process::ExitStatus,
+    args: &[OsString],
+    completion: HomeCompletion,
+) {
+    // Detaching returns zero while the container still uses home. Even an
+    // ordinary application exit is insufficient without engine-confirmed absence.
+    // Docker errors, signals and unknown outcomes remain conservative debt.
+    if status.code().is_some_and(|code| (0..125).contains(&code))
+        && completion.absent(args)
+        && home_use.finish().is_ok()
+    {
+        return;
+    }
+    // Settlement failures must not replace the interactive exit status or expose
+    // untrusted daemon output. No marker or foreign resource is repaired/removed.
+    eprintln!("home use remains outstanding; explicit host recovery required");
+}
+
+struct HomeCompletion {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    selection: Option<home_completion::Selection>,
+}
+
+impl HomeCompletion {
+    fn capture() -> Self {
+        Self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            selection: home_completion::Selection::capture().ok(),
+        }
+    }
+
+    fn absent(self, args: &[OsString]) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.selection
+                .is_some_and(|selection| selection.absent(args))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = args;
+            false
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod home_completion {
+    use super::*;
+    use crate::lifecycle::{Limits, Outcome, Shutdown, ShutdownReason, Supervisor};
+    use sha2::{Digest, Sha256};
+    use std::{
+        collections::BTreeMap,
+        fs::{self, OpenOptions},
+        io::{self, Read},
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+        path::PathBuf,
+        sync::mpsc,
+        time::Duration,
+    };
+
+    // This is a conservative legacy selection check, NOT ManagedDocker's frozen
+    // executable/socket/config capability. Named contexts are mutable indirection
+    // and never authorize settlement here. Trusted stable CLI/config parents are
+    // required; fingerprints cannot rule out transient changes restored between
+    // observations, executable replacement, or daemon replacement at an endpoint.
+    #[derive(PartialEq, Eq)]
+    pub(super) struct Selection {
+        environment: BTreeMap<OsString, OsString>,
+        cwd: PathBuf,
+        config: Option<[u8; 32]>,
+    }
+
+    impl Selection {
+        pub(super) fn capture() -> io::Result<Self> {
+            let environment: BTreeMap<_, _> = std::env::vars_os().collect();
+            if environment
+                .get(std::ffi::OsStr::new("DOCKER_CONTEXT"))
+                .is_some_and(|context| !context.is_empty() && context != "default")
+            {
+                return Err(io::Error::other("mutable Docker context"));
+            }
+            let config_root = environment
+                .get(std::ffi::OsStr::new("DOCKER_CONFIG"))
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    environment
+                        .get(std::ffi::OsStr::new("HOME"))
+                        .map(|home| Path::new(home).join(".docker"))
+                })
+                .ok_or_else(|| io::Error::other("unknown Docker config"))?;
+            Ok(Self {
+                environment,
+                cwd: std::env::current_dir()?,
+                config: config_fingerprint(&config_root.join("config.json"))?,
+            })
+        }
+
+        pub(super) fn absent(self, args: &[OsString]) -> bool {
+            if Self::capture().as_ref().ok() != Some(&self) {
+                return false;
+            }
+            // Read the FINAL argv, after BrowserRun has replaced the generated
+            // project/PID name. Never derive a different name for reconciliation.
+            let Some(name) = args
+                .windows(2)
+                .find(|pair| pair[0] == "--name")
+                .and_then(|pair| pair[1].to_str())
+                .filter(|name| {
+                    !name.is_empty()
+                        && name.len() <= 255
+                        && name.as_bytes()[0].is_ascii_alphanumeric()
+                        && name
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                })
+            else {
+                return false;
+            };
+            let mut query = Command::new("docker");
+            query
+                .env_clear()
+                .envs(&self.environment)
+                .current_dir(&self.cwd)
+                .args(["container", "ls", "--all", "--no-trunc", "--filter"])
+                .arg(format!("name=^/{}$", name.replace('.', r"\.")))
+                .args(["--format", "{{.ID}}"]);
+            bounded_empty_query(query) && Self::capture().as_ref().ok() == Some(&self)
+        }
+    }
+
+    fn config_fingerprint(path: &Path) -> io::Result<Option<[u8; 32]>> {
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.len() > 64 * 1024 {
+            return Err(io::Error::other("unsupported Docker config"));
+        }
+        let mut bytes = Vec::new();
+        file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+        let config: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if bytes.len() > 64 * 1024
+            || !config.is_object()
+            || config.get("currentContext").is_some_and(|context| {
+                context
+                    .as_str()
+                    .is_none_or(|name| !name.is_empty() && name != "default")
+            })
+        {
+            return Err(io::Error::other("unsupported Docker context config"));
+        }
+        let mut hash = Sha256::new();
+        hash.update(&bytes);
+        // Include identity/change times: replacing an identical config is still
+        // unproven selection, not permission to clear a prior use's evidence.
+        for value in [meta.dev(), meta.ino()] {
+            hash.update(value.to_le_bytes());
+        }
+        for value in [
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+        ] {
+            hash.update(value.to_le_bytes());
+        }
+        hash.update(fs::canonicalize(path)?.as_os_str().as_encoded_bytes());
+        Ok(Some(hash.finalize().into()))
+    }
+
+    fn bounded_empty_query(mut command: Command) -> bool {
+        let shutdown = Shutdown::new();
+        let worker_shutdown = shutdown.clone();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        // One worker per completion check, no queue or global signal handler.
+        // It remains sole owner/reaper on an exceptional unresolved child, while
+        // the caller returns boundedly with debt. It never owns the home marker
+        // and therefore cannot clear it after the caller has returned.
+        let worker = std::thread::Builder::new()
+            .name("home-absence".into())
+            .spawn(move || {
+                let limits = Limits {
+                    runtime: Duration::from_secs(2),
+                    retained_bytes_per_stream: 4096,
+                    ..Limits::default()
+                };
+                let Ok(mut supervisor) = Supervisor::new(limits, worker_shutdown) else {
+                    let _ = sender.send(false);
+                    return;
+                };
+                let absent = supervisor.execute(&mut command).is_ok_and(|report| {
+                    matches!(report.outcome, Outcome::Exited(status) if status.success())
+                        && !report.signal_error
+                        && !report.wait_error
+                        && report.stdout.is_complete()
+                        && report.stdout.raw_bytes().is_empty()
+                        && report.stderr.is_complete()
+                        && report.stderr.raw_bytes().is_empty()
+                });
+                let _ = sender.send(absent);
+                // Also settle a setup error: execute may fail after spawning. No
+                // blocking wait, abandoned Child, or guessed absence on these paths.
+                while supervisor.is_in_flight() {
+                    let _ = supervisor.poll();
+                    std::thread::sleep(limits.poll_interval);
+                }
+            });
+        if worker.is_err() {
+            return false;
+        }
+        match receiver.recv_timeout(Duration::from_secs(5)) {
+            Ok(absent) => absent,
+            Err(_) => {
+                shutdown.request(ShutdownReason::Requested);
+                false
+            }
+        }
+    }
 }
 
 /// Docker creates missing nested bind-mount ancestors as root. Prepare them

@@ -1,3 +1,4 @@
+pub mod broker;
 pub mod browser;
 pub mod clipboard_bridge;
 pub mod config;
@@ -6,6 +7,7 @@ pub mod dockerfile;
 pub mod embed;
 pub mod extensions;
 pub mod fingerprint;
+pub mod lifecycle;
 pub mod output;
 pub mod project;
 pub mod sessions;
