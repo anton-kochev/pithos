@@ -180,8 +180,13 @@ elif a[0]=='run':
         else:
             assert '--network=bridge' in a and '--network' not in a
         assert opt('--workdir')=='/workspace'
-        assert len(mounts)==(5 if mode('browser') else 3)
+        # A workspace-grant coordinator also mounts the broker's Pi extension.
+        extension=mode('host-coordinator')
+        assert len(mounts)==3+(2 if mode('browser') else 0)+(1 if extension else 0)
         by={m['Destination']:m for m in mounts}
+        if extension:
+            assert by['/run/pithos-broker/extension.mjs']['Source']==str(root/'credential/pithos-broker.mjs')
+            assert not by['/run/pithos-broker/extension.mjs']['RW']
         if mode('browser'):
             assert by['/run/pithos-browser/client.json']['Source']==str(root/'browser-run/client.json')
             assert by['/run/pithos-browser/skills']['Source']==str(root/'browser-run/skills')
@@ -190,7 +195,8 @@ elif a[0]=='run':
         assert by['/home/pi']['Name']==home_volume() and by['/home/pi']['RW']
         assert by['/run/pithos-broker/client.json']['Source']==str(root/'credential/broker-client.json')
         assert not by['/run/pithos-broker/client.json']['RW']
-        assert not any(v in a for v in ['--privileged','--env','-e','--env-file','--volume','-v'])
+        # Docker's own flags only: everything after the image belongs to Pi.
+        assert not any(v in a[:a.index(__IMAGE__)] for v in ['--privileged','--env','-e','--env-file','--volume','-v'])
         access=r['spec']['operation']['host_access']
         gateway=(root/'gateway').read_text()
         expected_hosts=['host.docker.internal:'+gateway] if access=='linux-host-gateway' else []
@@ -199,7 +205,7 @@ elif a[0]=='run':
         assert all(i<a.index(__IMAGE__) for i in extra_host_indices)
         assert not any(k.startswith('DOCKER_') or k.startswith('PITHOS_') for k in os.environ)
         if mode('host-coordinator'): assert (set(os.environ) - set(('__CF_USER_TEXT_ENCODING','SDKROOT','CPATH','LIBRARY_PATH','MANPATH'))).issubset({'LC_CTYPE'})
-        assert cmd==(__PI_LAUNCH_ARGV__ if mode('host-coordinator') else ['pi','private-host-prompt'] if mode('explicit') else ['pi','--skill','/run/pithos-browser/skills/browser-automation'] if mode('browser') else ['pi','--session-dir','/home/pi/.pi/agent/sessions'])
+        assert cmd==(__PI_LAUNCH_ARGV__+['--extension','/run/pithos-broker/extension.mjs'] if mode('host-coordinator') else ['pi','private-host-prompt'] if mode('explicit') else ['pi','--skill','/run/pithos-browser/skills/browser-automation'] if mode('browser') else ['pi','--session-dir','/home/pi/.pi/agent/sessions'])
         credential=json.loads((root/'credential/broker-client.json').read_text())
         token=credential['token']; endpoint=credential['endpoint']
         environment=json.dumps(dict(os.environ))
@@ -468,7 +474,19 @@ fn pi_fixture() {
             })
             .unwrap();
         let pos = pi.iter().position(|arg| arg == image().as_str()).unwrap();
-        assert_eq!(&pi[pos + 1..], PI_LAUNCH_ARGV);
+        // The workspace grant loads the broker's app tools into Pi.
+        assert_eq!(
+            &pi[pos + 1..],
+            [
+                PI_LAUNCH_ARGV.as_slice(),
+                &["--extension", "/run/pithos-broker/extension.mjs"]
+            ]
+            .concat()
+        );
+        assert!(
+            !f.root.path().join("credential/pithos-broker.mjs").exists(),
+            "extension file removed at cleanup"
+        );
         assert!(!pi[4..].iter().any(|arg| {
             arg.contains(&f.root.path().join("socket").display().to_string())
                 || arg.contains(&f.root.path().join("config").display().to_string())
@@ -776,6 +794,7 @@ fn pi_fixture() {
             },
             network: None,
             browser: None,
+            extension: None,
         },
     );
     if mode == "intent-storage-failure" {
@@ -934,6 +953,7 @@ fn pi_fixture() {
                     host_access: HostAccess::Offline,
                     network: None,
                     browser: None,
+                    extension: None,
                 }
             )
             .is_err(),
@@ -1003,6 +1023,7 @@ fn browser_fixture(f: &Fixture, mode: &str) {
                 client: &client,
                 skills: &skills,
             }),
+            extension: None,
         },
     );
     if mode == "browser-foreign-network" {
@@ -1315,6 +1336,7 @@ fn start_requires_matching_probes_and_rechecks_host_paths_and_home_before_intent
                         host_access: HostAccess::Offline,
                         network: None,
                         browser: None,
+                        extension: None,
                     }
                 )
                 .is_err()
@@ -1444,6 +1466,7 @@ fn start_requires_matching_probes_and_rechecks_host_paths_and_home_before_intent
                 host_access: HostAccess::Offline,
                 network: None,
                 browser: None,
+                extension: None,
             },
         );
         assert!(result.is_err(), "{mode}");
@@ -1508,6 +1531,7 @@ fn workspace_cannot_mutate_a_frozen_docker_selection_alias() {
                     host_access: HostAccess::Offline,
                     network: None,
                     browser: None,
+                    extension: None,
                 }
             )
             .is_err()

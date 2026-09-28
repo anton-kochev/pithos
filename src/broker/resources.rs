@@ -87,6 +87,9 @@ pub(crate) enum ProbeKind {
         network: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         browser: Option<PiBrowserSpec>,
+        /// The broker's Pi extension, bound read-only (workspace grant).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extension_source: Option<String>,
     },
 }
 
@@ -130,6 +133,7 @@ impl ProbeKind {
                 gateway,
                 network,
                 browser,
+                extension_source,
             } => {
                 let mapping_valid = match (host_access, gateway.as_deref()) {
                     (PiHostAccess::LinuxHostGateway, Some(value)) => value
@@ -144,6 +148,9 @@ impl ProbeKind {
                     && absolute_path(credential_source)
                     && !Path::new(credential_source).starts_with(workspace)
                     && network.as_deref().is_none_or(probe_name)
+                    && extension_source
+                        .as_deref()
+                        .is_none_or(|p| absolute_path(p) && !Path::new(p).starts_with(workspace))
                     && (browser.is_none() || network.is_some())
                     && browser.as_ref().is_none_or(|b| {
                         [&b.client_source, &b.skills_source]
@@ -672,6 +679,7 @@ mod tests {
             gateway: None,
             network: None,
             browser: None,
+            extension_source: None,
         };
         resource.digest = resource.spec.digest().unwrap();
         // Reproduce a durable legacy Pi intent with a matching old digest.

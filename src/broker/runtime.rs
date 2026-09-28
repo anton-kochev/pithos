@@ -13,6 +13,7 @@ use super::{
     api::{ApiConnection, ApiPoll, ApiRequest},
     browser::BrowserFiles,
     credential::RunCredential,
+    extension::ExtensionFile,
     grant::{Action, HostGrant},
     resources::ResourceManifest,
     status::{Phase, Snapshot},
@@ -165,6 +166,8 @@ pub struct BrokerRuntime {
     credential_cleaned: bool,
     browser_files: Option<BrowserFiles>,
     browser_files_cleaned: bool,
+    extension: Option<ExtensionFile>,
+    extension_cleaned: bool,
     viewer: Option<String>,
     lease: Option<HomeLease>,
     child: Option<InteractiveChild>,
@@ -307,6 +310,8 @@ impl BrokerRuntime {
             credential_cleaned: true,
             browser_files: None,
             browser_files_cleaned: true,
+            extension: None,
+            extension_cleaned: true,
             viewer: None,
             lease: Some(lease),
             child: Some(child),
@@ -454,6 +459,19 @@ impl BrokerRuntime {
                     );
                 }
             }
+            // The workspace grant gives Pi the broker's app tools.
+            let mut command = self.setup.command.clone();
+            if self.grant.permits(Action::Build) {
+                self.extension_cleaned = false;
+                self.extension = Some(
+                    ExtensionFile::create(&self.setup.run_directory)
+                        .map_err(|_| RuntimeError::Admission)?,
+                );
+                command.extend([
+                    "--extension".to_owned(),
+                    crate::docker::PI_EXTENSION.to_owned(),
+                ]);
+            }
             let paths = self
                 .browser_files
                 .as_ref()
@@ -469,12 +487,13 @@ impl BrokerRuntime {
                         identity: self.setup.identity,
                         workspace: &self.setup.workspace,
                         credential,
-                        command: &self.setup.command,
+                        command: &command,
                         host_access: self.host_access,
                         network: network.as_ref(),
                         browser: paths
                             .as_ref()
                             .map(|(client, skills)| PiBrowser { client, skills }),
+                        extension: self.extension.as_ref().map(ExtensionFile::path),
                     },
                 )
                 .map_err(|_| RuntimeError::Admission)?;
@@ -789,6 +808,17 @@ impl BrokerRuntime {
             self.browser_files = None;
             self.browser_files_cleaned = true;
         } else if !self.browser_files_cleaned {
+            self.phase = RuntimePhase::RecoveryRequired;
+            return RuntimePoll::RecoveryRequired;
+        }
+        if let Some(file) = self.extension.as_mut() {
+            if file.cleanup().is_err() {
+                self.phase = RuntimePhase::RecoveryRequired;
+                return RuntimePoll::RecoveryRequired;
+            }
+            self.extension = None;
+            self.extension_cleaned = true;
+        } else if !self.extension_cleaned {
             self.phase = RuntimePhase::RecoveryRequired;
             return RuntimePoll::RecoveryRequired;
         }

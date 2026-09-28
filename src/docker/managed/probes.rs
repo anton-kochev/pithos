@@ -40,6 +40,8 @@ pub struct PiInputs<'a> {
     /// Browser-enabled runs: the read-only browser client files. Requires
     /// `network`.
     pub browser: Option<PiBrowser<'a>>,
+    /// Workspace runs: the broker's private Pi extension file.
+    pub extension: Option<&'a Path>,
 }
 
 /// Private host files for Pi's browser client.
@@ -153,6 +155,8 @@ fn command_digest(value: &Value) -> Result<String, ProbeError> {
 /// Where Pi finds the sidecar capability URL and the bundled skill.
 const PI_BROWSER_CLIENT: &str = "/run/pithos-browser/client.json";
 const PI_BROWSER_SKILLS: &str = "/run/pithos-browser/skills";
+/// Where Pi loads the broker's app tools from (`--extension`).
+pub const PI_EXTENSION: &str = "/run/pithos-broker/extension.mjs";
 const HOME_LABEL: &str = "io.pithos.broker.home";
 const HOME_LABEL_VALUE: &str = "provisioned";
 
@@ -267,6 +271,7 @@ fn mounts_match(r: &Resource, actual: &Value, configured: &Value) -> bool {
             workspace,
             credential_source,
             browser,
+            extension_source,
             ..
         } => {
             let mut expected = vec![
@@ -277,6 +282,9 @@ fn mounts_match(r: &Resource, actual: &Value, configured: &Value) -> bool {
             if let Some(b) = browser {
                 expected.push(bind(&b.client_source, PI_BROWSER_CLIENT, true));
                 expected.push(bind(&b.skills_source, PI_BROWSER_SKILLS, true));
+            }
+            if let Some(source) = extension_source {
+                expected.push(bind(source, PI_EXTENSION, true));
             }
             expected
         }
@@ -515,6 +523,17 @@ impl ManagedDocker {
                 })
             }
         };
+        let extension_source = match inputs.extension {
+            None => None,
+            Some(path) => {
+                browser::private_file(path)?;
+                let source = path.to_str().ok_or(ProbeError::Failed)?.to_owned();
+                if Path::new(&source).starts_with(&workspace.resolved) {
+                    return Err(ProbeError::Workspace);
+                }
+                Some(source)
+            }
+        };
         self.probe_image(inputs.image, inputs.identity)?;
         let program = if inputs.command.is_empty() {
             #[derive(Deserialize)]
@@ -575,6 +594,7 @@ impl ManagedDocker {
                     },
                     network: network.clone(),
                     browser: browser.clone(),
+                    extension_source: extension_source.clone(),
                 },
                 &program,
             )?,
@@ -661,11 +681,16 @@ impl ManagedDocker {
                 .into_string()
                 .map_err(|_| ProbeError::Credential)?,
         ]);
+        let mut binds: Vec<(&String, &str)> = Vec::new();
         if let Some(b) = &browser {
-            for (source, target) in [
-                (&b.client_source, PI_BROWSER_CLIENT),
-                (&b.skills_source, PI_BROWSER_SKILLS),
-            ] {
+            binds.push((&b.client_source, PI_BROWSER_CLIENT));
+            binds.push((&b.skills_source, PI_BROWSER_SKILLS));
+        }
+        if let Some(source) = &extension_source {
+            binds.push((source, PI_EXTENSION));
+        }
+        {
+            for (source, target) in binds {
                 let mut mount = crate::sessions::bind_mount(Path::new(source), target)
                     .map_err(|_| ProbeError::Failed)?;
                 mount.push(",readonly");
