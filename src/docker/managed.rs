@@ -24,6 +24,7 @@
 //! sole-reaper/SIGCHLD and descendant limitations. No activation gate is changed.
 
 mod image_build;
+pub use image_build::AppBuild;
 pub mod image_cache;
 pub mod probes;
 // The registry consumer is a later slice; keep this typed boundary internal.
@@ -958,6 +959,15 @@ impl ManagedDocker {
         staging_root: &Path,
     ) -> Result<ImmutableImageId, PreflightError> {
         image_build::ensure_browser(self, identity, workspace, staging_root)
+    }
+
+    /// Build a project app image from workspace-relative paths.
+    pub fn build_app(
+        &mut self,
+        inputs: AppBuild<'_>,
+        staging_root: &Path,
+    ) -> Result<ImmutableImageId, PreflightError> {
+        image_build::build_app(self, inputs, staging_root)
     }
 
     /// Establish the daemon ID on first call; later calls must match it.

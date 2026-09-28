@@ -9,7 +9,7 @@ mod tempfile;
 
 use pithos::{
     broker::{journal::State, resources::ResourceManifest},
-    docker::{BrowserInputs, HostIdentity, ImmutableImageId, ManagedDocker},
+    docker::{AppInputs, BrowserInputs, HostIdentity, ImmutableImageId, ManagedDocker, RunNetwork},
     lifecycle::Shutdown,
 };
 use std::{
@@ -22,6 +22,9 @@ const ENTRYPOINT: &str = r#"["/usr/bin/tini","--","node","runtime/server.mjs"]"#
 
 fn image() -> ImmutableImageId {
     ImmutableImageId::new(&format!("sha256:{}", "e".repeat(64))).unwrap()
+}
+fn app_image() -> ImmutableImageId {
+    ImmutableImageId::new(&format!("sha256:{}", "a".repeat(64))).unwrap()
 }
 fn identity() -> HostIdentity {
     HostIdentity::effective().unwrap()
@@ -72,13 +75,19 @@ def load(kind):
     return {p.stem: json.loads(p.read_text()) for p in state.glob(kind+'-*.json')}
 def save(kind, name, value): (state/(kind+'-'+name+'.json')).write_text(json.dumps(value))
 def next_id():
-    n = len(list(state.glob('*.json'))) + 1
+    # Docker never reuses an ID, even after removal.
+    counter = root/'id-counter'
+    n = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(n))
     return format(n, '064x')
 def anchored(f, prefix):
     k, v = f.split('=', 1)
     return k, v[len(prefix):-1] if k == 'name' else v
 if a[0] == 'info':
     emit({'id':'daemon-one','os_type':'linux','security_options':[]})
+elif a[:2] == ['image','inspect'] and a[-1] == __APP_IMAGE__:
+    emit({'id':__APP_IMAGE__,'volumes':{'/data':{}} if mode('app-volume') else None,
+          'labels':{'io.pithos.broker.app.run':'run-1','io.pithos.broker.app.logical':'other' if mode('app-foreign') else 'api'}})
 elif a[:2] == ['image','inspect']:
     assert a[-1] == __IMAGE__
     emit({'id':__IMAGE__,'user':__USER__,'volumes':None,
@@ -127,24 +136,27 @@ elif a[0] == 'run':
         hosts.append({'Type':'bind','Source':kv['source'],'Target':kv['target'],'ReadOnly':ro})
     tmpfs = dict(v.split(':',1) for v in opts('--tmpfs'))
     ports = {'6080/tcp':[{'HostIp':'127.0.0.1','HostPort':''}]} if '127.0.0.1::6080' in opts('-p') else {}
-    size = lambda k: next(int(v.split('=')[1][:-1]) for v in a if v.startswith(k+'='))
-    image = a[-1]
+    size = lambda k, d=None: next((int(v.split('=')[1][:-1]) for v in a if v.startswith(k+'=')), d)
+    at = next(i for i,v in enumerate(a) if v.startswith('sha256:'))
+    image, cmd = a[at], a[at+1:] or None
+    app = image == __APP_IMAGE__
     cid = next_id()
     c = {'id':cid,'name':'/'+name,'image':image,
-         'config':{'Image':image,'User':a[a.index('--user')+1],'Entrypoint':json.loads(__ENTRYPOINT__),'Cmd':None,
+         'config':{'Image':image,'User':a[a.index('--user')+1],'Entrypoint':['/app/server'] if app else json.loads(__ENTRYPOINT__),'Cmd':cmd,
                    'Labels':labels,'Volumes':None,'Tty':False,'OpenStdin':False,'WorkingDir':'/opt/pithos-browser'},
          'host':{'NetworkMode':a[a.index('--network')+1],'ReadonlyRootfs':'--read-only' in a,'Privileged':False,
                  'AutoRemove':False,'RestartPolicy':{'Name':'no','MaximumRetryCount':0},'CapDrop':['ALL'],
                  'SecurityOpt':security,'CapAdd':None,'GroupAdd':None,'Binds':None,'Devices':None,'PidMode':'',
                  'IpcMode':'private','UsernsMode':'','Mounts':hosts,'ExtraHosts':None,'Tmpfs':tmpfs,
-                 'PortBindings':ports,'ShmSize':size('--shm-size')*1024*1024,
+                 'PortBindings':ports,'PublishAllPorts':False,'ShmSize':size('--shm-size',64)*1024*1024,
                  'Memory':size('--memory')*1024*1024*1024,'PidsLimit':int(a[a.index('--pids-limit')+1]) if '--pids-limit' in a else int(next(v.split('=')[1] for v in a if v.startswith('--pids-limit=')))},
          'mounts':mounts,
          'aliases':opts('--network-alias'),
          'state':{'Status':'running','Running':True,'ExitCode':0,'Error':'','OOMKilled':False,'Dead':False,
                   'Health':{'Status':'unhealthy' if mode('unhealthy') else 'healthy'}}}
-    if mode('exits'): c['state'].update({'Status':'exited','Running':False,'ExitCode':1})
-    if mode('tampered-browser'): c['host']['CapAdd'] = ['SYS_ADMIN']
+    if app: del c['state']['Health']
+    if mode('exits') or (app and mode('app-exits')): c['state'].update({'Status':'exited','Running':False,'ExitCode':3 if app else 1})
+    if mode('tampered-browser') or (app and mode('tampered-app')): c['host']['CapAdd'] = ['SYS_ADMIN']
     save('ctr', name, c)
     print(cid)
 elif a[:2] == ['container','ls']:
@@ -158,6 +170,11 @@ elif a[:2] == ['container','inspect'] and 'NetworkSettings.Ports' in a[3]:
     emit({'id':c['id'],'ports':ports})
 elif a[:2] == ['container','inspect']:
     emit(next(c for c in load('ctr').values() if c['id'] == a[-1]))
+elif a[0] == 'logs':
+    assert a[1] == '--tail' and 1 <= int(a[2]) <= 200
+    assert any(c['id'] == a[-1] for c in load('ctr').values())
+    if mode('huge-logs'): sys.stdout.write('x'*200000)
+    else: sys.stdout.write('listening on 8080\n'); sys.stderr.write('warn: dev mode\n')
 elif a[:2] == ['container','rm']:
     assert a[2] == '--force'
     c = next(c for c in load('ctr').values() if c['id'] == a[-1])
@@ -167,6 +184,7 @@ else:
 "#
         .replace("__ROOT__", &serde_json::to_string(root.path()).unwrap())
         .replace("__ENTRYPOINT__", &serde_json::to_string(ENTRYPOINT).unwrap())
+        .replace("__APP_IMAGE__", &serde_json::to_string(app_image().as_str()).unwrap())
         .replace("__IMAGE__", &serde_json::to_string(image().as_str()).unwrap())
         .replace("__USER__", &serde_json::to_string(&identity().docker_user()).unwrap())
         .replace(
@@ -450,4 +468,182 @@ fn viewer_is_reported_only_on_ipv4_loopback() {
     start(&f, &mut docker, &mut manifest, false).unwrap();
     assert!(docker.browser_viewer(&manifest, "browser-1").is_err());
     docker.reconcile_resources(&mut manifest).unwrap();
+}
+
+fn command() -> Vec<String> {
+    ["/app/server", "--port", "8080"]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+fn run_app(
+    docker: &mut ManagedDocker,
+    manifest: &mut ResourceManifest,
+    network: &RunNetwork,
+    request: &str,
+) -> Result<String, pithos::docker::OwnedProbeError> {
+    docker.start_app(
+        manifest,
+        request,
+        AppInputs {
+            image: &app_image(),
+            app: "api",
+            network,
+            command: &command(),
+        },
+    )
+}
+
+#[test]
+fn app_runs_hardened_on_the_run_network_under_a_stable_host_name() {
+    let f = Fixture::new();
+    let mut docker = f.docker();
+    let mut manifest = f.manifest();
+    let network = docker
+        .create_run_network(&mut manifest, "network-1")
+        .unwrap();
+    let host = run_app(&mut docker, &mut manifest, &network, "app-1").unwrap();
+    assert!(host.starts_with("pithos-app-") && host.len() == "pithos-app-".len() + 32);
+    let args = f.run_args();
+    let name = &args[args.iter().position(|a| a == "--name").unwrap() + 1];
+    let mut expected: Vec<String> = [
+        "run",
+        "-d",
+        "--pull=never",
+        "--name",
+        name,
+        "--label",
+        &format!("io.pithos.probe.name={name}"),
+        "--label",
+        "io.pithos.probe.request=app-1",
+        "--label",
+        "io.pithos.probe.run=run-1",
+        "--network",
+        network.name(),
+        "--network-alias",
+        &host,
+        "--user",
+        "65532:65532",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--read-only",
+        "--memory=1g",
+        "--pids-limit=256",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
+        app_image().as_str(),
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    expected.extend(command());
+    assert_eq!(args, expected);
+    for forbidden in [
+        "-p",
+        "--publish",
+        "--mount",
+        "-v",
+        "--privileged",
+        "--env",
+        "-e",
+    ] {
+        assert!(!args.iter().any(|a| a == forbidden), "{forbidden}");
+    }
+    let state = docker.app_status(&manifest, "app-1").unwrap();
+    assert!(state.running && state.exit_code.is_none());
+    // The same host name for the same run and app, whatever the request.
+    docker.stop_app(&mut manifest, "app-1").unwrap();
+    let again = run_app(&mut docker, &mut manifest, &network, "app-2").unwrap();
+    assert_eq!(again, host);
+    docker.reconcile_resources(&mut manifest).unwrap();
+    assert!(manifest.is_settled());
+    assert_eq!(f.live(), 0);
+}
+
+#[test]
+fn stop_removes_only_that_app_and_is_idempotent() {
+    let f = Fixture::new();
+    let mut docker = f.docker();
+    let mut manifest = f.manifest();
+    let network = docker
+        .create_run_network(&mut manifest, "network-1")
+        .unwrap();
+    run_app(&mut docker, &mut manifest, &network, "app-1").unwrap();
+    docker.stop_app(&mut manifest, "app-1").unwrap();
+    assert_eq!(f.live(), 1, "only the network remains");
+    docker.stop_app(&mut manifest, "app-1").unwrap();
+    assert!(docker.app_status(&manifest, "app-1").is_err());
+    assert!(
+        docker.stop_app(&mut manifest, "network-1").is_err(),
+        "never stops non-apps"
+    );
+    docker.reconcile_resources(&mut manifest).unwrap();
+    assert_eq!(f.live(), 0);
+}
+
+#[test]
+fn exited_app_stays_for_status_and_logs_until_cleanup() {
+    let f = Fixture::new();
+    f.set("app-exits");
+    let mut docker = f.docker();
+    let mut manifest = f.manifest();
+    let network = docker
+        .create_run_network(&mut manifest, "network-1")
+        .unwrap();
+    assert!(run_app(&mut docker, &mut manifest, &network, "app-1").is_err());
+    let state = docker.app_status(&manifest, "app-1").unwrap();
+    assert!(!state.running);
+    assert_eq!(state.exit_code, Some(3));
+    let logs = docker.app_logs(&manifest, "app-1", 50).unwrap();
+    assert!(logs.text.contains("listening on 8080") && logs.text.contains("warn: dev mode"));
+    assert!(!logs.truncated);
+    docker.reconcile_resources(&mut manifest).unwrap();
+    assert_eq!(f.live(), 0);
+}
+
+#[test]
+fn logs_are_bounded_and_the_tail_is_capped() {
+    let f = Fixture::new();
+    f.set("huge-logs");
+    let mut docker = f.docker();
+    let mut manifest = f.manifest();
+    let network = docker
+        .create_run_network(&mut manifest, "network-1")
+        .unwrap();
+    run_app(&mut docker, &mut manifest, &network, "app-1").unwrap();
+    let logs = docker.app_logs(&manifest, "app-1", 10_000).unwrap();
+    assert!(logs.truncated && logs.text.len() <= 64 * 1024);
+    docker.reconcile_resources(&mut manifest).unwrap();
+}
+
+#[test]
+fn foreign_or_volume_images_never_run() {
+    for mode in ["app-volume", "app-foreign"] {
+        let f = Fixture::new();
+        f.set(mode);
+        let mut docker = f.docker();
+        let mut manifest = f.manifest();
+        let network = docker
+            .create_run_network(&mut manifest, "network-1")
+            .unwrap();
+        assert!(
+            run_app(&mut docker, &mut manifest, &network, "app-1").is_err(),
+            "{mode}"
+        );
+        assert!(!f.mutations().contains(&"run -d".to_string()), "{mode}");
+        docker.reconcile_resources(&mut manifest).unwrap();
+    }
+}
+
+#[test]
+fn tampered_app_is_quarantined_never_removed() {
+    let f = Fixture::new();
+    f.set("tampered-app");
+    let mut docker = f.docker();
+    let mut manifest = f.manifest();
+    let network = docker
+        .create_run_network(&mut manifest, "network-1")
+        .unwrap();
+    assert!(run_app(&mut docker, &mut manifest, &network, "app-1").is_err());
+    assert!(docker.reconcile_resources(&mut manifest).is_err());
+    assert!(!f.mutations().contains(&"container rm".to_string()));
 }

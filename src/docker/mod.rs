@@ -22,10 +22,12 @@ pub use image::{
     tag_image,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use managed::AppBuild;
 pub use managed::image_cache as managed_image_cache;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use managed::probes::{
-    BrowserInputs, PiBrowser, PiInputs, ProbeError as OwnedProbeError, RunNetwork,
+    AppInputs, AppLogs, AppState, BrowserInputs, PiBrowser, PiInputs,
+    ProbeError as OwnedProbeError, RunNetwork,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use managed::{

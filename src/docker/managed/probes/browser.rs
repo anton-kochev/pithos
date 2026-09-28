@@ -100,8 +100,13 @@ fn security_match(actual: &Value) -> Result<bool, ProbeError> {
 }
 
 impl ManagedDocker {
-    fn owned_request(&self, resources: &ResourceManifest, request: &str) -> Result<(), ProbeError> {
-        if self.has_child() || self.active_probe.is_some() || self.active_pi.is_some() {
+    pub(super) fn owned_request(
+        &self,
+        resources: &ResourceManifest,
+        request: &str,
+    ) -> Result<(), ProbeError> {
+        // A running Pi is not in the way: services and apps run beside it.
+        if self.has_child() || self.active_probe.is_some() {
             return Err(PreflightError::ChildPending.into());
         }
         if resources
@@ -114,7 +119,7 @@ impl ManagedDocker {
         Ok(())
     }
 
-    fn new_resource(
+    pub(super) fn new_resource(
         &self,
         resources: &ResourceManifest,
         request: &str,
@@ -145,7 +150,7 @@ impl ManagedDocker {
     /// Record intent, run one short mutating client, and settle the local
     /// child. Returns its stdout only on a complete, successful exit. Any other
     /// outcome leaves the durable record for reconciliation.
-    fn spawn_owned(
+    pub(super) fn spawn_owned(
         &mut self,
         resources: &mut ResourceManifest,
         r: &mut Resource,
@@ -192,7 +197,7 @@ impl ManagedDocker {
     }
 
     /// The one full ID a create command printed, recorded as observed.
-    fn observe_created(
+    pub(super) fn observe_created(
         &mut self,
         resources: &mut ResourceManifest,
         r: &mut Resource,

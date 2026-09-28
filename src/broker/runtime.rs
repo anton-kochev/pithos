@@ -7,19 +7,22 @@
 //! must keep it installed until this owner reaches a terminal state.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
+mod apps;
+
 use super::{
+    api::{ApiConnection, ApiPoll, ApiRequest},
     browser::BrowserFiles,
     credential::RunCredential,
     grant::{Action, HostGrant},
     resources::ResourceManifest,
-    status::{Limits as StatusLimits, Phase, Snapshot, StatusConnection, StatusPoll},
+    status::{Phase, Snapshot},
     transport::{BrokerEndpoint, HostAccess},
 };
 use crate::{
     config::BrowserMode,
     docker::{
         BrowserInputs, HomeLease, HostIdentity, ImmutableImageId, ManagedDocker, PiBrowser,
-        PiInputs, PreflightChildState, VolumeName,
+        PiInputs, PreflightChildState, RunNetwork, VolumeName,
     },
     lifecycle::{
         InteractiveChild, InteractiveLimits, InteractivePoll, InteractiveReport, Outcome, Shutdown,
@@ -60,6 +63,8 @@ pub struct RuntimeSetup {
     pub interactive_limits: InteractiveLimits,
     /// Browser-enabled runs start the sidecar on an owned run network.
     pub browser: Option<RuntimeBrowser>,
+    /// Private staging root for app builds. `None` refuses app builds.
+    pub stage_root: Option<PathBuf>,
 }
 
 /// Runtime lifecycle. `Ready` means the managed Pi was durably launched and is
@@ -150,7 +155,9 @@ pub struct BrokerRuntime {
     host_access: HostAccess,
     grant: HostGrant,
     endpoint: Option<BrokerEndpoint>,
-    connections: Vec<StatusConnection>,
+    connections: Vec<ApiConnection>,
+    network: Option<RunNetwork>,
+    apps: apps::AppRegistry,
     shutdown: Shutdown,
     docker: Option<ManagedDocker>,
     manifest: Option<ResourceManifest>,
@@ -173,6 +180,7 @@ pub struct BrokerRuntime {
 struct RuntimeInputs {
     manifest_directory: PathBuf,
     run_directory: PathBuf,
+    stage_root: Option<PathBuf>,
     browser: Option<RuntimeBrowser>,
     run_id: String,
     volume: VolumeName,
@@ -268,6 +276,7 @@ impl BrokerRuntime {
         let inputs = RuntimeInputs {
             manifest_directory: setup.manifest_directory.clone(),
             run_directory: setup.run_directory.clone(),
+            stage_root: setup.stage_root,
             browser: setup.browser,
             run_id: setup.run_id.clone(),
             volume: setup.volume,
@@ -286,6 +295,8 @@ impl BrokerRuntime {
             grant,
             endpoint: Some(endpoint),
             connections: Vec::new(),
+            network: None,
+            apps: apps::AppRegistry::default(),
             shutdown: shutdown.clone(),
             docker: Some(docker),
             manifest: None,
@@ -404,42 +415,45 @@ impl BrokerRuntime {
                 .map_err(|_| RuntimeError::Admission)?;
             // Sidecar first: Pi's browser client needs it healthy. Its files
             // are debt from the first write until cleanup removes them.
-            let network = match &self.setup.browser {
-                None => None,
-                Some(browser) => {
-                    self.browser_files_cleaned = false;
-                    let files = self.browser_files.insert(
-                        BrowserFiles::create(&self.setup.run_directory, browser.mode)
+            // Workspace runs (apps) and browser runs share one owned network.
+            let network = if self.setup.browser.is_some() || self.grant.permits(Action::Build) {
+                Some(
+                    docker
+                        .create_run_network(manifest, NETWORK_REQUEST)
+                        .map_err(|_| RuntimeError::Admission)?,
+                )
+            } else {
+                None
+            };
+            if let (Some(browser), Some(network)) = (&self.setup.browser, &network) {
+                self.browser_files_cleaned = false;
+                let files = self.browser_files.insert(
+                    BrowserFiles::create(&self.setup.run_directory, browser.mode)
+                        .map_err(|_| RuntimeError::Admission)?,
+                );
+                let interactive = browser.mode == BrowserMode::Interactive;
+                docker
+                    .start_browser(
+                        manifest,
+                        BROWSER_REQUEST,
+                        network,
+                        BrowserInputs {
+                            image: &browser.image,
+                            identity: self.setup.identity,
+                            server: &files.server(),
+                            seccomp: &files.seccomp(),
+                            viewer: interactive,
+                        },
+                    )
+                    .map_err(|_| RuntimeError::Admission)?;
+                if interactive {
+                    self.viewer = Some(
+                        docker
+                            .browser_viewer(manifest, BROWSER_REQUEST)
                             .map_err(|_| RuntimeError::Admission)?,
                     );
-                    let network = docker
-                        .create_run_network(manifest, NETWORK_REQUEST)
-                        .map_err(|_| RuntimeError::Admission)?;
-                    let interactive = browser.mode == BrowserMode::Interactive;
-                    docker
-                        .start_browser(
-                            manifest,
-                            BROWSER_REQUEST,
-                            &network,
-                            BrowserInputs {
-                                image: &browser.image,
-                                identity: self.setup.identity,
-                                server: &files.server(),
-                                seccomp: &files.seccomp(),
-                                viewer: interactive,
-                            },
-                        )
-                        .map_err(|_| RuntimeError::Admission)?;
-                    if interactive {
-                        self.viewer = Some(
-                            docker
-                                .browser_viewer(manifest, BROWSER_REQUEST)
-                                .map_err(|_| RuntimeError::Admission)?,
-                        );
-                    }
-                    Some(network)
                 }
-            };
+            }
             let paths = self
                 .browser_files
                 .as_ref()
@@ -457,19 +471,19 @@ impl BrokerRuntime {
                         credential,
                         command: &self.setup.command,
                         host_access: self.host_access,
-                        browser: network.as_ref().zip(paths.as_ref()).map(
-                            |(network, (client, skills))| PiBrowser {
-                                network,
-                                client,
-                                skills,
-                            },
-                        ),
+                        network: network.as_ref(),
+                        browser: paths
+                            .as_ref()
+                            .map(|(client, skills)| PiBrowser { client, skills }),
                     },
                 )
-                .map_err(|_| RuntimeError::Admission)
+                .map_err(|_| RuntimeError::Admission)?;
+            // Kept for app requests while Pi runs.
+            Ok(network)
         })();
         match result {
-            Ok(()) => {
+            Ok(network) => {
+                self.network = network;
                 self.pi_admitted = true;
                 self.phase = RuntimePhase::Ready;
                 Ok(())
@@ -555,12 +569,10 @@ impl BrokerRuntime {
             }
         };
         let credential = self.credential.as_ref().ok_or(RuntimeError::State)?;
-        let connection = StatusConnection::new(
+        let connection = ApiConnection::new(
             stream,
             credential.token(),
             &self.advertised_authority,
-            self.snapshot(),
-            StatusLimits::default(),
             self.shutdown.clone(),
         )
         .map_err(|_| {
@@ -571,9 +583,24 @@ impl BrokerRuntime {
         Ok(())
     }
 
+    /// Poll each connection once. A surfaced request is handled to completion
+    /// here (Docker work included) and answered before the next connection.
     fn poll_connections(&mut self) {
-        self.connections
-            .retain_mut(|connection| matches!(connection.poll(), StatusPoll::Pending));
+        let mut connections = std::mem::take(&mut self.connections);
+        connections.retain_mut(|connection| match connection.poll() {
+            ApiPoll::Pending => true,
+            ApiPoll::Request(ApiRequest::Status) => {
+                connection.respond_status(self.snapshot());
+                true
+            }
+            ApiPoll::Request(request) => {
+                let (status, body) = self.app_request(request);
+                connection.respond(status, &body);
+                true
+            }
+            ApiPoll::Finished | ApiPoll::Failed(_) => false,
+        });
+        self.connections = connections;
     }
 
     /// Returns true when a finished Pi was durably recorded.

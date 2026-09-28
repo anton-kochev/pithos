@@ -64,6 +64,12 @@ pub(crate) enum ProbeKind {
     },
     /// The run's private bridge network. Not a container and has no image.
     Network,
+    /// A project app container on the run network.
+    App {
+        network: String,
+        logical: String,
+        host: String,
+    },
     /// The detached Chromium sidecar on the run network.
     Browser {
         network: String,
@@ -78,15 +84,16 @@ pub(crate) enum ProbeKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gateway: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        network: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         browser: Option<PiBrowserSpec>,
     },
 }
 
-/// Pi's place on the run's browser network and its read-only client files.
+/// Pi's read-only browser client files (requires the run network).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PiBrowserSpec {
-    pub network: String,
     pub client_source: String,
     pub skills_source: String,
 }
@@ -99,6 +106,17 @@ impl ProbeKind {
             }
             Self::Credential { source } => absolute_path(source),
             Self::Network => true,
+            Self::App {
+                network,
+                logical,
+                host,
+            } => {
+                probe_name(network)
+                    && crate::broker::app::valid_app_name(logical)
+                    && host.strip_prefix("pithos-app-").is_some_and(|v| {
+                        v.len() == 32 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                    })
+            }
             Self::Browser {
                 network,
                 server_source,
@@ -110,6 +128,7 @@ impl ProbeKind {
                 credential_source,
                 host_access,
                 gateway,
+                network,
                 browser,
             } => {
                 let mapping_valid = match (host_access, gateway.as_deref()) {
@@ -124,11 +143,12 @@ impl ProbeKind {
                     && absolute_path(workspace)
                     && absolute_path(credential_source)
                     && !Path::new(credential_source).starts_with(workspace)
+                    && network.as_deref().is_none_or(probe_name)
+                    && (browser.is_none() || network.is_some())
                     && browser.as_ref().is_none_or(|b| {
-                        probe_name(&b.network)
-                            && [&b.client_source, &b.skills_source]
-                                .into_iter()
-                                .all(|p| absolute_path(p) && !Path::new(p).starts_with(workspace))
+                        [&b.client_source, &b.skills_source]
+                            .into_iter()
+                            .all(|p| absolute_path(p) && !Path::new(p).starts_with(workspace))
                     })
             }
         }
@@ -143,7 +163,10 @@ pub(crate) fn probe_name(name: &str) -> bool {
 
 /// Long-lived run services, live while Pi runs and removed at cleanup.
 pub(crate) fn is_service(operation: &ProbeKind) -> bool {
-    matches!(operation, ProbeKind::Network | ProbeKind::Browser { .. })
+    matches!(
+        operation,
+        ProbeKind::Network | ProbeKind::Browser { .. } | ProbeKind::App { .. }
+    )
 }
 
 pub(crate) fn absolute_path(source: &str) -> bool {
@@ -647,6 +670,7 @@ mod tests {
             credential_source: "/credential".into(),
             host_access: PiHostAccess::LinuxHostGateway,
             gateway: None,
+            network: None,
             browser: None,
         };
         resource.digest = resource.spec.digest().unwrap();

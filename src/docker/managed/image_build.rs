@@ -10,6 +10,15 @@ use std::{
     process::Command,
 };
 
+/// A project app build request. Paths are workspace-relative.
+pub struct AppBuild<'a> {
+    pub workspace: &'a Path,
+    pub run_id: &'a str,
+    pub app: &'a str,
+    pub dockerfile: &'a str,
+    pub context: &'a str,
+}
+
 fn trusted_directory(path: &Path, private: bool) -> Result<(), PreflightError> {
     let invalid = |_| PreflightError::InvalidSelection;
     // Canonical equality rejects lexical aliases and symlinks in any component.
@@ -123,11 +132,13 @@ pub(super) fn ensure(
     }
     let dockerfile = stage.context.join("Dockerfile");
     fs::write(&dockerfile, emitted).map_err(|_| PreflightError::Unavailable)?;
+    let context = stage.context.clone();
     run_build(
         docker,
         stage,
+        &context,
         &dockerfile,
-        &format!("{}={hash}", image_cache::LABEL_KEY),
+        &[format!("{}={hash}", image_cache::LABEL_KEY)],
         &format!("pithos-broker-identity:{hash}"),
         // Recheck the exact tag after staging, immediately before the CLI.
         |docker| {
@@ -173,14 +184,105 @@ pub(super) fn ensure_browser(
     crate::browser::assets::extract_with_identity_to(&stage.context, identity)
         .map_err(|_| PreflightError::Unavailable)?;
     let dockerfile = stage.context.join("browser/runtime/Dockerfile");
+    let context = stage.context.clone();
     run_build(
         docker,
         stage,
+        &context,
         &dockerfile,
-        &format!("{}={hash}", image_cache::BROWSER_LABEL_KEY),
+        &[format!("{}={hash}", image_cache::BROWSER_LABEL_KEY)],
         &format!("pithos-broker-browser:{hash}"),
         |_| Ok(()),
         |docker, built| image_cache::verify_browser_candidate(docker, built, identity, &hash),
+    )
+}
+
+/// A workspace-relative path that is exactly its canonical self: no `..`,
+/// `.`, empty components, absolute paths or symlinks anywhere below the
+/// workspace. `"."` names the workspace itself (directories only).
+fn contained(workspace: &Path, relative: &str, directory: bool) -> Option<PathBuf> {
+    let joined = if relative == "." && directory {
+        workspace.to_owned()
+    } else {
+        if relative.is_empty()
+            || relative.len() > 1024
+            || relative.starts_with('/')
+            || relative.chars().any(char::is_control)
+            || relative
+                .split('/')
+                .any(|part| matches!(part, "" | "." | ".."))
+        {
+            return None;
+        }
+        workspace.join(relative)
+    };
+    if fs::canonicalize(&joined).ok()? != joined {
+        return None;
+    }
+    let meta = fs::symlink_metadata(&joined).ok()?;
+    (if directory {
+        meta.is_dir()
+    } else {
+        meta.is_file()
+    })
+    .then_some(joined)
+}
+
+const APP_RUN_LABEL: &str = "io.pithos.broker.app.run";
+const APP_LOGICAL_LABEL: &str = "io.pithos.broker.app.logical";
+
+/// Build a project app image. Everything is validated before any Docker
+/// call; the result is labelled with the run and app and has no VOLUMEs.
+pub(super) fn build_app(
+    docker: &mut ManagedDocker,
+    inputs: AppBuild<'_>,
+    staging_root: &Path,
+) -> Result<ImmutableImageId, PreflightError> {
+    if !crate::broker::app::valid_app_name(inputs.app)
+        || inputs.run_id.is_empty()
+        || inputs.run_id.len() > 64
+        || !inputs
+            .run_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err(PreflightError::InvalidInput);
+    }
+    let root = private_root(staging_root, inputs.workspace)?;
+    let dockerfile = contained(inputs.workspace, inputs.dockerfile, false)
+        .ok_or(PreflightError::InvalidInput)?;
+    let context =
+        contained(inputs.workspace, inputs.context, true).ok_or(PreflightError::InvalidInput)?;
+    if docker.work_shutdown.is_requested() {
+        return Err(PreflightError::Unavailable);
+    }
+    if docker.has_child() {
+        return Err(PreflightError::ChildPending);
+    }
+    use sha2::Digest as _;
+    let mut hash = sha2::Sha256::new();
+    for part in [inputs.run_id, inputs.app] {
+        hash.update((part.len() as u64).to_be_bytes());
+        hash.update(part.as_bytes());
+    }
+    let suffix: String = hash.finalize()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let labels = [
+        format!("{APP_RUN_LABEL}={}", inputs.run_id),
+        format!("{APP_LOGICAL_LABEL}={}", inputs.app),
+    ];
+    let stage = Stage::new(root)?;
+    run_build(
+        docker,
+        stage,
+        &context,
+        &dockerfile,
+        &labels,
+        &format!("pithos-broker-app:{suffix}"),
+        |_| Ok(()),
+        |docker, built| image_cache::verify_app(docker, built, inputs.run_id, inputs.app),
     )
 }
 
@@ -229,11 +331,13 @@ impl Stage {
 /// One builder-neutral build through the frozen selection. `before` runs
 /// right before the CLI starts; `verify` must prove the built ID before it is
 /// returned. The stage is retained while the supervisor may own a child.
+#[allow(clippy::too_many_arguments)]
 fn run_build(
     docker: &mut ManagedDocker,
     stage: Stage,
+    context: &Path,
     dockerfile: &Path,
-    label: &str,
+    labels: &[String],
     tag: &str,
     before: impl FnOnce(&mut ManagedDocker) -> Result<(), PreflightError>,
     verify: impl FnOnce(&mut ManagedDocker, &ImmutableImageId) -> Result<(), PreflightError>,
@@ -275,15 +379,17 @@ fn run_build(
         .arg("build")
         .arg("--pull=false")
         .arg("-f")
-        .arg(dockerfile)
-        .arg("--label")
-        .arg(label)
+        .arg(dockerfile);
+    for label in labels {
+        command.arg("--label").arg(label);
+    }
+    command
         // The containerd image store drops unnamed build results.
         .arg("--tag")
         .arg(tag)
         .arg("--iidfile")
         .arg(&iid)
-        .arg(&stage.context);
+        .arg(context);
     docker.build_stage = Some(stage.dir);
     let report = docker.build_supervisor.execute(&mut command);
     let result = (|| {
