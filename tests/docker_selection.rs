@@ -4,10 +4,7 @@ use pithos::docker::{DockerSelection, HostDockerSnapshot, PreflightError};
 use std::{
     ffi::OsString,
     fs,
-    os::unix::{
-        fs::{MetadataExt, PermissionsExt},
-        net::UnixListener,
-    },
+    os::unix::{fs::PermissionsExt, net::UnixListener},
     path::PathBuf,
 };
 
@@ -335,6 +332,7 @@ fn desktop_app(f: &Fixture) -> (PathBuf, PathBuf) {
 #[cfg(target_os = "macos")]
 #[test]
 fn broker_config_points_the_cli_at_buildx_beside_the_selected_docker() {
+    use std::os::unix::fs::MetadataExt;
     let f = Fixture::new();
     let (bin, plugins) = desktop_app(&f);
     let mut input = f.snapshot();
