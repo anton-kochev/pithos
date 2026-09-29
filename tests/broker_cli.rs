@@ -218,13 +218,16 @@ fn granted_cli_refuses_an_untrusted_workspace_before_host_state() {
 
 #[test]
 fn granted_cli_dispatches_to_the_host_coordinator() {
-    // The fake docker is a symlink to /bin/sh and HOME has no Desktop socket,
-    // so the frozen Docker selection refuses: proof the coordinator ran,
-    // without any Docker call or secret echo.
+    // The selected socket does not exist, so the frozen Docker selection
+    // refuses: proof the coordinator ran, without any Docker call or secret
+    // echo. An explicit DOCKER_HOST keeps this independent of the host: Linux
+    // otherwise falls back to a real /var/run/docker.sock (CI runners have one).
     for grant in ["--broker=status", "--broker=workspace"] {
         let fixture = Fixture::new(Some("toolchains: {}\n"));
+        let absent = fixture.home.join("absent.sock");
         let result = fixture
             .command()
+            .env("DOCKER_HOST", format!("unix://{}", absent.display()))
             .env("PITHOS_BROKER_TOKEN", "credential-secret-canary")
             .args(["run", grant])
             .assert()
