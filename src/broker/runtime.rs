@@ -31,7 +31,7 @@ use crate::{
         ShutdownReason, StopReason,
     },
 };
-use std::{net::SocketAddr, os::unix::process::ExitStatusExt, path::PathBuf, time::Duration};
+use std::{io, net::SocketAddr, os::unix::process::ExitStatusExt, path::PathBuf, time::Duration};
 
 const MAX_STATUS_CONNECTIONS: usize = 8;
 const ACCOUNT_REQUEST: &str = "runtime-account-v1";
@@ -56,6 +56,8 @@ pub enum StartStep {
     PiImage,
     BrowserImage,
     PostgresImage,
+    /// A notice, not a step: a dead run's leftover home lock was cleared.
+    ClearedHomeLock,
     Home,
     Network,
     Postgres,
@@ -123,6 +125,12 @@ pub enum RuntimeError {
     Listener,
     #[error("runtime home lease unavailable; retain existing evidence")]
     Lease,
+    #[error("the Pi home volume is in use by another pithos run")]
+    HomeBusy,
+    #[error(
+        "the Pi home volume is still mounted by a container (see `docker ps -a --filter volume=<pithos-home volume>`); stop it and retry"
+    )]
+    HomeMounted,
     #[error("runtime Docker selection unavailable")]
     Docker,
     #[error("runtime resource manifest unavailable; retain evidence")]
@@ -200,6 +208,7 @@ pub struct BrokerRuntime {
     postgres_files_cleaned: bool,
     viewer: Option<String>,
     lease: Option<HomeLease>,
+    home_debt_cleared: usize,
     child: Option<InteractiveChild>,
     pending_pi_report: Option<InteractiveReport>,
     pending_terminal_exit_code: Option<u8>,
@@ -288,7 +297,7 @@ impl BrokerRuntime {
         grant: HostGrant,
         endpoint: BrokerEndpoint,
         setup: RuntimeSetup,
-        docker: ManagedDocker,
+        mut docker: ManagedDocker,
     ) -> Result<Self, RuntimeBuildFailure> {
         if !grant.permits(Action::Status) || !grant.permits(Action::Run) {
             return Err(Self::prelease_failure(RuntimeError::Grant, docker));
@@ -304,9 +313,24 @@ impl BrokerRuntime {
             Ok(child) => child,
             Err(_) => return Err(Self::prelease_failure(RuntimeError::Interactive, docker)),
         };
-        let lease = match HomeLease::broker(&setup.lease_root, &setup.volume) {
-            Ok(lease) => lease,
-            Err(_) => return Err(Self::prelease_failure(RuntimeError::Lease, docker)),
+        // Holding the exclusive lock proves no pithos process uses the home, so
+        // leftover markers are dead runs' debt: cleared only if Docker says no
+        // container mounts the volume.
+        let recovered = HomeLease::broker_recovering(&setup.lease_root, &setup.volume, || {
+            docker
+                .home_mounted(&setup.volume)
+                .map_err(|_| io::Error::other("home volume consumers unknown"))
+        });
+        let (lease, home_debt_cleared) = match recovered {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                let error = match error.kind() {
+                    io::ErrorKind::WouldBlock => RuntimeError::HomeBusy,
+                    io::ErrorKind::ResourceBusy => RuntimeError::HomeMounted,
+                    _ => RuntimeError::Lease,
+                };
+                return Err(Self::prelease_failure(error, docker));
+            }
         };
         let inputs = RuntimeInputs {
             manifest_directory: setup.manifest_directory.clone(),
@@ -351,6 +375,7 @@ impl BrokerRuntime {
             postgres_files: None,
             postgres_files_cleaned: true,
             viewer: None,
+            home_debt_cleared,
             lease: Some(lease),
             child: Some(child),
             pending_pi_report: None,
@@ -978,6 +1003,11 @@ impl BrokerRuntime {
     }
 
     /// Interactive browser runs: the loopback viewer URL and password file.
+    /// How many dead runs' home markers this run cleared at start.
+    pub fn home_debt_cleared(&self) -> usize {
+        self.home_debt_cleared
+    }
+
     pub fn browser_viewer(&self) -> Option<(&str, PathBuf)> {
         let viewer = self.viewer.as_deref()?;
         Some((viewer, self.browser_files.as_ref()?.password()?))

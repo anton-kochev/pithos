@@ -20,7 +20,23 @@ impl HomeLease {
     /// neither HOME nor Docker environment variables are read by this API.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn broker(root: &Path, volume: &super::VolumeName) -> io::Result<Self> {
-        imp::Use::acquire(root, volume.as_str(), true).map(Self)
+        imp::Use::acquire(root, volume.as_str(), true, None).map(|(lease, _)| Self(lease))
+    }
+
+    /// Like [`Self::broker`], but clears debt left by dead holders. Holding the
+    /// exclusive flock proves no pithos process uses the home, so every marker
+    /// is from a dead process; they are removed only when `mounted` positively
+    /// reports that no container mounts the volume. Returns the cleared count.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn broker_recovering(
+        root: &Path,
+        volume: &super::VolumeName,
+        mounted: impl FnOnce() -> io::Result<bool>,
+    ) -> io::Result<(Self, usize)> {
+        let mut mounted = Some(mounted);
+        let mut check = || mounted.take().map_or(Ok(true), |check| check());
+        imp::Use::acquire(root, volume.as_str(), true, Some(&mut check))
+            .map(|(lease, cleared)| (Self(lease), cleared))
     }
 
     /// Remove only this holder's marker and release its lock.
@@ -55,7 +71,7 @@ impl LegacyHomeUse {
 
     /// Acquire at an explicit host lease root (also useful for isolated callers).
     pub fn acquire(root: &Path, volume: &str) -> io::Result<Self> {
-        imp::Use::acquire(root, volume, false).map(Self)
+        imp::Use::acquire(root, volume, false, None).map(|(lease, _)| Self(lease))
     }
 
     /// Explicit positive completion; removes only this holder's marker.
@@ -125,10 +141,12 @@ mod imp {
         Ok(())
     }
 
-    fn check_markers(path: &Path, exclusive: bool) -> io::Result<()> {
+    /// Validate markers; `refuse` rejects any. Returns the valid marker paths.
+    fn check_markers(path: &Path, refuse: bool) -> io::Result<Vec<PathBuf>> {
+        let mut found = Vec::new();
         for entry in fs::read_dir(path)? {
             let entry = entry?;
-            if exclusive {
+            if refuse {
                 return Err(io::Error::other(
                     "outstanding home use; explicit host recovery required",
                 ));
@@ -149,8 +167,9 @@ mod imp {
             }) {
                 return Err(invalid());
             }
+            found.push(entry.path());
         }
-        Ok(())
+        Ok(found)
     }
 
     struct Directory {
@@ -197,7 +216,14 @@ mod imp {
         marker_path: PathBuf,
     }
     impl Use {
-        pub(super) fn acquire(root: &Path, volume: &str, exclusive: bool) -> io::Result<Self> {
+        /// `recover` (exclusive only) answers whether a container still mounts
+        /// the volume; it is asked only when dead holders left markers.
+        pub(super) fn acquire(
+            root: &Path,
+            volume: &str,
+            exclusive: bool,
+            mut recover: Option<&mut dyn FnMut() -> io::Result<bool>>,
+        ) -> io::Result<(Self, usize)> {
             if !(2..=255).contains(&volume.len())
                 || !volume.as_bytes()[0].is_ascii_alphanumeric()
                 || !volume
@@ -242,7 +268,7 @@ mod imp {
                     }
                 } else if name == "uses" {
                     private(&fs::symlink_metadata(entry.path())?, true)?;
-                    check_markers(&entry.path(), exclusive)?;
+                    check_markers(&entry.path(), exclusive && recover.is_none())?;
                 } else {
                     return Err(invalid());
                 }
@@ -262,7 +288,31 @@ mod imp {
             } else {
                 FileExt::try_lock_shared(&lock)?;
             }
-            check_markers(&uses.path, exclusive)?;
+            // Under the exclusive flock no live pithos holds this home, so any
+            // marker is a dead holder's. Clear only on a positive "not mounted".
+            let mut cleared = 0;
+            match recover.as_mut().filter(|_| exclusive) {
+                None => {
+                    check_markers(&uses.path, exclusive)?;
+                }
+                Some(mounted) => {
+                    let stale = check_markers(&uses.path, false)?;
+                    if !stale.is_empty() {
+                        if mounted()? {
+                            return Err(io::Error::new(
+                                io::ErrorKind::ResourceBusy,
+                                "home volume is still mounted by a container",
+                            ));
+                        }
+                        for marker in &stale {
+                            private(&fs::symlink_metadata(marker)?, false)?;
+                            fs::remove_file(marker)?;
+                        }
+                        uses.file.sync_all()?;
+                        cleared = stale.len();
+                    }
+                }
+            }
             let mut random = [0_u8; 32];
             getrandom::fill(&mut random).map_err(io::Error::other)?;
             let name: String = random.iter().map(|b| format!("{b:02x}")).collect();
@@ -284,7 +334,7 @@ mod imp {
                 marker_path,
             };
             value.check()?;
-            Ok(value)
+            Ok((value, cleared))
         }
 
         fn check(&self) -> io::Result<()> {
@@ -309,7 +359,12 @@ mod imp {
     use std::{io, path::Path};
     pub(super) struct Use;
     impl Use {
-        pub(super) fn acquire(_: &Path, _: &str, _: bool) -> io::Result<Self> {
+        pub(super) fn acquire(
+            _: &Path,
+            _: &str,
+            _: bool,
+            _: Option<&mut dyn FnMut() -> io::Result<bool>>,
+        ) -> io::Result<(Self, usize)> {
             Err(io::Error::other("private home leases require Unix"))
         }
         pub(super) fn finish(self) -> io::Result<()> {

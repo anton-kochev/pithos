@@ -30,6 +30,11 @@ is the short "where we are and what's next" view.
     the host.
 - **`pi.extensions`** are supported in managed runs. The entrypoint
   installs them from a private read-only copy of the manifest.
+- **Self-clearing home debt (user decision, 2026-09-29):** a broker run
+  clears markers left by dead runs, but only while it holds the exclusive
+  lease lock (which proves no pithos process uses the home) **and** Docker
+  positively reports that no container mounts the volume. Otherwise the debt
+  stays. See the [home debt ledger](docker-broker-home-debt-tdd.md).
 - **Design lock 4 is superseded:** the CLI now dispatches granted runs to the
   host coordinator instead of refusing. `--broker=status` means one managed
   Pi run plus read-only status.

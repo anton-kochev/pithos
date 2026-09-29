@@ -1085,3 +1085,41 @@ fn test_info_executes_fixed_command_with_explicit_selection_and_empty_environmen
     assert_eq!(calls[0]["cwd"], json!(fixture.config));
     assert!(!format!("{docker:?}").contains(fixture.dir.path().to_str().unwrap()));
 }
+
+#[test]
+fn home_mounted_is_a_positive_answer_about_every_container_using_the_volume() {
+    let f = Fixture::new();
+    f.existing_volume();
+    assert_eq!(f.managed().home_mounted(&volume_name()), Ok(false));
+    // Stopped containers count: they still pin the volume.
+    f.output("containers", format!("\"{}\"\n", "b".repeat(64)));
+    assert_eq!(f.managed().home_mounted(&volume_name()), Ok(true));
+    let call = f
+        .calls()
+        .into_iter()
+        .rfind(|call| call["args"][4] == "container")
+        .unwrap();
+    assert_eq!(
+        call["args"].as_array().unwrap()[4..],
+        json!([
+            "container",
+            "ls",
+            "--all",
+            "--no-trunc",
+            "--filter",
+            "volume=pi-home",
+            "--format",
+            "{{json .ID}}"
+        ])
+        .as_array()
+        .unwrap()[..]
+    );
+    // Anything unclear is an error, never "not mounted".
+    for invalid in ["container-id\n", "\"short\"\n", "null\n"] {
+        f.output("containers", invalid);
+        assert!(
+            f.managed().home_mounted(&volume_name()).is_err(),
+            "{invalid:?}"
+        );
+    }
+}

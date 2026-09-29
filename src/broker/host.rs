@@ -457,6 +457,9 @@ impl ValidatedHostInputs {
             Ok(runtime) => runtime,
             Err(failure) => return Err(HostFailure::from_runtime(signals, failure)),
         };
+        if runtime.home_debt_cleared() > 0 {
+            progress(StartStep::ClearedHomeLock);
+        }
         if let Err(error) = runtime.admit_and_start_pi_with(&mut *progress) {
             return Err(HostFailure {
                 error: HostError::Runtime(error),

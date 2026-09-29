@@ -375,8 +375,12 @@ fn pi_fixture() {
         return;
     };
     let f = Fixture::new();
-    if mode == "host-coordinator" {
-        f.mode(&mode);
+    if mode.starts_with("host-coordinator") {
+        f.mode("host-coordinator");
+        let (debt, busy) = (mode.contains("-debt"), mode.ends_with("-busy"));
+        if busy {
+            f.mode("busy");
+        }
         let stage = f.root.path().join("stage");
         let lease_root = f.root.path().join(".pithos-home-leases");
         for path in [&stage, &lease_root] {
@@ -410,24 +414,63 @@ fn pi_fixture() {
         ))
         .unwrap();
         assert_eq!(selected.volume().as_str(), volume.as_str());
+        // A dead holder's leftover marker, exactly as the lease writes it.
+        let planted = debt.then(|| {
+            let hash: String = <sha2::Sha256 as sha2::Digest>::digest(volume.as_str().as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let key = lease_root.join(hash);
+            let uses = key.join("uses");
+            for dir in [&key, &uses] {
+                fs::create_dir(dir).unwrap();
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            fs::write(key.join("lease"), b"").unwrap();
+            fs::set_permissions(key.join("lease"), fs::Permissions::from_mode(0o600)).unwrap();
+            let marker = uses.join("a".repeat(64));
+            fs::write(&marker, b"pithos-home-use-v1\noutstanding\n").unwrap();
+            fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+            marker
+        });
         // Startup reports each step, so a slow start never looks like a hang.
         let steps = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let sink = steps.clone();
         let selected = selected.with_progress(move |step| sink.borrow_mut().push(step));
         let endpoint = BrokerEndpoint::offline(listener).unwrap();
-        let mut coordinator = match selected.start_offline(HostGrant::workspace(), endpoint) {
+        let started = selected.start_offline(HostGrant::workspace(), endpoint);
+        if busy {
+            // A container still mounts the home: the debt stays and the run refuses.
+            let Err(mut failure) = started else {
+                panic!("started while a container mounts the home");
+            };
+            assert!(
+                failure
+                    .error
+                    .to_string()
+                    .contains("still mounted by a container"),
+                "{}",
+                failure.error
+            );
+            while failure.poll_cleanup() == RuntimePoll::Running {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert!(planted.unwrap().exists(), "debt kept");
+            return;
+        }
+        let mut coordinator = match started {
             Ok(owner) => owner,
             Err(failure) => panic!("host coordinator setup failed: {}", failure.error),
         };
-        assert_eq!(
-            *steps.borrow(),
-            [
-                StartStep::PiImage,
-                StartStep::Home,
-                StartStep::Network,
-                StartStep::Pi
-            ]
-        );
+        if let Some(marker) = &planted {
+            assert!(!marker.exists(), "a dead run's home lock is cleared");
+        }
+        let mut expected = vec![StartStep::PiImage];
+        if debt {
+            expected.push(StartStep::ClearedHomeLock);
+        }
+        expected.extend([StartStep::Home, StartStep::Network, StartStep::Pi]);
+        assert_eq!(*steps.borrow(), expected);
         let credential: Value = serde_json::from_slice(
             &fs::read(f.root.path().join("credential/broker-client.json")).unwrap(),
         )
@@ -1230,6 +1273,16 @@ fn run_fixture(mode: &str) {
 #[test]
 fn offline_host_coordinator_admits_serves_status_runs_fixed_pi_and_settles() {
     run_fixture("host-coordinator");
+}
+
+#[test]
+fn host_coordinator_clears_a_dead_runs_home_lock() {
+    run_fixture("host-coordinator-debt");
+}
+
+#[test]
+fn host_coordinator_keeps_a_home_lock_while_a_container_mounts_the_home() {
+    run_fixture("host-coordinator-debt-busy");
 }
 
 #[test]

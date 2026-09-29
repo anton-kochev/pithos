@@ -375,6 +375,9 @@ fn run_broker(grant: HostGrant, style: Style) -> ExitCode {
             }
             StartStep::BrowserImage => "preparing the browser image ...",
             StartStep::PostgresImage => "preparing the Postgres image (pulled if missing) ...",
+            StartStep::ClearedHomeLock => {
+                "cleared a leftover home lock from an earlier run (nothing was using the volume)"
+            }
             StartStep::Home => "checking the Pi home volume ...",
             StartStep::Network => "creating the run network ...",
             StartStep::Postgres => "starting Postgres ...",

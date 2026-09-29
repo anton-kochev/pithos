@@ -877,24 +877,9 @@ impl ManagedDocker {
     /// Missing/busy/unsupported/changed metadata is rejected without fallback.
     /// Malformed or incomplete output never yields evidence. After *any* error,
     /// inspect [`Self::has_child`] and poll retained ownership to settlement.
-    pub fn preflight(
-        &mut self,
-        volume: &VolumeName,
-        image: &ImmutableImageId,
-        identity: HostIdentity,
-    ) -> Result<ReadOnlyPreflight, PreflightError> {
-        let bytes = self.query(&["volume", "ls", "--format", "{{json .Name}}"])?;
-        let names = json_lines(&bytes)?;
-        if names.iter().any(|name| VolumeName::new(name).is_err()) {
-            return Err(PreflightError::InvalidResponse);
-        }
-        if !names.contains(volume.as_str()) {
-            return Err(PreflightError::Missing);
-        }
-        let first = self.inspect_volume(volume)?;
-        if !first.supported(volume) {
-            return Err(PreflightError::Unsupported);
-        }
+    /// Whether any container, running or stopped, mounts `volume`. Only a
+    /// complete, well-formed listing answers; anything else is an error.
+    pub fn home_mounted(&mut self, volume: &VolumeName) -> Result<bool, PreflightError> {
         let filter = format!("volume={}", volume.as_str());
         let bytes = self.query(&[
             "container",
@@ -915,7 +900,28 @@ impl ManagedDocker {
         }) {
             return Err(PreflightError::InvalidResponse);
         }
-        if !containers.is_empty() {
+        Ok(!containers.is_empty())
+    }
+
+    pub fn preflight(
+        &mut self,
+        volume: &VolumeName,
+        image: &ImmutableImageId,
+        identity: HostIdentity,
+    ) -> Result<ReadOnlyPreflight, PreflightError> {
+        let bytes = self.query(&["volume", "ls", "--format", "{{json .Name}}"])?;
+        let names = json_lines(&bytes)?;
+        if names.iter().any(|name| VolumeName::new(name).is_err()) {
+            return Err(PreflightError::InvalidResponse);
+        }
+        if !names.contains(volume.as_str()) {
+            return Err(PreflightError::Missing);
+        }
+        let first = self.inspect_volume(volume)?;
+        if !first.supported(volume) {
+            return Err(PreflightError::Unsupported);
+        }
+        if self.home_mounted(volume)? {
             return Err(PreflightError::Busy);
         }
         let bytes = self.query(&["image", "inspect", "--format", IMAGE, image.as_str()])?;
