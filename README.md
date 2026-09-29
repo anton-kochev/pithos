@@ -190,7 +190,8 @@ macOS; native Linux is not verified yet.
   - A `postgres` block without `--broker=workspace` is refused.
 - **Cleanup.** Containers and the run's network are removed when Pi exits. The
   home volume `pithos-home-<project>` is shared with normal runs, one run at a
-  time.
+  time. If a run is killed, the next broker run clears its leftover home lock
+  by itself, but only when no container still uses the volume.
 
 ### Clipboard screenshots
 

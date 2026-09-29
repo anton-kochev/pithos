@@ -1091,3 +1091,157 @@ fn docker_desktop_pi_runs_dotnet_against_postgres_and_chromium_shows_the_row() {
     assert!(managed_containers().is_empty(), "container left behind");
     assert!(managed_networks().is_empty(), "network left behind");
 }
+
+/// The acceptance home's outstanding-use markers (lease debt).
+fn home_debt() -> Vec<String> {
+    let home = std::env::var_os("HOME").unwrap();
+    let uses = Path::new(&home)
+        .join(".pithos-home-leases")
+        .join(sha256_hex(VOLUME))
+        .join("uses");
+    fs::read_dir(uses)
+        .map(|d| {
+            d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+#[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
+fn docker_desktop_double_ctrl_c_during_startup_settles_without_home_debt() {
+    use std::io::Write;
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        opted_in(),
+        "explicit real-Docker acceptance opt-in required"
+    );
+    assert!(
+        managed_containers().is_empty() && managed_networks().is_empty(),
+        "stale managed resources present; refusing to run"
+    );
+    assert!(home_debt().is_empty(), "stale home debt; refusing to run");
+    let _home = HomeVolume::absent();
+    let (_parent, workspace, _) = project(b"toolchains: {}\n");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pithos"));
+    command
+        .current_dir(&workspace)
+        .arg("--broker=workspace")
+        .env("NO_COLOR", "1");
+    let (mut child, mut master) = spawn_in_pty(command);
+    let mut output = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(600);
+    let mut interrupted = false;
+    let status = loop {
+        drain(&mut master, &mut output);
+        if let Some(status) = child.try_wait().unwrap() {
+            drain(&mut master, &mut output);
+            break status;
+        }
+        // Ctrl-C twice once startup reaches the home checks, as a user would.
+        if !interrupted
+            && String::from_utf8_lossy(&output).contains("» broker: checking the Pi home volume")
+        {
+            master.write_all(b"\x03").unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            master.write_all(b"\x03").unwrap();
+            interrupted = true;
+        }
+        assert!(Instant::now() < deadline, "deadline");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let text = String::from_utf8_lossy(&output).into_owned();
+    assert!(
+        interrupted,
+        "startup never reached the home checks:\n{text}"
+    );
+    assert!(!status.success(), "{text}");
+    assert!(managed_containers().is_empty(), "container left behind");
+    assert!(managed_networks().is_empty(), "network left behind");
+    let debt = home_debt();
+    assert!(debt.is_empty(), "home debt left {debt:?}:\n{text}");
+}
+
+/// Plant a dead holder's marker on the acceptance home, as the lease writes it.
+fn plant_home_debt() -> PathBuf {
+    let home = std::env::var_os("HOME").unwrap();
+    let key = Path::new(&home)
+        .join(".pithos-home-leases")
+        .join(sha256_hex(VOLUME));
+    let uses = key.join("uses");
+    for dir in [&key, &uses] {
+        if !dir.exists() {
+            fs::create_dir(dir).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    if !key.join("lease").exists() {
+        fs::write(key.join("lease"), b"").unwrap();
+        fs::set_permissions(key.join("lease"), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let marker = uses.join("d".repeat(64));
+    fs::write(&marker, b"pithos-home-use-v1\noutstanding\n").unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    marker
+}
+
+#[test]
+#[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
+fn docker_desktop_broker_clears_a_dead_runs_home_lock_and_runs() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        opted_in(),
+        "explicit real-Docker acceptance opt-in required"
+    );
+    assert!(home_debt().is_empty(), "stale home debt; refusing to run");
+    let _home = HomeVolume::absent();
+    let marker = plant_home_debt();
+    let scratch = tempfile::tempdir().unwrap();
+    let result = run_child_in_pty(&scratch.path().join("result"), "status");
+    let _ = fs::remove_file(&marker);
+    eprintln!("{result}");
+    assert!(result.contains("authorized 200"), "{result}");
+    assert!(result.contains("settled Complete"), "{result}");
+    assert!(home_debt().is_empty(), "debt left: {:?}", home_debt());
+}
+
+#[test]
+#[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
+fn docker_desktop_broker_keeps_the_home_lock_while_a_container_mounts_the_home() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        opted_in(),
+        "explicit real-Docker acceptance opt-in required"
+    );
+    assert!(home_debt().is_empty(), "stale home debt; refusing to run");
+    let _home = HomeVolume::absent();
+    // What a killed pithos can leave: a container that still uses the home.
+    let holder = "pithos-acceptance-home-holder";
+    let _ = Command::new("docker").args(["rm", "-f", holder]).output();
+    docker(&[
+        "run",
+        "-d",
+        "--name",
+        holder,
+        "-v",
+        &format!("{VOLUME}:/home"),
+        "alpine",
+        "sleep",
+        "300",
+    ]);
+    let marker = plant_home_debt();
+    let (_parent, workspace, _) = project(b"toolchains: {}\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_pithos"))
+        .current_dir(&workspace)
+        .arg("--broker=workspace")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let kept = marker.exists();
+    let _ = Command::new("docker").args(["rm", "-f", holder]).output();
+    let _ = fs::remove_file(&marker);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("still mounted by a container"), "{stderr}");
+    assert!(kept, "debt must stay while a container mounts the home");
+}

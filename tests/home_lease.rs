@@ -505,3 +505,65 @@ fn links_special_files_and_non_directory_roots_are_not_adopted() {
         assert!(!home.path().join("absent").exists());
     }
 }
+
+// Self-clearing debt: a broker run that holds the exclusive flock knows every
+// marker belongs to a dead process; it clears them only when Docker says no
+// container mounts the volume.
+
+#[test]
+fn crashed_holders_debt_is_cleared_when_nothing_mounts_the_home() {
+    for kind in ["broker", "legacy"] {
+        let home = tempfile::tempdir().unwrap();
+        let state = root(home.path());
+        Holder::start(home.path(), kind, "ready").crash();
+        let debt = markers(&state);
+        assert_eq!(debt.len(), 1);
+        let (lease, cleared) =
+            HomeLease::broker_recovering(&state, &volume(), || Ok(false)).unwrap();
+        assert_eq!(cleared, 1, "{kind}");
+        let now = markers(&state);
+        assert_eq!(now.len(), 1, "only this holder's own marker");
+        assert!(!now.contains(&debt[0]));
+        lease.finish().unwrap();
+        assert!(markers(&state).is_empty());
+    }
+}
+
+#[test]
+fn debt_stays_while_a_container_mounts_the_home_or_docker_is_unsure() {
+    let home = tempfile::tempdir().unwrap();
+    let state = root(home.path());
+    drop(HomeLease::broker(&state, &volume()).unwrap());
+    let debt = markers(&state);
+    let mounted = HomeLease::broker_recovering(&state, &volume(), || Ok(true))
+        .err()
+        .unwrap();
+    assert_eq!(mounted.kind(), std::io::ErrorKind::ResourceBusy);
+    assert_eq!(markers(&state), debt);
+    let unsure = HomeLease::broker_recovering(&state, &volume(), || {
+        Err(std::io::Error::other("daemon query failed"))
+    });
+    assert!(unsure.is_err());
+    assert_eq!(markers(&state), debt);
+}
+
+#[test]
+fn docker_is_asked_only_about_real_debt_and_never_past_a_live_holder() {
+    let home = tempfile::tempdir().unwrap();
+    let state = root(home.path());
+    let (lease, cleared) = HomeLease::broker_recovering(&state, &volume(), || {
+        panic!("no debt: Docker must not be asked")
+    })
+    .unwrap();
+    assert_eq!(cleared, 0);
+    lease.finish().unwrap();
+    let holder = Holder::start(home.path(), "legacy", "live");
+    let busy = HomeLease::broker_recovering(&state, &volume(), || {
+        panic!("live holder: Docker must not be asked")
+    })
+    .err()
+    .unwrap();
+    assert_eq!(busy.kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(markers(&state).len(), 1, "the live holder's marker stays");
+    holder.finish();
+}
