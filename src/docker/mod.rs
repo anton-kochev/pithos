@@ -21,14 +21,14 @@ pub use image::{
     inspect_image_id, list_dangling_pithos_images, list_tagged_pithos_images, remove_image,
     tag_image,
 };
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub use managed::AppBuild;
 pub use managed::image_cache as managed_image_cache;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use managed::probes::{
-    AppInputs, AppLogs, AppState, BrowserInputs, PI_EXTENSION, PiBrowser, PiInputs,
+    AppInputs, AppLogs, AppState, BrowserInputs, PI_EXTENSION, PiBrowser, PiInputs, PostgresInputs,
     ProbeError as OwnedProbeError, RunNetwork,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use managed::{AppBuild, PostgresImage};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use managed::{
     ImmutableImageId, ManagedDocker, PreflightChildState, PreflightError, ReadOnlyPreflight,

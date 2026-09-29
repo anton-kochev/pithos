@@ -187,6 +187,173 @@ fn exec_in(id: &str, args: &[&str]) -> String {
     )
 }
 
+// In Pi: the database answers on its run-network name.
+const PG_TCP: &str = r#"
+import socket, time
+for _ in range(100):
+    try:
+        socket.create_connection(('pithos-postgres', 5432), timeout=2).close(); print('pg tcp ok'); break
+    except OSError: time.sleep(0.2)
+else: print('pg tcp failed')
+"#;
+
+/// A small ASP.NET Core app that Pi runs itself: it reads the run's
+/// `PITHOS_POSTGRES_*`, writes a row and renders it.
+const PG_DOTNET_APP: [(&str, &str); 2] = [
+    (
+        "Web.csproj",
+        r#"<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="9.0.3" />
+  </ItemGroup>
+</Project>
+"#,
+    ),
+    (
+        "Program.cs",
+        r#"using Npgsql;
+
+static string Env(string key) =>
+    Environment.GetEnvironmentVariable(key) ?? throw new InvalidOperationException($"{key} is not set");
+
+var connection = new NpgsqlConnectionStringBuilder
+{
+    Host = Env("PITHOS_POSTGRES_HOST"),
+    Port = int.Parse(Env("PITHOS_POSTGRES_PORT")),
+    Username = Env("PITHOS_POSTGRES_USER"),
+    Password = Env("PITHOS_POSTGRES_PASSWORD"),
+    Database = Env("PITHOS_POSTGRES_DATABASE"),
+}.ConnectionString;
+await using var data = NpgsqlDataSource.Create(connection);
+await using (var setup = data.CreateCommand(
+    "create table notes(text text not null); insert into notes values ('hello from postgres')"))
+{
+    await setup.ExecuteNonQueryAsync();
+}
+
+var app = WebApplication.Create(args);
+app.MapGet("/", async () =>
+{
+    await using var query = data.CreateCommand("select text from notes");
+    var text = (string?)await query.ExecuteScalarAsync();
+    return Results.Content(
+        $"<html><head><title>pithos pg</title></head><body><h1>{text}</h1></body></html>",
+        "text/html");
+});
+app.Run();
+"#,
+    ),
+];
+
+// In Pi: run the app in the background, then wait until it answers.
+const PG_DOTNET_UP: &str = r#"
+cd /workspace/src/Web
+nohup dotnet run --urls http://0.0.0.0:5000 > /tmp/web.log 2>&1 &
+python3 - <<'PY'
+import time, urllib.request
+for _ in range(900):
+    try:
+        print('web', urllib.request.urlopen('http://127.0.0.1:5000/', timeout=2).read().decode().strip()); break
+    except Exception: time.sleep(1)
+else: print('web never answered'); print(open('/tmp/web.log').read()[-3000:])
+PY
+"#;
+
+// In Pi: Chromium in the sidecar opens the app Pi serves.
+const PG_DOTNET_BROWSE: &str = r#"
+set -e
+pithos-browser open
+pithos-browser goto "http://pithos-app:5000/"
+pithos-browser snapshot
+"#;
+
+/// .NET inside Pi against the broker's Postgres, seen through Chromium.
+fn pg_dotnet_probe(pi: &str) -> String {
+    let mut result = exec_in(pi, &["bash", "-c", PG_DOTNET_UP]);
+    result.push_str(&exec_in(pi, &["bash", "-c", PG_DOTNET_BROWSE]));
+    result
+}
+
+/// The broker's Postgres: reachable from Pi, the configured database exists,
+/// and it runs as the fixed user with only tmpfs mounts.
+fn postgres_probe(pi: &str) -> String {
+    let mut result = exec_in(pi, &["python3", "-c", PG_TCP]);
+    let Some(pg) = docker(&[
+        "ps",
+        "-q",
+        "--filter",
+        "label=io.pithos.probe.request=runtime-postgres-v1",
+    ])
+    .lines()
+    .next()
+    .map(str::to_owned) else {
+        return result + "no postgres container\n";
+    };
+    result.push_str(&exec_in(
+        &pg,
+        &[
+            "psql",
+            "-U",
+            "postgres",
+            "-d",
+            "app",
+            "-tAc",
+            "select 'db ' || current_database()",
+        ],
+    ));
+    result.push_str(&docker(&[
+        "inspect",
+        "--format",
+        "pg user {{.Config.User}} readonly {{.HostConfig.ReadonlyRootfs}} mounts {{range .Mounts}}{{.Type}} {{end}}",
+        &pg,
+    ]));
+    // Pi's connection details, and its password works for a TCP login.
+    result.push_str(&exec_in(
+        pi,
+        &[
+            "sh",
+            "-c",
+            "echo pg env $PITHOS_POSTGRES_HOST $PITHOS_POSTGRES_PORT $PITHOS_POSTGRES_USER $PITHOS_POSTGRES_DATABASE",
+        ],
+    ));
+    let password = exec_in(pi, &["printenv", "PITHOS_POSTGRES_PASSWORD"])
+        .trim()
+        .to_owned();
+    let url = exec_in(pi, &["printenv", "PITHOS_POSTGRES_URL"]);
+    if !password.is_empty()
+        && url.trim() == format!("postgresql://postgres:{password}@pithos-postgres:5432/app")
+    {
+        result.push_str("url ok\n");
+    }
+    // Over the network name, not loopback: the image trusts loopback, so
+    // only this path proves the password. A wrong one must be refused.
+    for (candidate, label) in [(password.as_str(), "login"), ("wrong", "wrong-password")] {
+        result.push_str(&exec_in(
+            &pg,
+            &[
+                "env",
+                &format!("PGPASSWORD={candidate}"),
+                "psql",
+                "-h",
+                "pithos-postgres",
+                "-U",
+                "postgres",
+                "-d",
+                "app",
+                "-tAc",
+                &format!("select '{label} ' || 'ok'"),
+            ],
+        ));
+    }
+    result
+}
+
 /// The .NET flow from inside Pi, plus a host-side check that no managed
 /// container publishes a port other than the sidecar's loopback viewer.
 fn dotnet_probe(pi: &str) -> String {
@@ -289,9 +456,15 @@ fn broker_child() {
     let browser = mode == "browser";
     let apps = mode == "apps";
     let dotnet = mode == "dotnet";
+    let postgres = mode == "postgres";
+    let pg_dotnet = mode == "pg-dotnet";
     // Default config (project-stored sessions), plus the sidecar when asked.
     let config: &[u8] = if browser || dotnet {
         b"toolchains: {}\nbrowser: {enabled: true}\n"
+    } else if postgres {
+        b"toolchains: {}\npostgres: {version: \"17.10\", database: app}\n"
+    } else if pg_dotnet {
+        b"toolchains: {dotnet: \"10.0\"}\nbrowser: {enabled: true}\npostgres: {version: \"17.10\", database: app}\n"
     } else {
         b"toolchains: {}\n"
     };
@@ -305,6 +478,13 @@ fn broker_child() {
         )
         .unwrap();
         fs::write(app.join("index.html"), "hello from app\n").unwrap();
+    }
+    if pg_dotnet {
+        let web = workspace.join("src/Web");
+        fs::create_dir_all(&web).unwrap();
+        for (name, content) in PG_DOTNET_APP {
+            fs::write(web.join(name), content).unwrap();
+        }
     }
     if dotnet {
         let api = workspace.join("src/Api");
@@ -338,7 +518,12 @@ fn broker_child() {
     let probe: Arc<Mutex<Option<String>>> = Arc::default();
     let sink = probe.clone();
     std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(if apps || dotnet { 900 } else { 60 });
+        let deadline = Instant::now()
+            + Duration::from_secs(if apps || dotnet || postgres || pg_dotnet {
+                1800
+            } else {
+                60
+            });
         let result = loop {
             let running = docker(&[
                 "ps",
@@ -373,6 +558,12 @@ fn broker_child() {
                 if dotnet {
                     result.push_str(&dotnet_probe(id));
                 }
+                if postgres {
+                    result.push_str(&postgres_probe(id));
+                }
+                if pg_dotnet {
+                    result.push_str(&pg_dotnet_probe(id));
+                }
                 break result;
             }
             if Instant::now() > deadline {
@@ -382,7 +573,12 @@ fn broker_child() {
         };
         *sink.lock().unwrap() = Some(result);
     });
-    let deadline = Instant::now() + Duration::from_secs(if apps || dotnet { 900 } else { 120 });
+    let deadline = Instant::now()
+        + Duration::from_secs(if apps || dotnet || postgres || pg_dotnet {
+            1800
+        } else {
+            120
+        });
     let outcome = loop {
         match coordinator.poll() {
             Ok(RuntimePoll::Running) => {}
@@ -414,7 +610,8 @@ fn run_child_in_pty(result: &Path, mode: &str) -> String {
         .env("PITHOS_BROKER_CHILD", result)
         .env("PITHOS_BROKER_CHILD_MODE", mode);
     let (mut child, mut master) = spawn_in_pty(command);
-    let deadline = Instant::now() + Duration::from_secs(600);
+    // A first build of a toolchain image can take many minutes.
+    let deadline = Instant::now() + Duration::from_secs(2400);
     let mut output = Vec::new();
     loop {
         drain(&mut master, &mut output);
@@ -646,7 +843,10 @@ fn docker_desktop_cli_workspace_run_shows_viewer_and_settles_when_pi_quits() {
         "stale managed resources present; refusing to run"
     );
     let _home = HomeVolume::absent();
-    let (_parent, workspace, _) = project(b"toolchains: {}\nbrowser: {enabled: true}\n");
+    // A pi.extensions package, installed by the image entrypoint as in legacy runs.
+    let (_parent, workspace, _) = project(
+        b"toolchains: {}\nbrowser: {enabled: true}\npi:\n  version: \"0.84.4\"\n  extensions:\n    \"@pithos-kit/themes\": npm:0.1.0\n",
+    );
     let mut command = Command::new(env!("CARGO_BIN_EXE_pithos"));
     command
         .current_dir(&workspace)
@@ -699,6 +899,8 @@ fn docker_desktop_cli_workspace_run_shows_viewer_and_settles_when_pi_quits() {
         "extension.mjs",
         "[Skills]",
         "browser-automation",
+        // The entrypoint installed the pi.extensions package from the manifest.
+        "Installed npm:@pithos-kit/themes@0.1.0",
     ] {
         assert!(
             plain.contains(expected),
@@ -790,6 +992,77 @@ fn docker_desktop_pi_builds_a_dotnet_app_and_chromium_browses_it() {
                 "{line}"
             );
         }
+    }
+    assert!(managed_containers().is_empty(), "container left behind");
+    assert!(managed_networks().is_empty(), "network left behind");
+}
+
+#[test]
+#[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
+fn docker_desktop_broker_runs_postgres_next_to_pi_and_removes_it() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        opted_in(),
+        "explicit real-Docker acceptance opt-in required"
+    );
+    assert!(
+        managed_containers().is_empty() && managed_networks().is_empty(),
+        "stale managed resources present; refusing to run"
+    );
+    let volumes_before = docker(&["volume", "ls", "-q"]);
+    let _home = HomeVolume::absent();
+    let scratch = tempfile::tempdir().unwrap();
+    let result = run_child_in_pty(&scratch.path().join("result"), "postgres");
+    eprintln!("{result}");
+    assert!(!result.contains("wrong-password ok"), "{result}");
+    for expected in [
+        "pg tcp ok",
+        "db app",
+        "pg user 65532:65532 readonly true mounts tmpfs tmpfs",
+        "pg env pithos-postgres 5432 postgres app",
+        "url ok",
+        "login ok",
+        "settled Complete",
+    ] {
+        assert!(result.contains(expected), "missing {expected:?}\n{result}");
+    }
+    assert!(managed_containers().is_empty(), "container left behind");
+    assert!(managed_networks().is_empty(), "network left behind");
+    // tmpfs over every image VOLUME: no anonymous volume was created.
+    let before: std::collections::BTreeSet<&str> = volumes_before.lines().collect();
+    let after = docker(&["volume", "ls", "-q"]);
+    let new: Vec<&str> = after
+        .lines()
+        .filter(|v| !before.contains(v) && *v != VOLUME)
+        .collect();
+    assert!(new.is_empty(), "new volumes: {new:?}");
+}
+
+#[test]
+#[ignore = "requires Docker Desktop and PITHOS_BROKER_DOCKER_TEST=1"]
+fn docker_desktop_pi_runs_dotnet_against_postgres_and_chromium_shows_the_row() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        opted_in(),
+        "explicit real-Docker acceptance opt-in required"
+    );
+    assert!(
+        managed_containers().is_empty() && managed_networks().is_empty(),
+        "stale managed resources present; refusing to run"
+    );
+    let _home = HomeVolume::absent();
+    let scratch = tempfile::tempdir().unwrap();
+    let result = run_child_in_pty(&scratch.path().join("result"), "pg-dotnet");
+    eprintln!("{result}");
+    for expected in [
+        // The app, running inside Pi, read the row back from Postgres...
+        "web <html><head><title>pithos pg</title>",
+        // ...and Chromium in the sidecar rendered it.
+        "Page Title: pithos pg",
+        "heading \"hello from postgres\"",
+        "settled Complete",
+    ] {
+        assert!(result.contains(expected), "missing {expected:?}\n{result}");
     }
     assert!(managed_containers().is_empty(), "container left behind");
     assert!(managed_networks().is_empty(), "network left behind");

@@ -7,7 +7,8 @@
 use super::{
     grant::{Action, HostGrant},
     runtime::{
-        BrokerRuntime, RuntimeBrowser, RuntimeBuildFailure, RuntimeError, RuntimePoll, RuntimeSetup,
+        BrokerRuntime, RuntimeBrowser, RuntimeBuildFailure, RuntimeError, RuntimePoll,
+        RuntimePostgres, RuntimeSetup,
     },
     state::HostRunState,
     transport::{BrokerEndpoint, HostAccess},
@@ -88,6 +89,7 @@ pub struct ValidatedHostInputs {
     volume: VolumeName,
     sessions: SessionStorage,
     browser: config::BrowserConfig,
+    postgres: Option<config::PostgresConfig>,
 }
 
 /// Container path of project-stored sessions: `<workspace>/.pi/sessions`
@@ -137,19 +139,6 @@ fn validate_project(
     let yaml = config::load(pithos).map_err(|_| HostError::Config)?;
     config::session_storage(&yaml).map_err(|_| HostError::Config)?;
     config::browser_config(&yaml).map_err(|_| HostError::Config)?;
-    if yaml.as_mapping().is_some_and(|mapping| {
-        mapping.iter().any(|(key, value)| {
-            key.as_str() == Some("pi")
-                && value.as_mapping().is_some_and(|pi| {
-                    pi.iter().any(|(key, extensions)| {
-                        key.as_str() == Some("extensions")
-                            && extensions.as_mapping().is_some_and(|m| !m.is_empty())
-                    })
-                })
-        })
-    }) {
-        return Err(HostError::Config);
-    }
     let identity = HostIdentity::effective().map_err(|_| HostError::Identity)?;
     VolumeName::new(&format!("pithos-home-{project}")).map_err(|_| HostError::Volume)?;
     Ok((yaml, identity, project))
@@ -273,6 +262,7 @@ impl HostInputs {
         }
         let sessions = config::session_storage(&yaml).map_err(|_| HostError::Config)?;
         let browser = config::browser_config(&yaml).map_err(|_| HostError::Config)?;
+        let postgres = config::postgres_config(&yaml).map_err(|_| HostError::Config)?;
         Ok(ValidatedHostInputs {
             input: self,
             yaml,
@@ -281,6 +271,7 @@ impl HostInputs {
             volume,
             sessions,
             browser,
+            postgres,
         })
     }
 }
@@ -333,6 +324,10 @@ impl ValidatedHostInputs {
         if !grant.permits(Action::Status) || !grant.permits(Action::Run) {
             return Err(HostFailure::empty(HostError::Grant));
         }
+        // Service containers need the workspace grant.
+        if self.postgres.is_some() && !grant.permits(Action::Build) {
+            return Err(HostFailure::empty(HostError::Grant));
+        }
         // Preparation can outlive HOME. LegacyHomeUse reads the current HOME,
         // so a stale root must fail before consuming signals or querying Docker.
         if !lease_root_matches_current_home(&self.input.lease_root) {
@@ -381,6 +376,20 @@ impl ValidatedHostInputs {
         } else {
             None
         };
+        let postgres = match &self.postgres {
+            None => None,
+            Some(config) => match docker.ensure_postgres_image(
+                &config.version,
+                &self.input.workspace,
+                &self.input.stage_root,
+            ) {
+                Ok(image) => Some(RuntimePostgres {
+                    image,
+                    database: config.database.clone(),
+                }),
+                Err(_) => return Err(HostFailure::prelease(HostError::Image, signals, docker)),
+            },
+        };
         let endpoint = match offline {
             Some(endpoint) => endpoint,
             None => {
@@ -425,6 +434,8 @@ impl ValidatedHostInputs {
             interactive_limits: self.input.interactive_limits,
             browser,
             stage_root: Some(self.input.stage_root),
+            extensions: Some(crate::extensions::manifest(&self.yaml)).filter(|m| !m.is_empty()),
+            postgres,
         };
         let mut runtime = match BrokerRuntime::begin_with_docker(grant, endpoint, setup, docker) {
             Ok(runtime) => runtime,

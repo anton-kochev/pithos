@@ -71,6 +71,8 @@ impl Fixture {
             interactive_limits: InteractiveLimits::default(),
             browser: None,
             stage_root: None,
+            extensions: None,
+            postgres: None,
         }
     }
 

@@ -296,6 +296,19 @@ fn main() -> ExitCode {
         .unwrap_or(result)
 }
 
+fn postgres_requested(yaml: &YamlOwned) -> bool {
+    matches!(pithos::config::postgres_config(yaml), Ok(Some(_)))
+}
+
+fn refuse_postgres(style: Style) -> ExitCode {
+    narrate(
+        style,
+        "» ERROR:",
+        ".pithos postgres: needs `pithos --broker=workspace`",
+    );
+    ExitCode::from(2)
+}
+
 /// One managed Pi run under an explicit host grant. The coordinator owns
 /// Docker selection, images, the broker and cleanup; this only reports.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -326,9 +339,16 @@ fn run_broker(grant: HostGrant, style: Style) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if let Err(e) = pithos::config::load(&pithos_bytes) {
-        narrate(style, "» ERROR:", &format!("{e}"));
-        return ExitCode::from(2);
+    match pithos::config::load(&pithos_bytes) {
+        Err(e) => {
+            narrate(style, "» ERROR:", &format!("{e}"));
+            return ExitCode::from(2);
+        }
+        // Only the workspace grant may start service containers.
+        Ok(yaml) if postgres_requested(&yaml) && !grant.permits(Action::Build) => {
+            return refuse_postgres(style);
+        }
+        Ok(_) => {}
     }
     let fail = |error: &dyn std::fmt::Display| {
         narrate(style, "» ERROR:", &format!("broker: {error}"));
@@ -467,6 +487,10 @@ fn launch(subcommand: Subcommand) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The database is a broker-owned container; legacy runs never start one.
+    if matches!(subcommand, Subcommand::Run { .. }) && postgres_requested(&yaml) {
+        return refuse_postgres(style);
+    }
     let dockerfile_path = cwd.join(".pithos.d").join("Dockerfile");
     let dockerfile_content = pithos::dockerfile::emit(&yaml);
     let extensions_manifest_path = cwd.join(".pithos.d").join("extensions.list");

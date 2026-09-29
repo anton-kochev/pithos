@@ -33,7 +33,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HOST_CONFIG: &[u8] = b"toolchains: {}\nsessions: {storage: volume}\n";
+const HOST_CONFIG: &[u8] = b"toolchains: {}\nsessions: {storage: volume}\npi: {version: '0.84.4', extensions: {x: 'npm:1.0'}}\n";
 
 fn image() -> ImmutableImageId {
     ImmutableImageId::new(&format!("sha256:{}", "a".repeat(64))).unwrap()
@@ -182,11 +182,15 @@ elif a[0]=='run':
         assert opt('--workdir')=='/workspace'
         # A workspace-grant coordinator also mounts the broker's Pi extension.
         extension=mode('host-coordinator')
-        assert len(mounts)==3+(2 if mode('browser') else 0)+(1 if extension else 0)
+        # Its config declares pi.extensions: the entrypoint's manifest is a private read-only copy.
+        assert len(mounts)==3+(2 if mode('browser') else 0)+(2 if extension else 0)
         by={m['Destination']:m for m in mounts}
         if extension:
             assert by['/run/pithos-broker/extension.mjs']['Source']==str(root/'credential/pithos-broker.mjs')
             assert not by['/run/pithos-broker/extension.mjs']['RW']
+            assert by['/etc/pithos/extensions.list']['Source']==str(root/'credential/extensions.list')
+            assert not by['/etc/pithos/extensions.list']['RW']
+            assert (root/'credential/extensions.list').read_text()=='x\tnpm:1.0\n'
         if mode('browser'):
             assert by['/run/pithos-browser/client.json']['Source']==str(root/'browser-run/client.json')
             assert by['/run/pithos-browser/skills']['Source']==str(root/'browser-run/skills')
@@ -196,7 +200,14 @@ elif a[0]=='run':
         assert by['/run/pithos-broker/client.json']['Source']==str(root/'credential/broker-client.json')
         assert not by['/run/pithos-broker/client.json']['RW']
         # Docker's own flags only: everything after the image belongs to Pi.
-        assert not any(v in a[:a.index(__IMAGE__)] for v in ['--privileged','--env','-e','--env-file','--volume','-v'])
+        # The only env source Pi may get is the broker's private Postgres file.
+        allowed=['--env-file'] if mode('pg-env') else []
+        assert not any(v in a[:a.index(__IMAGE__)] for v in ['--privileged','--env','-e','--env-file','--volume','-v'] if v not in allowed)
+        if mode('pg-env'):
+            source=str(root/'pg/pi-postgres.env')
+            assert a[:a.index(__IMAGE__)].count('--env-file')==1 and opt('--env-file')==source
+            assert r['spec']['operation']['env_source']==source
+            assert 'pg-secret' not in '\n'.join(a)
         access=r['spec']['operation']['host_access']
         gateway=(root/'gateway').read_text()
         expected_hosts=['host.docker.internal:'+gateway] if access=='linux-host-gateway' else []
@@ -487,6 +498,10 @@ fn pi_fixture() {
             !f.root.path().join("credential/pithos-broker.mjs").exists(),
             "extension file removed at cleanup"
         );
+        assert!(
+            !f.root.path().join("credential/extensions.list").exists(),
+            "extensions manifest removed at cleanup"
+        );
         assert!(!pi[4..].iter().any(|arg| {
             arg.contains(&f.root.path().join("socket").display().to_string())
                 || arg.contains(&f.root.path().join("config").display().to_string())
@@ -540,6 +555,8 @@ fn pi_fixture() {
                 interactive_limits: InteractiveLimits::default(),
                 browser: None,
                 stage_root: None,
+                extensions: None,
+                postgres: None,
             },
         )
         .unwrap();
@@ -722,7 +739,7 @@ fn pi_fixture() {
         lease.finish().unwrap();
         return;
     }
-    if mode.starts_with("browser") || mode == "network-only" {
+    if mode.starts_with("browser") || mode == "network-only" || mode == "pg-env" {
         browser_fixture(&f, &mode);
         return;
     }
@@ -795,6 +812,8 @@ fn pi_fixture() {
             network: None,
             browser: None,
             extension: None,
+            extensions_list: None,
+            env_file: None,
         },
     );
     if mode == "intent-storage-failure" {
@@ -954,6 +973,8 @@ fn pi_fixture() {
                     network: None,
                     browser: None,
                     extension: None,
+                    extensions_list: None,
+                    env_file: None,
                 }
             )
             .is_err(),
@@ -976,7 +997,18 @@ fn browser_fixture(f: &Fixture, mode: &str) {
     f.admit(&mut docker, &mut m, &c);
     // Every mode joins the run network; only "browser" modes add its files.
     f.mode("network");
-    let with_files = mode != "network-only";
+    let with_files = mode != "network-only" && mode != "pg-env";
+    // Workspace runs with a database hand Pi its private connection file.
+    let pg_env = (mode == "pg-env").then(|| {
+        f.mode("pg-env");
+        let dir = f.root.path().join("pg");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let file = dir.join("pi-postgres.env");
+        fs::write(&file, "PITHOS_POSTGRES_PASSWORD=pg-secret\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        file
+    });
     if with_files {
         f.mode("browser");
     }
@@ -1024,6 +1056,8 @@ fn browser_fixture(f: &Fixture, mode: &str) {
                 skills: &skills,
             }),
             extension: None,
+            extensions_list: None,
+            env_file: pg_env.as_deref(),
         },
     );
     if mode == "browser-foreign-network" {
@@ -1081,6 +1115,11 @@ fn browser_pi_joins_only_its_own_run_network_and_leaves_first() {
 #[test]
 fn workspace_pi_joins_the_run_network_without_browser_files() {
     run_fixture("network-only");
+}
+
+#[test]
+fn pi_gets_only_the_private_postgres_env_file() {
+    run_fixture("pg-env");
 }
 
 // Fake Docker calls race fixed runtime limits; unbounded parallel load flakes.
@@ -1337,6 +1376,8 @@ fn start_requires_matching_probes_and_rechecks_host_paths_and_home_before_intent
                         network: None,
                         browser: None,
                         extension: None,
+                        extensions_list: None,
+                        env_file: None,
                     }
                 )
                 .is_err()
@@ -1467,6 +1508,8 @@ fn start_requires_matching_probes_and_rechecks_host_paths_and_home_before_intent
                 network: None,
                 browser: None,
                 extension: None,
+                extensions_list: None,
+                env_file: None,
             },
         );
         assert!(result.is_err(), "{mode}");
@@ -1532,6 +1575,8 @@ fn workspace_cannot_mutate_a_frozen_docker_selection_alias() {
                     network: None,
                     browser: None,
                     extension: None,
+                    extensions_list: None,
+                    env_file: None,
                 }
             )
             .is_err()

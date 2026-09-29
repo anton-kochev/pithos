@@ -25,6 +25,27 @@
 
 mod image_build;
 pub use image_build::AppBuild;
+
+/// The official Postgres image, pinned by immutable ID. `volumes` are its
+/// declared `VOLUME` paths; each must be covered by a tmpfs at run time, or
+/// Docker creates an anonymous volume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostgresImage {
+    pub id: ImmutableImageId,
+    pub volumes: Vec<String>,
+}
+impl PostgresImage {
+    /// Where the data lives: the first declared `VOLUME`, else the default.
+    pub fn data_root(&self) -> &str {
+        postgres_data_root(&self.volumes)
+    }
+}
+
+pub(crate) fn postgres_data_root(volumes: &[String]) -> &str {
+    volumes
+        .first()
+        .map_or("/var/lib/postgresql", String::as_str)
+}
 pub mod image_cache;
 pub mod probes;
 // The registry consumer is a later slice; keep this typed boundary internal.
@@ -952,6 +973,17 @@ impl ManagedDocker {
 
     /// Resolve or build the identity Chromium sidecar image through the frozen
     /// selection only. Same staging rules as [`Self::ensure_identity_image`].
+    /// The official `postgres:<major.minor>` image, pulled if missing and
+    /// pinned by immutable ID with its declared `VOLUME` paths.
+    pub fn ensure_postgres_image(
+        &mut self,
+        version: &str,
+        workspace: &Path,
+        staging_root: &Path,
+    ) -> Result<PostgresImage, PreflightError> {
+        image_build::ensure_postgres(self, version, workspace, staging_root)
+    }
+
     pub fn ensure_browser_image(
         &mut self,
         identity: HostIdentity,

@@ -242,13 +242,20 @@ fn unique_labelled(
     key: &str,
     hash: &str,
 ) -> Result<Option<ImmutableImageId>, PreflightError> {
-    let filter = format!("label={key}={hash}");
+    unique_listed(docker, &format!("label={key}={hash}"))
+}
+
+/// The single local image matching `filter`, if any; several are ambiguous.
+fn unique_listed(
+    docker: &mut ManagedDocker,
+    filter: &str,
+) -> Result<Option<ImmutableImageId>, PreflightError> {
     let bytes = docker.query(&[
         "image",
         "ls",
         "--no-trunc",
         "--filter",
-        &filter,
+        filter,
         "--format",
         LIST,
     ])?;
@@ -263,6 +270,72 @@ fn unique_labelled(
         return Err(PreflightError::InvalidResponse);
     }
     Ok(Some(id))
+}
+
+const POSTGRES_INSPECT: &str =
+    r#"{"id":{{json .Id}},"tags":{{json .RepoTags}},"volumes":{{json (index .Config "Volumes")}}}"#;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PostgresCandidate {
+    id: String,
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    tags: Option<Vec<String>>,
+    #[serde(deserialize_with = "Deserialize::deserialize")]
+    volumes: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+/// A data path the official image may declare: plain components below
+/// `/var/lib/postgresql`, so a tmpfs there cannot shadow anything else.
+fn postgres_volume(path: &str) -> bool {
+    path.strip_prefix("/var/lib/postgresql")
+        .is_some_and(|rest| {
+            rest.is_empty()
+                || rest.strip_prefix('/').is_some_and(|rest| {
+                    rest.split('/').all(|part| {
+                        !part.is_empty()
+                            && part != "."
+                            && part != ".."
+                            && part
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                    })
+                })
+        })
+}
+
+/// The local image tagged exactly `reference`, verified, if any.
+pub(super) fn resolve_postgres(
+    docker: &mut ManagedDocker,
+    reference: &str,
+) -> Result<Option<super::PostgresImage>, PreflightError> {
+    let Some(id) = unique_listed(docker, &format!("reference={reference}"))? else {
+        return Ok(None);
+    };
+    let bytes = docker.query(&[
+        "image",
+        "inspect",
+        "--format",
+        POSTGRES_INSPECT,
+        id.as_str(),
+    ])?;
+    let info: PostgresCandidate =
+        serde_json::from_slice(&bytes).map_err(|_| PreflightError::InvalidResponse)?;
+    if info.id != id.as_str() {
+        return Err(PreflightError::Changed);
+    }
+    let volumes: Vec<String> = info.volumes.unwrap_or_default().into_keys().collect();
+    if !info
+        .tags
+        .unwrap_or_default()
+        .iter()
+        .any(|tag| tag == reference)
+        || volumes.len() > 4
+        || !volumes.iter().all(|path| postgres_volume(path))
+    {
+        return Err(PreflightError::Unsupported);
+    }
+    Ok(Some(super::PostgresImage { id, volumes }))
 }
 
 pub(super) fn inspect_base(docker: &mut ManagedDocker) -> Result<ImmutableImageId, PreflightError> {

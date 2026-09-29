@@ -13,8 +13,9 @@ use super::{
     api::{ApiConnection, ApiPoll, ApiRequest},
     browser::BrowserFiles,
     credential::RunCredential,
-    extension::ExtensionFile,
+    extension::{ExtensionFile, ExtensionsList},
     grant::{Action, HostGrant},
+    postgres::PostgresFiles,
     resources::ResourceManifest,
     status::{Phase, Snapshot},
     transport::{BrokerEndpoint, HostAccess},
@@ -40,11 +41,18 @@ const CREDENTIAL_REQUEST: &str = "runtime-credential-v1";
 const PI_REQUEST: &str = "runtime-pi-v1";
 const NETWORK_REQUEST: &str = "runtime-network-v1";
 const BROWSER_REQUEST: &str = "runtime-browser-v1";
+const POSTGRES_REQUEST: &str = "runtime-postgres-v1";
 
 /// The host-built Chromium sidecar image and the configured mode.
 pub struct RuntimeBrowser {
     pub image: ImmutableImageId,
     pub mode: BrowserMode,
+}
+
+/// The run's database, started on the run network before Pi.
+pub struct RuntimePostgres {
+    pub image: crate::docker::PostgresImage,
+    pub database: String,
 }
 
 /// Trusted, host-owned selections for one run. None are read from project input.
@@ -66,6 +74,10 @@ pub struct RuntimeSetup {
     pub browser: Option<RuntimeBrowser>,
     /// Private staging root for app builds. `None` refuses app builds.
     pub stage_root: Option<PathBuf>,
+    /// The `pi.extensions` manifest, when the project declares any.
+    pub extensions: Option<String>,
+    /// Workspace runs only: a database next to Pi.
+    pub postgres: Option<RuntimePostgres>,
 }
 
 /// Runtime lifecycle. `Ready` means the managed Pi was durably launched and is
@@ -168,6 +180,10 @@ pub struct BrokerRuntime {
     browser_files_cleaned: bool,
     extension: Option<ExtensionFile>,
     extension_cleaned: bool,
+    extensions_list: Option<ExtensionsList>,
+    extensions_list_cleaned: bool,
+    postgres_files: Option<PostgresFiles>,
+    postgres_files_cleaned: bool,
     viewer: Option<String>,
     lease: Option<HomeLease>,
     child: Option<InteractiveChild>,
@@ -184,6 +200,8 @@ struct RuntimeInputs {
     manifest_directory: PathBuf,
     run_directory: PathBuf,
     stage_root: Option<PathBuf>,
+    extensions: Option<String>,
+    postgres: Option<RuntimePostgres>,
     browser: Option<RuntimeBrowser>,
     run_id: String,
     volume: VolumeName,
@@ -280,6 +298,8 @@ impl BrokerRuntime {
             manifest_directory: setup.manifest_directory.clone(),
             run_directory: setup.run_directory.clone(),
             stage_root: setup.stage_root,
+            extensions: setup.extensions,
+            postgres: setup.postgres,
             browser: setup.browser,
             run_id: setup.run_id.clone(),
             volume: setup.volume,
@@ -312,6 +332,10 @@ impl BrokerRuntime {
             browser_files_cleaned: true,
             extension: None,
             extension_cleaned: true,
+            extensions_list: None,
+            extensions_list_cleaned: true,
+            postgres_files: None,
+            postgres_files_cleaned: true,
             viewer: None,
             lease: Some(lease),
             child: Some(child),
@@ -430,6 +454,34 @@ impl BrokerRuntime {
             } else {
                 None
             };
+            // The database starts first: Pi's app may connect as soon as it runs.
+            if let Some(postgres) = &self.setup.postgres {
+                if !self.grant.permits(Action::Build) {
+                    return Err(RuntimeError::Grant);
+                }
+                let network = network.as_ref().ok_or(RuntimeError::State)?;
+                self.postgres_files_cleaned = false;
+                let files = self.postgres_files.insert(
+                    PostgresFiles::create(
+                        &self.setup.run_directory,
+                        &postgres.database,
+                        postgres.image.data_root(),
+                    )
+                    .map_err(|_| RuntimeError::Admission)?,
+                );
+                docker
+                    .start_postgres(
+                        manifest,
+                        POSTGRES_REQUEST,
+                        crate::docker::PostgresInputs {
+                            image: &postgres.image,
+                            network,
+                            database: &postgres.database,
+                            env_file: files.env_path(),
+                        },
+                    )
+                    .map_err(|_| RuntimeError::Admission)?;
+            }
             if let (Some(browser), Some(network)) = (&self.setup.browser, &network) {
                 self.browser_files_cleaned = false;
                 let files = self.browser_files.insert(
@@ -472,6 +524,13 @@ impl BrokerRuntime {
                     crate::docker::PI_EXTENSION.to_owned(),
                 ]);
             }
+            if let Some(manifest) = &self.setup.extensions {
+                self.extensions_list_cleaned = false;
+                self.extensions_list = Some(
+                    ExtensionsList::create(&self.setup.run_directory, manifest)
+                        .map_err(|_| RuntimeError::Admission)?,
+                );
+            }
             let paths = self
                 .browser_files
                 .as_ref()
@@ -494,6 +553,8 @@ impl BrokerRuntime {
                             .as_ref()
                             .map(|(client, skills)| PiBrowser { client, skills }),
                         extension: self.extension.as_ref().map(ExtensionFile::path),
+                        extensions_list: self.extensions_list.as_ref().map(ExtensionsList::path),
+                        env_file: self.postgres_files.as_ref().map(PostgresFiles::pi_env_path),
                     },
                 )
                 .map_err(|_| RuntimeError::Admission)?;
@@ -819,6 +880,28 @@ impl BrokerRuntime {
             self.extension = None;
             self.extension_cleaned = true;
         } else if !self.extension_cleaned {
+            self.phase = RuntimePhase::RecoveryRequired;
+            return RuntimePoll::RecoveryRequired;
+        }
+        if let Some(files) = self.postgres_files.as_mut() {
+            if files.cleanup().is_err() {
+                self.phase = RuntimePhase::RecoveryRequired;
+                return RuntimePoll::RecoveryRequired;
+            }
+            self.postgres_files = None;
+            self.postgres_files_cleaned = true;
+        } else if !self.postgres_files_cleaned {
+            self.phase = RuntimePhase::RecoveryRequired;
+            return RuntimePoll::RecoveryRequired;
+        }
+        if let Some(file) = self.extensions_list.as_mut() {
+            if file.cleanup().is_err() {
+                self.phase = RuntimePhase::RecoveryRequired;
+                return RuntimePoll::RecoveryRequired;
+            }
+            self.extensions_list = None;
+            self.extensions_list_cleaned = true;
+        } else if !self.extensions_list_cleaned {
             self.phase = RuntimePhase::RecoveryRequired;
             return RuntimePoll::RecoveryRequired;
         }
