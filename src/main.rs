@@ -313,7 +313,10 @@ fn refuse_postgres(style: Style) -> ExitCode {
 /// Docker selection, images, the broker and cleanup; this only reports.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_broker(grant: HostGrant, style: Style) -> ExitCode {
-    use pithos::broker::{host::HostInputs, runtime::RuntimePoll};
+    use pithos::broker::{
+        host::HostInputs,
+        runtime::{RuntimePoll, StartStep},
+    };
     use std::time::Duration;
 
     let cwd = match env::current_dir() {
@@ -364,6 +367,22 @@ fn run_broker(grant: HostGrant, style: Style) -> ExitCode {
         Ok(inputs) => inputs,
         Err(e) => return fail(&e),
     };
+    // Announce each step: an image build or home checks can take a while.
+    let inputs = inputs.with_progress(move |step| {
+        let message = match step {
+            StartStep::PiImage => {
+                "preparing the Pi image (the first run after a config change can take minutes) ..."
+            }
+            StartStep::BrowserImage => "preparing the browser image ...",
+            StartStep::PostgresImage => "preparing the Postgres image (pulled if missing) ...",
+            StartStep::Home => "checking the Pi home volume ...",
+            StartStep::Network => "creating the run network ...",
+            StartStep::Postgres => "starting Postgres ...",
+            StartStep::Browser => "starting the browser ...",
+            StartStep::Pi => "starting Pi ...",
+        };
+        narrate(style, "» broker:", message);
+    });
     let mut coordinator = match inputs.start(grant) {
         Ok(coordinator) => coordinator,
         Err(mut failure) => {

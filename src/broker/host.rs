@@ -8,7 +8,7 @@ use super::{
     grant::{Action, HostGrant},
     runtime::{
         BrokerRuntime, RuntimeBrowser, RuntimeBuildFailure, RuntimeError, RuntimePoll,
-        RuntimePostgres, RuntimeSetup,
+        RuntimePostgres, RuntimeSetup, StartStep,
     },
     state::HostRunState,
     transport::{BrokerEndpoint, HostAccess},
@@ -90,6 +90,7 @@ pub struct ValidatedHostInputs {
     sessions: SessionStorage,
     browser: config::BrowserConfig,
     postgres: Option<config::PostgresConfig>,
+    progress: Option<Box<dyn FnMut(StartStep)>>,
 }
 
 /// Container path of project-stored sessions: `<workspace>/.pi/sessions`
@@ -272,6 +273,7 @@ impl HostInputs {
             sessions,
             browser,
             postgres,
+            progress: None,
         })
     }
 }
@@ -287,6 +289,12 @@ impl ValidatedHostInputs {
             command.extend(["--skill".into(), BROWSER_SKILL.into()]);
         }
         command
+    }
+
+    /// Report each startup step before it begins.
+    pub fn with_progress(mut self, progress: impl FnMut(StartStep) + 'static) -> Self {
+        self.progress = Some(Box::new(progress));
+        self
     }
 
     pub fn project(&self) -> &str {
@@ -315,7 +323,7 @@ impl ValidatedHostInputs {
     }
 
     fn start_inner(
-        self,
+        mut self,
         grant: HostGrant,
         offline: Option<BrokerEndpoint>,
     ) -> Result<HostCoordinator, HostFailure> {
@@ -351,6 +359,8 @@ impl ValidatedHostInputs {
             Ok(docker) => docker,
             Err(_) => return Err(HostFailure::with_signals(HostError::Docker, signals)),
         };
+        let mut progress = self.progress.take().unwrap_or_else(|| Box::new(|_| {}));
+        progress(StartStep::PiImage);
         let image = match docker.ensure_identity_image(
             &self.yaml,
             &self.input.pithos,
@@ -362,6 +372,7 @@ impl ValidatedHostInputs {
             Err(_) => return Err(HostFailure::prelease(HostError::Image, signals, docker)),
         };
         let browser = if self.browser.enabled {
+            progress(StartStep::BrowserImage);
             match docker.ensure_browser_image(
                 self.identity,
                 &self.input.workspace,
@@ -378,17 +389,22 @@ impl ValidatedHostInputs {
         };
         let postgres = match &self.postgres {
             None => None,
-            Some(config) => match docker.ensure_postgres_image(
-                &config.version,
-                &self.input.workspace,
-                &self.input.stage_root,
-            ) {
-                Ok(image) => Some(RuntimePostgres {
-                    image,
-                    database: config.database.clone(),
-                }),
-                Err(_) => return Err(HostFailure::prelease(HostError::Image, signals, docker)),
-            },
+            Some(config) => {
+                progress(StartStep::PostgresImage);
+                match docker.ensure_postgres_image(
+                    &config.version,
+                    &self.input.workspace,
+                    &self.input.stage_root,
+                ) {
+                    Ok(image) => Some(RuntimePostgres {
+                        image,
+                        database: config.database.clone(),
+                    }),
+                    Err(_) => {
+                        return Err(HostFailure::prelease(HostError::Image, signals, docker));
+                    }
+                }
+            }
         };
         let endpoint = match offline {
             Some(endpoint) => endpoint,
@@ -441,7 +457,7 @@ impl ValidatedHostInputs {
             Ok(runtime) => runtime,
             Err(failure) => return Err(HostFailure::from_runtime(signals, failure)),
         };
-        if let Err(error) = runtime.admit_and_start_pi() {
+        if let Err(error) = runtime.admit_and_start_pi_with(&mut *progress) {
             return Err(HostFailure {
                 error: HostError::Runtime(error),
                 signals: Some(signals),

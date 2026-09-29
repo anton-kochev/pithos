@@ -22,6 +22,13 @@ pub fn identity_overlay(identity: HostIdentity, role: ImageRole) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
+    // Docker Desktop reports a bind mount point as root-owned, so git calls
+    // the project "dubious" for the non-root Pi user. Only a system (or
+    // global) entry is honoured for this key; trust exactly the workspace.
+    let trust = match role {
+        ImageRole::Pi => "RUN git config --system --add safe.directory /workspace\n",
+        ImageRole::Browser => "",
+    };
     let python = match role {
         ImageRole::Pi => "",
         ImageRole::Browser => {
@@ -34,6 +41,7 @@ pub fn identity_overlay(identity: HostIdentity, role: ImageRole) -> String {
          # Identity image helper sha256:{digest}\n\
          COPY identity_image.py /tmp/pithos-identity-image.py\n\
          RUN /usr/bin/python3 /tmp/pithos-identity-image.py --image-build {account} {uid} {gid} && rm /tmp/pithos-identity-image.py\n\
+         {trust}\
          ENV HOME={home} USER={account} LOGNAME={account}\n\
          USER {user}\n",
         uid = identity.uid(),

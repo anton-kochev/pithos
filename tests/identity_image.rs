@@ -316,3 +316,20 @@ fn identity_rejects_root_and_reserved_ids() {
         assert_eq!(HostIdentity::new(uid, gid), Err(IdentityError::InvalidIds));
     }
 }
+
+#[test]
+fn pi_overlay_trusts_only_the_workspace_mount_for_git() {
+    // Docker Desktop reports a bind mount point as root-owned, so git refuses
+    // the project as "dubious ownership" for the non-root Pi user. A system
+    // entry (env and repo config are ignored for this key) trusts exactly it.
+    let identity = HostIdentity::new(1000, 1000).unwrap();
+    let pi = identity_overlay(identity, ImageRole::Pi);
+    let trust = "RUN git config --system --add safe.directory /workspace\n";
+    assert_eq!(pi.matches(trust).count(), 1);
+    assert!(
+        pi.find(trust) < pi.rfind("USER 1000:1000"),
+        "set while root"
+    );
+    assert!(!pi.contains("safe.directory *"));
+    assert!(!identity_overlay(identity, ImageRole::Browser).contains("safe.directory"));
+}

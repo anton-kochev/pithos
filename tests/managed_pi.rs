@@ -9,7 +9,7 @@ use pithos::{
         host::HostInputs,
         journal::State,
         resources::ResourceManifest,
-        runtime::{BrokerRuntime, RuntimePhase, RuntimePoll, RuntimeSetup},
+        runtime::{BrokerRuntime, RuntimePhase, RuntimePoll, RuntimeSetup, StartStep},
         transport::{BrokerEndpoint, HostAccess},
     },
     docker::{
@@ -410,11 +410,24 @@ fn pi_fixture() {
         ))
         .unwrap();
         assert_eq!(selected.volume().as_str(), volume.as_str());
+        // Startup reports each step, so a slow start never looks like a hang.
+        let steps = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = steps.clone();
+        let selected = selected.with_progress(move |step| sink.borrow_mut().push(step));
         let endpoint = BrokerEndpoint::offline(listener).unwrap();
         let mut coordinator = match selected.start_offline(HostGrant::workspace(), endpoint) {
             Ok(owner) => owner,
             Err(failure) => panic!("host coordinator setup failed: {}", failure.error),
         };
+        assert_eq!(
+            *steps.borrow(),
+            [
+                StartStep::PiImage,
+                StartStep::Home,
+                StartStep::Network,
+                StartStep::Pi
+            ]
+        );
         let credential: Value = serde_json::from_slice(
             &fs::read(f.root.path().join("credential/broker-client.json")).unwrap(),
         )
