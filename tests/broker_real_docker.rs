@@ -40,6 +40,10 @@ except e.HTTPError as err:
 print('endpoint', c['endpoint'].split(':')[1])
 import os
 print('sessions writable', os.access('/workspace/.pi/sessions', os.W_OK))
+import subprocess
+# Docker Desktop shows the mount point as root-owned; git must still accept it.
+git = subprocess.run(['git', '-C', '/workspace', 'status', '--porcelain'], capture_output=True, text=True)
+print('git status', git.returncode, git.stderr.strip()[:120])
 "#;
 
 // Run inside the browser-enabled Pi container: serve a page from Pi and
@@ -469,6 +473,13 @@ fn broker_child() {
         b"toolchains: {}\n"
     };
     let (_parent, workspace, pithos) = project(config);
+    // A real repository, like any project Pi works in.
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&workspace)
+        .status()
+        .unwrap();
+    assert!(init.success());
     if apps {
         let app = workspace.join("app");
         fs::create_dir(&app).unwrap();
@@ -658,6 +669,7 @@ fn docker_desktop_pi_reaches_broker_and_run_settles_clean() {
     );
     assert!(result.contains("settled Complete"), "{result}");
     assert!(result.contains("sessions writable True"), "{result}");
+    assert!(result.contains("git status 0 "), "{result}");
     assert!(
         managed_containers().is_empty(),
         "managed container left behind"
@@ -915,6 +927,18 @@ fn docker_desktop_cli_workspace_run_shows_viewer_and_settles_when_pi_quits() {
         text.contains("» browser: viewer: http://127.0.0.1:"),
         "no viewer line:\n{tail}"
     );
+    // Every startup step is announced before it runs, so a slow start
+    // (an image build, home checks) never looks like a hang.
+    for step in [
+        "» broker: preparing the Pi image",
+        "» broker: preparing the browser image ...",
+        "» broker: checking the Pi home volume ...",
+        "» broker: creating the run network ...",
+        "» broker: starting the browser ...",
+        "» broker: starting Pi ...",
+    ] {
+        assert!(text.contains(step), "missing {step:?}:\n{tail}");
+    }
     assert!(status.success(), "exit {status:?}:\n{tail}");
     assert!(managed_containers().is_empty(), "container left behind");
     assert!(managed_networks().is_empty(), "network left behind");

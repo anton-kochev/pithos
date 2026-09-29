@@ -49,6 +49,20 @@ pub struct RuntimeBrowser {
     pub mode: BrowserMode,
 }
 
+/// A startup step, reported before it begins. Some take minutes (a first
+/// image build or pull), so the CLI prints each one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartStep {
+    PiImage,
+    BrowserImage,
+    PostgresImage,
+    Home,
+    Network,
+    Postgres,
+    Browser,
+    Pi,
+}
+
 /// The run's database, started on the run network before Pi.
 pub struct RuntimePostgres {
     pub image: crate::docker::PostgresImage,
@@ -391,6 +405,14 @@ impl BrokerRuntime {
     /// polling; these existing synchronous probe APIs can each occupy the calling
     /// thread for their documented bound.
     pub fn admit_and_start_pi(&mut self) -> Result<(), RuntimeError> {
+        self.admit_and_start_pi_with(&mut |_| {})
+    }
+
+    /// [`Self::admit_and_start_pi`], reporting each step before it begins.
+    pub fn admit_and_start_pi_with(
+        &mut self,
+        progress: &mut dyn FnMut(StartStep),
+    ) -> Result<(), RuntimeError> {
         if !self.grant.permits(Action::Run) {
             return Err(RuntimeError::Grant);
         }
@@ -404,6 +426,7 @@ impl BrokerRuntime {
             let child = self.child.as_mut().ok_or(RuntimeError::State)?;
             // A missing home is created and seeded first; existing homes are
             // never modified here and go through admission unchanged.
+            progress(StartStep::Home);
             docker
                 .provision_home(
                     manifest,
@@ -446,6 +469,7 @@ impl BrokerRuntime {
             // are debt from the first write until cleanup removes them.
             // Workspace runs (apps) and browser runs share one owned network.
             let network = if self.setup.browser.is_some() || self.grant.permits(Action::Build) {
+                progress(StartStep::Network);
                 Some(
                     docker
                         .create_run_network(manifest, NETWORK_REQUEST)
@@ -469,6 +493,7 @@ impl BrokerRuntime {
                     )
                     .map_err(|_| RuntimeError::Admission)?,
                 );
+                progress(StartStep::Postgres);
                 docker
                     .start_postgres(
                         manifest,
@@ -489,6 +514,7 @@ impl BrokerRuntime {
                         .map_err(|_| RuntimeError::Admission)?,
                 );
                 let interactive = browser.mode == BrowserMode::Interactive;
+                progress(StartStep::Browser);
                 docker
                     .start_browser(
                         manifest,
@@ -535,6 +561,7 @@ impl BrokerRuntime {
                 .browser_files
                 .as_ref()
                 .map(|files| (files.client(), files.skills()));
+            progress(StartStep::Pi);
             docker
                 .start_pi(
                     manifest,
