@@ -9,7 +9,10 @@ mod tempfile;
 
 use pithos::{
     broker::{journal::State, resources::ResourceManifest},
-    docker::{AppInputs, BrowserInputs, HostIdentity, ImmutableImageId, ManagedDocker, RunNetwork},
+    docker::{
+        AppInputs, BrowserInputs, HostIdentity, ImmutableImageId, ManagedDocker, PostgresImage,
+        PostgresInputs, RunNetwork,
+    },
     lifecycle::Shutdown,
 };
 use std::{
@@ -25,6 +28,12 @@ fn image() -> ImmutableImageId {
 }
 fn app_image() -> ImmutableImageId {
     ImmutableImageId::new(&format!("sha256:{}", "a".repeat(64))).unwrap()
+}
+fn pg_image() -> PostgresImage {
+    PostgresImage {
+        id: ImmutableImageId::new(&format!("sha256:{}", "d".repeat(64))).unwrap(),
+        volumes: vec!["/var/lib/postgresql/data".into()],
+    }
 }
 fn identity() -> HostIdentity {
     HostIdentity::effective().unwrap()
@@ -131,18 +140,27 @@ elif a[0] == 'run':
     mounts = []; hosts = []
     for v in opts('--mount'):
         kv = dict((p.split('=',1)+[''])[:2] for p in next(csv.reader([v])))
+        if kv['type'] == 'tmpfs':
+            # Docker's real shapes: actual mounts vs. the configured HostConfig.Mounts.
+            mounts.append({'Type':'tmpfs','Source':'','Destination':kv['destination'],'Mode':'','RW':True,'Propagation':''})
+            hosts.append({'Type':'tmpfs','Target':kv['destination'],'TmpfsOptions':{'Mode':int(kv['tmpfs-mode'],8)}})
+            continue
         ro = 'readonly' in kv
         mounts.append({'Type':'bind','Source':kv['source'],'Destination':kv['target'],'RW':not ro,'Propagation':'rprivate'})
         hosts.append({'Type':'bind','Source':kv['source'],'Target':kv['target'],'ReadOnly':ro})
+    env = [l for f in opts('--env-file') for l in pathlib.Path(f).read_text().splitlines()]
     tmpfs = dict(v.split(':',1) for v in opts('--tmpfs'))
     ports = {'6080/tcp':[{'HostIp':'127.0.0.1','HostPort':''}]} if '127.0.0.1::6080' in opts('-p') else {}
     size = lambda k, d=None: next((int(v.split('=')[1][:-1]) for v in a if v.startswith(k+'=')), d)
     at = next(i for i,v in enumerate(a) if v.startswith('sha256:'))
     image, cmd = a[at], a[at+1:] or None
     app = image == __APP_IMAGE__
+    pg = image == __PG_IMAGE__
     cid = next_id()
+    entry = ['docker-entrypoint.sh'] if pg else ['/app/server'] if app else json.loads(__ENTRYPOINT__)
+    if pg: cmd = cmd or ['postgres']
     c = {'id':cid,'name':'/'+name,'image':image,
-         'config':{'Image':image,'User':a[a.index('--user')+1],'Entrypoint':['/app/server'] if app else json.loads(__ENTRYPOINT__),'Cmd':cmd,
+         'config':{'Image':image,'User':a[a.index('--user')+1],'Entrypoint':entry,'Cmd':cmd,'Env':env+['PG_MAJOR=17'],
                    'Labels':labels,'Volumes':None,'Tty':False,'OpenStdin':False,'WorkingDir':'/opt/pithos-browser'},
          'host':{'NetworkMode':a[a.index('--network')+1],'ReadonlyRootfs':'--read-only' in a,'Privileged':False,
                  'AutoRemove':False,'RestartPolicy':{'Name':'no','MaximumRetryCount':0},'CapDrop':['ALL'],
@@ -154,9 +172,9 @@ elif a[0] == 'run':
          'aliases':opts('--network-alias'),
          'state':{'Status':'running','Running':True,'ExitCode':0,'Error':'','OOMKilled':False,'Dead':False,
                   'Health':{'Status':'unhealthy' if mode('unhealthy') else 'healthy'}}}
-    if app: del c['state']['Health']
+    if app or pg: del c['state']['Health']
     if mode('exits') or (app and mode('app-exits')): c['state'].update({'Status':'exited','Running':False,'ExitCode':3 if app else 1})
-    if mode('tampered-browser') or (app and mode('tampered-app')): c['host']['CapAdd'] = ['SYS_ADMIN']
+    if mode('tampered-browser') or (app and mode('tampered-app')) or (pg and mode('tampered-pg')): c['host']['CapAdd'] = ['SYS_ADMIN']
     save('ctr', name, c)
     print(cid)
 elif a[:2] == ['container','ls']:
@@ -185,6 +203,7 @@ else:
         .replace("__ROOT__", &serde_json::to_string(root.path()).unwrap())
         .replace("__ENTRYPOINT__", &serde_json::to_string(ENTRYPOINT).unwrap())
         .replace("__APP_IMAGE__", &serde_json::to_string(app_image().as_str()).unwrap())
+        .replace("__PG_IMAGE__", &serde_json::to_string(pg_image().id.as_str()).unwrap())
         .replace("__IMAGE__", &serde_json::to_string(image().as_str()).unwrap())
         .replace("__USER__", &serde_json::to_string(&identity().docker_user()).unwrap())
         .replace(
@@ -696,4 +715,133 @@ fn app_and_sidecar_share_the_run_network_and_only_the_viewer_is_published() {
     let mutations = f.mutations();
     assert_eq!(mutations.last().map(String::as_str), Some("network rm"));
     assert_eq!(mutations.iter().filter(|m| *m == "container rm").count(), 2);
+}
+
+fn pg_env(f: &Fixture) -> PathBuf {
+    let path = f.root.path().join("private/postgres.env");
+    fs::write(
+        &path,
+        "POSTGRES_PASSWORD=secret\nPOSTGRES_DB=app\nPGDATA=/var/lib/postgresql/data/pithos\n",
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+fn run_pg(
+    f: &Fixture,
+    docker: &mut ManagedDocker,
+    manifest: &mut ResourceManifest,
+    network: &RunNetwork,
+) -> Result<String, pithos::docker::OwnedProbeError> {
+    let env = pg_env(f);
+    docker.start_postgres(
+        manifest,
+        "postgres-1",
+        PostgresInputs {
+            image: &pg_image(),
+            network,
+            database: "app",
+            env_file: &env,
+        },
+    )
+}
+
+#[test]
+fn postgres_runs_hardened_on_tmpfs_and_is_removed_before_the_network() {
+    let f = Fixture::new();
+    let mut docker = f.docker();
+    let mut manifest = f.manifest();
+    let network = docker
+        .create_run_network(&mut manifest, "network-1")
+        .unwrap();
+    let host = run_pg(&f, &mut docker, &mut manifest, &network).unwrap();
+    assert_eq!(host, "pithos-postgres");
+    let args = f.run_args();
+    let name = &args[args.iter().position(|a| a == "--name").unwrap() + 1];
+    let expected: Vec<String> = [
+        "run",
+        "-d",
+        "--pull=never",
+        "--name",
+        name,
+        "--label",
+        &format!("io.pithos.probe.name={name}"),
+        "--label",
+        "io.pithos.probe.request=postgres-1",
+        "--label",
+        "io.pithos.probe.run=run-1",
+        "--network",
+        network.name(),
+        "--network-alias",
+        "pithos-postgres",
+        "--user",
+        "65532:65532",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--read-only",
+        "--memory=1g",
+        "--pids-limit=256",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
+        // Every image VOLUME is covered, or Docker makes an anonymous volume.
+        "--mount",
+        "type=tmpfs,destination=/var/lib/postgresql/data,tmpfs-mode=1777",
+        "--mount",
+        "type=tmpfs,destination=/var/run/postgresql,tmpfs-mode=1777",
+        // The password never appears in argv.
+        "--env-file",
+        f.root.path().join("private/postgres.env").to_str().unwrap(),
+        pg_image().id.as_str(),
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    assert_eq!(args, expected);
+    assert!(!args.iter().any(|a| a.contains("secret")));
+    assert_eq!(f.live(), 2);
+    docker.reconcile_resources(&mut manifest).unwrap();
+    assert!(manifest.is_settled());
+    assert_eq!(f.live(), 0);
+    assert_eq!(
+        f.mutations(),
+        ["network create", "run -d", "container rm", "network rm"]
+    );
+}
+
+#[test]
+fn tampered_postgres_is_quarantined_never_removed() {
+    let f = Fixture::new();
+    f.set("tampered-pg");
+    let mut docker = f.docker();
+    let mut manifest = f.manifest();
+    let network = docker
+        .create_run_network(&mut manifest, "network-1")
+        .unwrap();
+    assert!(run_pg(&f, &mut docker, &mut manifest, &network).is_err());
+    assert!(docker.reconcile_resources(&mut manifest).is_err());
+    assert!(!f.mutations().contains(&"container rm".to_string()));
+}
+
+#[test]
+fn a_shared_env_file_is_refused_before_any_container() {
+    let f = Fixture::new();
+    let mut docker = f.docker();
+    let mut manifest = f.manifest();
+    let network = docker
+        .create_run_network(&mut manifest, "network-1")
+        .unwrap();
+    let env = pg_env(&f);
+    fs::set_permissions(&env, fs::Permissions::from_mode(0o644)).unwrap();
+    let result = docker.start_postgres(
+        &mut manifest,
+        "postgres-1",
+        PostgresInputs {
+            image: &pg_image(),
+            network: &network,
+            database: "app",
+            env_file: &env,
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(f.mutations(), ["network create"]);
 }

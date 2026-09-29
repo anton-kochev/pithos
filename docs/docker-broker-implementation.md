@@ -1,6 +1,59 @@
 # Docker broker implementation contract and TDD ledger
 
-Status: **in development; not a usable broker yet**. The saved `.pi/plans/2026-09-19-224101-plan-174aded7-b1a3-4af2-ac63-f8d154d0fe33.md` predates the later conversation decisions. This document preserves those decisions without altering the saved approval artifact.
+Status (2026-09-29): **usable and experimental on Docker Desktop for macOS**
+(`pithos --broker=status|workspace`). Native Linux acceptance is still
+pending. The sections below "Revised scope and delivered steps" are the
+original contract and history; where they disagree, the revised section wins.
+The saved plan `.pi/plans/2026-09-19-224101-plan-174aded7-b1a3-4af2-ac63-f8d154d0fe33.md`
+is the short "where we are and what's next" view.
+
+## Revised scope and delivered steps (2026-09-25 to 2026-09-29)
+
+- **Build order change (2026-09-25):** deliver one thin real end-to-end slice
+  on a real daemon before widening.
+- **Step 8 re-scope (user decision, 2026-09-29):** the target is E2E testing
+  of a real project such as budgetoid, a .NET Aspire app. Pi runs the app
+  itself inside its container, and only the database is a separate
+  container.
+  - **Replaced for now:** Compose-subset execution, named database volumes
+    that persist across sessions, and Aspire orchestration inside Pithos. They
+    are deferred until needed.
+  - **In their place:** a declarative `postgres: {version, database}` block
+    in `.pithos`, started by the broker with the workspace grant. Its data
+    is on tmpfs and fresh every session.
+  - The official image is pulled by the host and pinned by immutable ID. This
+    is a deliberate exception to "host-built images only", limited to the
+    image Pithos selects itself.
+  - A privileged Docker-in-Docker daemon, a filtered Docker API, or running
+    the Aspire AppHost on the host were considered and rejected: each one
+    either hands Pi host-root-equivalent authority or runs Pi-edited code on
+    the host.
+- **`pi.extensions`** are supported in managed runs. The entrypoint
+  installs them from a private read-only copy of the manifest.
+- **Design lock 4 is superseded:** the CLI now dispatches granted runs to the
+  host coordinator instead of refusing. `--broker=status` means one managed
+  Pi run plus read-only status.
+
+Delivered and verified on real Docker Desktop, with evidence:
+
+- green host: [macOS host](docker-broker-macos-host-tdd.md);
+- real-daemon foundation: [Desktop acceptance](docker-broker-desktop-acceptance-tdd.md);
+- [browser sidecar with the broker](docker-broker-browser-tdd.md);
+- [single-app owner and routes](docker-broker-apps-tdd.md);
+- [Pi extension with app tools](docker-broker-extension-tdd.md);
+- [CLI wiring](docker-broker-cli-tdd.md);
+- [.NET app plus Chromium](docker-broker-dotnet-tdd.md);
+- [`pi.extensions`](docker-broker-pi-extensions-tdd.md);
+- [Postgres, Pi env and .NET-in-Pi acceptance](docker-broker-postgres-tdd.md).
+
+Still open:
+
+- native Linux acceptance;
+- managed exec;
+- the operator recovery procedure;
+- project input snapshots;
+- user-facing TROUBLESHOOTING and a security warning;
+- the deferred Compose, persistence and crash-continuity work above.
 
 ## Agreed scope
 
@@ -79,12 +132,12 @@ Status: **in development; not a usable broker yet**. The saved `.pi/plans/2026-0
 - [x] Offline private stable stack registry with exclusive per-stack lease, persistent create intent/confirmation model, crash debt and no deletion. Production intent/confirmation/settlement are deliberately inaccessible pending typed Docker integration.
 - [x] Read-only supervised exact-name managed-volume observation with labels, timestamp and daemon rechecks; this is **not** creation or database continuity.
 - [x] Non-executable typed app launch plan with bounded logical identity, frozen argv and no container owner. This is **not** app build/run/readiness/logs/stop.
-- [ ] Protected Compose lowering/execution, immutable resources and partial-up recovery.
+- [ ] Protected Compose lowering/execution, immutable resources and partial-up recovery. **Deferred (2026-09-29 re-scope)**; replaced for now by the declarative `postgres:` block.
 - [ ] Managed exec with accurate unknown outcomes and no replay.
-- [ ] Shared run networking, Chromium aliases, all enablement combinations.
-- [ ] Pi tool packaging/opt-outs/Plan restrictions and output truncation.
-- [ ] Outer fake-Docker end-to-end app/stack/exec/persistence acceptance.
-- [ ] Real macOS and native Linux .NET/database/browser/exec/data continuity/crash acceptance.
+- [x] Shared run networking, Chromium aliases, all enablement combinations (2026-09-28; [browser](docker-broker-browser-tdd.md), [apps](docker-broker-apps-tdd.md)).
+- [x] Pi tool packaging and output truncation ([extension](docker-broker-extension-tdd.md)). Opt-outs and Plan restrictions: not done.
+- [ ] Outer fake-Docker end-to-end app/stack/exec/persistence acceptance. Apps and sidecar: done (characterization). Stack, exec and persistence: deferred.
+- [ ] Real macOS and native Linux .NET/database/browser/exec/data continuity/crash acceptance. **macOS: .NET app, .NET-in-Pi plus ephemeral Postgres plus Chromium verified 2026-09-29.** Exec, data continuity, crash and Linux: not done.
 
 ## Evidence
 

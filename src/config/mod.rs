@@ -3,6 +3,8 @@ pub use browser::{BrowserConfig, BrowserMode, browser_config};
 mod error;
 mod extras;
 mod pi;
+mod postgres;
+pub use postgres::{PostgresConfig, postgres_config};
 mod sessions;
 pub use sessions::{SessionStorage, session_storage};
 mod toolchains;
@@ -75,5 +77,6 @@ pub fn load(bytes: &[u8]) -> Result<YamlOwned, ConfigError> {
     }
     session_storage(&doc)?;
     browser_config(&doc)?;
+    postgres_config(&doc)?;
     Ok(doc)
 }

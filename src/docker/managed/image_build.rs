@@ -197,6 +197,71 @@ pub(super) fn ensure_browser(
     )
 }
 
+/// Resolve or pull `postgres:<major.minor>`. The pull runs through the frozen
+/// selection with a private config copy (the CLI writes into it), then the
+/// result must resolve locally like a cache hit.
+pub(super) fn ensure_postgres(
+    docker: &mut ManagedDocker,
+    version: &str,
+    workspace: &Path,
+    staging_root: &Path,
+) -> Result<super::PostgresImage, PreflightError> {
+    let exact = version.split('.').count() == 2
+        && version.split('.').all(|part| {
+            !part.is_empty() && part.len() <= 4 && part.bytes().all(|b| b.is_ascii_digit())
+        });
+    if !exact {
+        return Err(PreflightError::InvalidInput);
+    }
+    let root = private_root(staging_root, workspace)?;
+    if docker.work_shutdown.is_requested() {
+        return Err(PreflightError::Unavailable);
+    }
+    let reference = format!("postgres:{version}");
+    if let Some(image) = image_cache::resolve_postgres(docker, &reference)? {
+        return Ok(image);
+    }
+    if docker.has_child() {
+        return Err(PreflightError::ChildPending);
+    }
+    let stage = Stage::new(root)?;
+    match fs::read(docker.config.resolved.join("config.json")) {
+        Ok(bytes) => fs::write(stage.config.join("config.json"), bytes)
+            .map_err(|_| PreflightError::Unavailable)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(PreflightError::Unavailable),
+    }
+    docker.check_selection()?;
+    let mut command = Command::new(&docker.executable.resolved);
+    command
+        .env_clear()
+        .env("DOCKER_CLI_TELEMETRY_OPTOUT", "1")
+        .current_dir(&stage.config)
+        .arg("--host")
+        .arg(&docker.endpoint)
+        .arg("--config")
+        .arg(&stage.config)
+        .args(["pull", "--quiet", &reference]);
+    docker.build_stage = Some(stage.dir);
+    let report = docker.build_supervisor.execute(&mut command);
+    let result = (|| {
+        let report = report.map_err(|_| PreflightError::Unavailable)?;
+        docker.check_selection()?;
+        if !matches!(report.outcome, Outcome::Exited(status) if status.success())
+            || report.signal_error
+            || report.wait_error
+            || docker.work_shutdown.is_requested()
+        {
+            return Err(PreflightError::Unavailable);
+        }
+        image_cache::resolve_postgres(docker, &reference)?.ok_or(PreflightError::Unavailable)
+    })();
+    if !docker.build_supervisor.is_in_flight() {
+        docker.build_stage = None;
+    }
+    result
+}
+
 /// A workspace-relative path that is exactly its canonical self: no `..`,
 /// `.`, empty components, absolute paths or symlinks anywhere below the
 /// workspace. `"."` names the workspace itself (directories only).

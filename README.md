@@ -145,6 +145,53 @@ Docker Desktop has been run end to end; independent review is still outstanding.
 See [`browser/README.md`](browser/README.md) for security boundaries and setup,
 and [`browser/VERIFICATION.md`](browser/VERIFICATION.md) for observed results.
 
+### Managed broker (experimental)
+
+`pithos --broker=workspace` lets Pi build and run the project's own services
+and test them end to end, without any Docker access inside Pi. A host-side
+broker runs every Docker operation for it:
+
+```sh
+pithos --broker=workspace   # Pi plus app tools and project services
+pithos --broker=status      # Pi plus a read-only broker status endpoint only
+```
+
+Requires a launcher built from this checkout. Verified on Docker Desktop for
+macOS; native Linux is not verified yet.
+
+- **Pi only.** A broker run launches Pi with its fixed command. `--tmux`,
+  `--rebuild`, `--no-build`, Pi arguments and container commands are refused.
+  `.pithos` must already exist. `browser` and `pi.extensions` work as usual,
+  and the viewer URL is printed at startup.
+- **App tools** (`--broker=workspace` only). Pi gets `pithos_app_build`,
+  `pithos_app_run`, `pithos_app_status`, `pithos_app_logs` and
+  `pithos_app_stop`:
+  - they build an image from a workspace Dockerfile and run it as a locked-down
+    container: fixed non-root user, read-only root, no capabilities, no
+    published ports;
+  - Pi and the browser reach it at `http://pithos-app-<hash>:<port>/`.
+- **Services Pi runs itself.** Anything Pi starts inside its own container
+  (for example `dotnet run --urls http://0.0.0.0:5000`) is reachable from the
+  browser at `http://pithos-app:<port>/`.
+- **Database** (`--broker=workspace` only):
+
+  ```yaml
+  postgres:
+    version: "17.10" # exact major.minor; a major alone is refused
+    database: app
+  ```
+
+  - The broker pulls the official `postgres:<version>` image, pins its exact
+    ID and starts it before Pi as `pithos-postgres:5432`. It uses the same
+    locked-down profile as the app tools.
+  - Pi's environment gets `PITHOS_POSTGRES_HOST`, `_PORT`, `_USER`,
+    `_PASSWORD`, `_DATABASE` and `_URL`. The password is new every run.
+  - **The data lives in memory and is wiped when the session ends.**
+  - A `postgres` block without `--broker=workspace` is refused.
+- **Cleanup.** Containers and the run's network are removed when Pi exits. The
+  home volume `pithos-home-<project>` is shared with normal runs, one run at a
+  time.
+
 ### Clipboard screenshots
 
 When `pithos` launches the container it starts a short-lived host clipboard bridge

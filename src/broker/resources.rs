@@ -70,6 +70,14 @@ pub(crate) enum ProbeKind {
         logical: String,
         host: String,
     },
+    /// The run's Postgres container on the run network; data on tmpfs.
+    Postgres {
+        network: String,
+        database: String,
+        /// The image's `VOLUME` paths, each covered by a tmpfs.
+        volumes: Vec<String>,
+        env_source: String,
+    },
     /// The detached Chromium sidecar on the run network.
     Browser {
         network: String,
@@ -90,6 +98,12 @@ pub(crate) enum ProbeKind {
         /// The broker's Pi extension, bound read-only (workspace grant).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extension_source: Option<String>,
+        /// The `pi.extensions` manifest for the image entrypoint, bound read-only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extensions_list_source: Option<String>,
+        /// Private env file for Pi (the run's database connection).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env_source: Option<String>,
     },
 }
 
@@ -125,6 +139,18 @@ impl ProbeKind {
                 server_source,
                 ..
             } => probe_name(network) && absolute_path(server_source),
+            Self::Postgres {
+                network,
+                database,
+                volumes,
+                env_source,
+            } => {
+                probe_name(network)
+                    && !database.is_empty()
+                    && volumes.len() <= 4
+                    && volumes.iter().all(|v| absolute_path(v))
+                    && absolute_path(env_source)
+            }
             Self::Pi {
                 home_volume,
                 workspace,
@@ -134,6 +160,8 @@ impl ProbeKind {
                 network,
                 browser,
                 extension_source,
+                extensions_list_source,
+                env_source,
             } => {
                 let mapping_valid = match (host_access, gateway.as_deref()) {
                     (PiHostAccess::LinuxHostGateway, Some(value)) => value
@@ -148,9 +176,13 @@ impl ProbeKind {
                     && absolute_path(credential_source)
                     && !Path::new(credential_source).starts_with(workspace)
                     && network.as_deref().is_none_or(probe_name)
-                    && extension_source
-                        .as_deref()
-                        .is_none_or(|p| absolute_path(p) && !Path::new(p).starts_with(workspace))
+                    && [extension_source, extensions_list_source, env_source]
+                        .iter()
+                        .all(|source| {
+                            source.as_deref().is_none_or(|p| {
+                                absolute_path(p) && !Path::new(p).starts_with(workspace)
+                            })
+                        })
                     && (browser.is_none() || network.is_some())
                     && browser.as_ref().is_none_or(|b| {
                         [&b.client_source, &b.skills_source]
@@ -172,7 +204,10 @@ pub(crate) fn probe_name(name: &str) -> bool {
 pub(crate) fn is_service(operation: &ProbeKind) -> bool {
     matches!(
         operation,
-        ProbeKind::Network | ProbeKind::Browser { .. } | ProbeKind::App { .. }
+        ProbeKind::Network
+            | ProbeKind::Browser { .. }
+            | ProbeKind::App { .. }
+            | ProbeKind::Postgres { .. }
     )
 }
 
@@ -680,6 +715,8 @@ mod tests {
             network: None,
             browser: None,
             extension_source: None,
+            extensions_list_source: None,
+            env_source: None,
         };
         resource.digest = resource.spec.digest().unwrap();
         // Reproduce a durable legacy Pi intent with a matching old digest.

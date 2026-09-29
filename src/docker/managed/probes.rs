@@ -20,6 +20,8 @@ use serde_json::{Value, json};
 use std::os::unix::process::ExitStatusExt;
 
 mod app;
+mod postgres;
+pub use postgres::PostgresInputs;
 mod browser;
 pub use app::{AppInputs, AppLogs, AppState};
 pub use browser::{BrowserInputs, RunNetwork};
@@ -42,6 +44,10 @@ pub struct PiInputs<'a> {
     pub browser: Option<PiBrowser<'a>>,
     /// Workspace runs: the broker's private Pi extension file.
     pub extension: Option<&'a Path>,
+    /// Private copy of the `pi.extensions` manifest the entrypoint installs.
+    pub extensions_list: Option<&'a Path>,
+    /// Private `KEY=value` file for Pi's environment (the run's database).
+    pub env_file: Option<&'a Path>,
 }
 
 /// Private host files for Pi's browser client.
@@ -157,6 +163,8 @@ const PI_BROWSER_CLIENT: &str = "/run/pithos-browser/client.json";
 const PI_BROWSER_SKILLS: &str = "/run/pithos-browser/skills";
 /// Where Pi loads the broker's app tools from (`--extension`).
 pub const PI_EXTENSION: &str = "/run/pithos-broker/extension.mjs";
+/// Where the image entrypoint reads `pi.extensions` from, as in legacy runs.
+const PI_EXTENSIONS_LIST: &str = "/etc/pithos/extensions.list";
 const HOME_LABEL: &str = "io.pithos.broker.home";
 const HOME_LABEL_VALUE: &str = "provisioned";
 
@@ -188,7 +196,8 @@ fn mount_arg(operation: &ProbeKind) -> Result<Option<String>, ProbeError> {
         ProbeKind::Pi { .. }
         | ProbeKind::Network
         | ProbeKind::Browser { .. }
-        | ProbeKind::App { .. } => Err(ProbeError::Indeterminate),
+        | ProbeKind::App { .. }
+        | ProbeKind::Postgres { .. } => Err(ProbeError::Indeterminate),
         ProbeKind::Credential { source } => {
             let mut value =
                 crate::sessions::bind_mount(Path::new(source), "/run/pithos-broker/client.json")
@@ -266,12 +275,14 @@ fn mounts_match(r: &Resource, actual: &Value, configured: &Value) -> bool {
         ProbeKind::App { .. } => {
             return null_or_empty_array(actual) && null_or_empty_array(configured);
         }
+        ProbeKind::Postgres { volumes, .. } => postgres::tmpfs_mounts(volumes),
         ProbeKind::Pi {
             home_volume,
             workspace,
             credential_source,
             browser,
             extension_source,
+            extensions_list_source,
             ..
         } => {
             let mut expected = vec![
@@ -285,6 +296,9 @@ fn mounts_match(r: &Resource, actual: &Value, configured: &Value) -> bool {
             }
             if let Some(source) = extension_source {
                 expected.push(bind(source, PI_EXTENSION, true));
+            }
+            if let Some(source) = extensions_list_source {
+                expected.push(bind(source, PI_EXTENSIONS_LIST, true));
             }
             expected
         }
@@ -523,17 +537,21 @@ impl ManagedDocker {
                 })
             }
         };
-        let extension_source = match inputs.extension {
-            None => None,
-            Some(path) => {
-                browser::private_file(path)?;
-                let source = path.to_str().ok_or(ProbeError::Failed)?.to_owned();
-                if Path::new(&source).starts_with(&workspace.resolved) {
-                    return Err(ProbeError::Workspace);
-                }
-                Some(source)
+        // Private host files only, never under the workspace Pi can rewrite.
+        let private_source = |path: Option<&Path>| -> Result<Option<String>, ProbeError> {
+            let Some(path) = path else {
+                return Ok(None);
+            };
+            browser::private_file(path)?;
+            let source = path.to_str().ok_or(ProbeError::Failed)?.to_owned();
+            if Path::new(&source).starts_with(&workspace.resolved) {
+                return Err(ProbeError::Workspace);
             }
+            Ok(Some(source))
         };
+        let extension_source = private_source(inputs.extension)?;
+        let extensions_list_source = private_source(inputs.extensions_list)?;
+        let env_source = private_source(inputs.env_file)?;
         self.probe_image(inputs.image, inputs.identity)?;
         let program = if inputs.command.is_empty() {
             #[derive(Deserialize)]
@@ -595,6 +613,8 @@ impl ManagedDocker {
                     network: network.clone(),
                     browser: browser.clone(),
                     extension_source: extension_source.clone(),
+                    extensions_list_source: extensions_list_source.clone(),
+                    env_source: env_source.clone(),
                 },
                 &program,
             )?,
@@ -689,6 +709,9 @@ impl ManagedDocker {
         if let Some(source) = &extension_source {
             binds.push((source, PI_EXTENSION));
         }
+        if let Some(source) = &extensions_list_source {
+            binds.push((source, PI_EXTENSIONS_LIST));
+        }
         {
             for (source, target) in binds {
                 let mut mount = crate::sessions::bind_mount(Path::new(source), target)
@@ -699,6 +722,10 @@ impl ManagedDocker {
                     mount.into_string().map_err(|_| ProbeError::Failed)?,
                 ]);
             }
+        }
+        // Docker reads it on the host: no value lands in argv.
+        if let Some(source) = &env_source {
+            args.extend(["--env-file".into(), source.clone()]);
         }
         if let HostAccess::LinuxHostGateway(observed) = inputs.host_access {
             args.extend([
@@ -1339,6 +1366,9 @@ impl ManagedDocker {
         }
         if matches!(r.spec.operation, ProbeKind::App { .. }) {
             return self.inspect_app(r, id, budget).map(|state| state.exit_code);
+        }
+        if matches!(r.spec.operation, ProbeKind::Postgres { .. }) {
+            return self.inspect_postgres(r, id, budget);
         }
         let bytes =
             self.control_query(&["container", "inspect", "--format", CONTAINER, id], budget)?;

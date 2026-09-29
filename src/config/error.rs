@@ -1,6 +1,13 @@
 use std::fmt;
 
-pub(super) const VALID_TOP_LEVEL: &[&str] = &["toolchains", "extras", "pi", "sessions", "browser"];
+pub(super) const VALID_TOP_LEVEL: &[&str] = &[
+    "toolchains",
+    "extras",
+    "pi",
+    "sessions",
+    "browser",
+    "postgres",
+];
 pub(super) const VALID_EXTRAS: &[&str] = &["apt"];
 pub(super) const VALID_PI: &[&str] = &["version", "extensions"];
 
@@ -8,6 +15,8 @@ pub(super) const VALID_PI: &[&str] = &["version", "extensions"];
 pub enum ConfigError {
     #[error(".pithos browser: {0}")]
     Browser(String),
+    #[error(".pithos postgres: {0}")]
+    Postgres(String),
     #[error(".pithos sessions: {0}")]
     Sessions(String),
     #[error(".pithos: not valid UTF-8")]

@@ -160,14 +160,13 @@ fn host_inputs_validation_child_fixture() {
             expected
         );
     }
-    assert!(matches!(
-        input(
-            workspace.clone(),
-            b"toolchains: {}\nsessions: {storage: volume}\npi: {version: '1.0', extensions: {x: 'npm:1.0'}}\n"
-        )
-        .validate(),
-        Err(HostError::Config)
-    ));
+    // Pi extensions are installed by the image entrypoint, as in legacy runs.
+    let with_extensions = input(
+        workspace.clone(),
+        b"toolchains: {}\nsessions: {storage: volume}\npi: {version: '1.0', extensions: {x: 'npm:1.0'}}\n",
+    )
+    .validate();
+    assert!(with_extensions.is_ok(), "{:?}", with_extensions.err());
     assert_eq!(fs::read_dir(&run).unwrap().count(), 0);
     assert_eq!(fs::read_dir(&lease).unwrap().count(), 0);
 }

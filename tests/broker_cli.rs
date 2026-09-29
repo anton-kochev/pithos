@@ -197,10 +197,11 @@ fn granted_cli_reports_malformed_config_without_side_effects() {
 }
 
 #[test]
-fn granted_cli_refuses_unsupported_config_before_host_state() {
-    let fixture = Fixture::new(Some(
-        "toolchains: {}\npi:\n  version: \"0.75.3\"\n  extensions:\n    pi-web-access: \"npm:0.10.7\"\n",
-    ));
+fn granted_cli_refuses_an_untrusted_workspace_before_host_state() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new(Some("toolchains: {}\n"));
+    // A group-writable project could be swapped under the broker.
+    fs::set_permissions(&fixture.project, fs::Permissions::from_mode(0o775)).unwrap();
     let before = fixture.snapshot();
     let result = fixture
         .command()
@@ -210,7 +211,7 @@ fn granted_cli_refuses_unsupported_config_before_host_state() {
     assert!(result.get_output().stdout.is_empty());
     assert_eq!(
         String::from_utf8_lossy(&result.get_output().stderr),
-        "» ERROR: broker: host project configuration is unsupported for managed Pi\n"
+        "» ERROR: broker: host workspace is not a canonical trusted project directory\n"
     );
     assert_eq!(fixture.snapshot(), before);
 }
@@ -280,7 +281,7 @@ fn config_cannot_grant_broker_or_docker_authority() {
         assert_eq!(
             String::from_utf8_lossy(&result.get_output().stderr),
             format!(
-                "» ERROR: .pithos: unknown top-level key `{key}`; valid keys: `toolchains`, `extras`, `pi`, `sessions`, `browser`\n"
+                "» ERROR: .pithos: unknown top-level key `{key}`; valid keys: `toolchains`, `extras`, `pi`, `sessions`, `browser`, `postgres`\n"
             )
         );
         assert_eq!(fixture.snapshot(), before);
@@ -312,5 +313,27 @@ fn ungranted_opaque_tails_preserve_the_legacy_config_path() {
         assert_eq!(result.get_output().stdout, baseline.stdout);
         assert_eq!(result.get_output().stderr, baseline.stderr);
         assert_eq!(fixture.snapshot(), before);
+    }
+}
+
+#[test]
+fn postgres_is_refused_without_the_workspace_broker() {
+    let config = "toolchains: {}\npostgres: {version: \"17.10\", database: app}\n";
+    for args in [
+        vec![],
+        vec!["run"],
+        vec!["run", "--no-build"],
+        vec!["--broker=status"],
+    ] {
+        let fixture = Fixture::new(Some(config));
+        let before = fixture.snapshot();
+        let result = fixture.command().args(&args).assert().code(2);
+        assert!(result.get_output().stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&result.get_output().stderr),
+            "» ERROR: .pithos postgres: needs `pithos --broker=workspace`\n",
+            "{args:?}"
+        );
+        assert_eq!(fixture.snapshot(), before, "{args:?}");
     }
 }
