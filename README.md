@@ -155,8 +155,8 @@ pithos --broker=workspace   # Pi plus app tools and project services
 pithos --broker=status      # Pi plus a read-only broker status endpoint only
 ```
 
-Requires a launcher built from this checkout. Verified on Docker Desktop for
-macOS; native Linux is not verified yet.
+Ships in releases from v0.18.0. Verified on Docker Desktop for macOS; native
+Linux is not verified yet.
 
 - **Pi only.** A broker run launches Pi with its fixed command. `--tmux`,
   `--rebuild`, `--no-build`, Pi arguments and container commands are refused.
