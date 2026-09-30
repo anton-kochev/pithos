@@ -1,6 +1,6 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use pithos::docker::{HostIdentity, ImmutableImageId, ManagedDocker, PreflightError};
+use pithos::docker::{BuildStep, HostIdentity, ImmutableImageId, ManagedDocker, PreflightError};
 use pithos::lifecycle::{Shutdown, ShutdownReason};
 use serde_json::{Value, json};
 use std::{
@@ -79,6 +79,13 @@ elif a[0] == 'build':
         time.sleep(10)
     if (root/'build-exit').exists():
         sys.exit(7)
+    if (root/'fail-at').exists():
+        # A quiet BuildKit failure: the summary names the failed step's line.
+        marker = (root/'fail-at').read_text()
+        lines = (context/'Dockerfile').read_text().splitlines()
+        n = next(i for i, line in enumerate(lines, 1) if marker in line)
+        sys.stderr.write(f'Dockerfile:{n}\n----\n  {n} | >>> {lines[n-1]}\n----\nERROR: failed to build: exit code: 1\n')
+        sys.exit(1)
     if (root/'huge-output').exists():
         sys.stdout.write('x'*100000)
         sys.stdout.flush()
@@ -202,14 +209,14 @@ fn miss_builds_only_private_embedded_context_with_pinned_base_and_verifies_image
     );
     let args: Vec<String> =
         serde_json::from_slice(&fs::read(f.dir.path().join("build-args")).unwrap()).unwrap();
-    assert_eq!(&args[..3], ["build", "--pull=false", "-f"]);
+    assert_eq!(&args[..4], ["build", "-q", "--pull=false", "-f"]);
     assert!(args.contains(&"--label".to_string()));
     assert!(args.iter().any(|a| a.starts_with(&format!("{LABEL}="))));
     assert!(args.iter().any(|a| a == "--iidfile"));
     let context = PathBuf::from(args.last().unwrap());
     let iid = PathBuf::from(&args[args.iter().position(|a| a == "--iidfile").unwrap() + 1]);
     assert!(context.starts_with(&f.stage));
-    assert_eq!(PathBuf::from(&args[3]), context.join("Dockerfile"));
+    assert_eq!(PathBuf::from(&args[4]), context.join("Dockerfile"));
     assert_eq!(iid, context.join("image.iid"));
     let yaml = pithos::config::load(RAW).unwrap();
     let hash = pithos::docker::managed_image_cache::fingerprint(
@@ -223,6 +230,7 @@ fn miss_builds_only_private_embedded_context_with_pinned_base_and_verifies_image
         args,
         [
             "build".to_string(),
+            "-q".to_string(),
             "--pull=false".to_string(),
             "-f".to_string(),
             context.join("Dockerfile").display().to_string(),
@@ -539,12 +547,31 @@ fn failed_cli_cleans_context_and_owner_can_retry() {
     let f = Fixture::new();
     f.set("build-exit", "");
     let mut docker = f.docker();
-    assert_eq!(f.ensure(&mut docker), Err(PreflightError::Unavailable));
+    assert_eq!(
+        f.ensure(&mut docker),
+        Err(PreflightError::BuildFailed(BuildStep::Unknown))
+    );
     assert!(!docker.has_child());
     assert_eq!(fs::read_dir(&f.stage).unwrap().count(), 0);
     fs::remove_file(f.dir.path().join("build-exit")).unwrap();
     assert_eq!(f.ensure(&mut docker).unwrap().as_str(), id('b'));
     assert_eq!(f.builds(), 2);
+}
+
+#[test]
+fn failed_step_is_named_by_a_fixed_label_only() {
+    // Arrange
+    let f = Fixture::new();
+    f.set("fail-at", "identity_image.py");
+    let mut docker = f.docker();
+
+    // Act
+    let got = f.ensure(&mut docker);
+
+    // Assert
+    assert_eq!(got, Err(PreflightError::BuildFailed(BuildStep::Account)));
+    assert!(!docker.has_child());
+    assert_eq!(fs::read_dir(&f.stage).unwrap().count(), 0);
 }
 
 #[test]

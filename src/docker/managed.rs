@@ -98,6 +98,32 @@ pub enum PreflightError {
     ChildPending,
     #[error("invalid preflight resource limits")]
     InvalidLimits,
+    #[error("docker build failed at {0}")]
+    BuildFailed(BuildStep),
+}
+
+/// Which kind of Dockerfile step a build failed at. Fixed labels only; the
+/// step text and daemon output are never retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum BuildStep {
+    #[error("the base image step")]
+    BaseImage,
+    #[error("a toolchain install step")]
+    Toolchain,
+    #[error("the apt packages step")]
+    Packages,
+    #[error("the Pi install step")]
+    PiInstall,
+    #[error("the Pi patch step (the pinned Pi may be newer than this pithos supports)")]
+    PiPatches,
+    #[error("the browser install step")]
+    Browser,
+    #[error("the image account step")]
+    Account,
+    #[error("a build step")]
+    Other,
+    #[error("an unknown step")]
+    Unknown,
 }
 
 /// Host-supplied Docker volume name, never a mount expression or option.

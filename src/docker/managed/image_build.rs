@@ -1,6 +1,10 @@
 //! Guarded host-owned build; never a launch token or daemon-side cancellation claim.
-use super::{ImmutableImageId, ManagedDocker, PreflightError, image_cache};
-use crate::{docker::HostIdentity, dockerfile, embed, lifecycle::Outcome};
+use super::{BuildStep, ImmutableImageId, ManagedDocker, PreflightError, image_cache};
+use crate::{
+    docker::HostIdentity,
+    dockerfile, embed,
+    lifecycle::{CapturedOutput, Outcome},
+};
 use saphyr::YamlOwned;
 use std::{
     fs,
@@ -442,6 +446,8 @@ fn run_build(
         // Builder-neutral flags only: without buildx, Docker falls back to the
         // legacy builder, which rejects BuildKit-only flags.
         .arg("build")
+        // Quiet keeps a failure's step summary small enough to be captured.
+        .arg("-q")
         .arg("--pull=false")
         .arg("-f")
         .arg(dockerfile);
@@ -460,12 +466,18 @@ fn run_build(
     let result = (|| {
         let report = report.map_err(|_| PreflightError::Unavailable)?;
         docker.check_selection()?;
-        if !matches!(report.outcome, Outcome::Exited(status) if status.success())
-            || report.signal_error
-            || report.wait_error
-            || docker.work_shutdown.is_requested()
-        {
+        if report.signal_error || report.wait_error || docker.work_shutdown.is_requested() {
             return Err(PreflightError::Unavailable);
+        }
+        match report.outcome {
+            Outcome::Exited(status) if status.success() => {}
+            Outcome::Exited(_) => {
+                return Err(PreflightError::BuildFailed(failed_step(
+                    &report.stderr,
+                    dockerfile,
+                )));
+            }
+            _ => return Err(PreflightError::Unavailable),
         }
         let built = read_iid(&iid)?;
         verify(docker, &built)?;
@@ -475,4 +487,186 @@ fn run_build(
         docker.build_stage = None;
     }
     result
+}
+
+/// The kind of Dockerfile step a failed build stopped at. Reads only the
+/// step's line number from stderr; neither stderr nor the step text is kept.
+fn failed_step(stderr: &CapturedOutput, dockerfile: &Path) -> BuildStep {
+    if stderr.read_error {
+        return BuildStep::Unknown;
+    }
+    step_at(stderr.raw_bytes(), dockerfile)
+}
+
+fn step_at(stderr: &[u8], dockerfile: &Path) -> BuildStep {
+    let Some(line) = dockerfile
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| failed_line(stderr, name))
+    else {
+        return BuildStep::Unknown;
+    };
+    fs::read_to_string(dockerfile)
+        .ok()
+        .and_then(|text| text.lines().nth(line - 1).map(classify))
+        .unwrap_or(BuildStep::Unknown)
+}
+
+/// 1-based line from the `<file name>:<N>` header of a quiet build's summary.
+fn failed_line(stderr: &[u8], file_name: &str) -> Option<usize> {
+    String::from_utf8_lossy(stderr).lines().find_map(|line| {
+        let number = line.trim().strip_prefix(file_name)?.strip_prefix(':')?;
+        if !number.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        number.parse().ok().filter(|&n| n > 0)
+    })
+}
+
+/// Fixed label for one Dockerfile line; the first matching rule wins.
+fn classify(line: &str) -> BuildStep {
+    let trimmed = line.trim();
+    if trimmed.starts_with("FROM ") {
+        BuildStep::BaseImage
+    } else if line.contains("/opt/pi-patches") {
+        BuildStep::PiPatches
+    } else if line.contains("pi-coding-agent") {
+        BuildStep::PiInstall
+    } else if line.contains("-install.sh") {
+        BuildStep::Toolchain
+    } else if line.contains("identity-image.py") || line.contains("identity_image.py") {
+        BuildStep::Account
+    } else if line.contains("pithos-browser") || line.contains("playwright") {
+        BuildStep::Browser
+    } else if trimmed.starts_with("RUN apt-get") {
+        BuildStep::Packages
+    } else {
+        BuildStep::Other
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_maps_emitted_steps_to_fixed_labels() {
+        // Arrange
+        let cases = [
+            (
+                "FROM ghcr.io/anton-kochev/pithos:base AS base",
+                BuildStep::BaseImage,
+            ),
+            (
+                "RUN set -e; for p in /opt/pi-patches/*.mjs; do node \"$p\"; done",
+                BuildStep::PiPatches,
+            ),
+            ("COPY pi-patches/ /opt/pi-patches/", BuildStep::PiPatches),
+            (
+                "RUN npm install -g @earendil-works/pi-coding-agent@0.99.1",
+                BuildStep::PiInstall,
+            ),
+            (
+                "RUN /usr/local/bin/dotnet-install.sh 10.0.102",
+                BuildStep::Toolchain,
+            ),
+            ("RUN python3 /tmp/identity-image.py pi", BuildStep::Account),
+            (
+                "COPY browser/client/ /opt/pithos-browser/client/",
+                BuildStep::Browser,
+            ),
+            (
+                "RUN apt-get update && apt-get install -y git",
+                BuildStep::Packages,
+            ),
+            (
+                "COPY entrypoint.sh /usr/local/bin/entrypoint.sh",
+                BuildStep::Other,
+            ),
+        ];
+
+        for (line, expected) in cases {
+            // Act
+            let step = classify(line);
+
+            // Assert
+            assert_eq!(step, expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn failed_line_reads_the_quiet_build_summary_header() {
+        // Arrange
+        let stderr = b"Dockerfile:3\n--------------------\n   1 |     FROM ghcr.io/anton-kochev/pithos:base AS base\n   3 | >>> RUN set -e; for p in /opt/pi-patches/*.mjs; do ...\n--------------------\nERROR: failed to build: failed to solve: process \"/bin/sh -c ...\" did not complete successfully: exit code: 1\n";
+
+        // Act
+        let line = failed_line(stderr, "Dockerfile");
+
+        // Assert
+        assert_eq!(line, Some(3));
+    }
+
+    #[test]
+    fn failed_line_rejects_output_without_a_header() {
+        // Arrange
+        let cases: [&[u8]; 4] = [
+            b"ERROR: failed to solve: exit code: 1\n",
+            b"Dockerfile:\n",
+            b"Dockerfile:0\n",
+            b"Other.Dockerfile:3x\n",
+        ];
+
+        for stderr in cases {
+            // Act
+            let line = failed_line(stderr, "Dockerfile");
+
+            // Assert
+            assert_eq!(line, None);
+        }
+    }
+
+    #[test]
+    fn step_at_classifies_the_line_the_summary_names() {
+        // Arrange
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dockerfile = dir.path().join("Dockerfile");
+        let yaml = crate::config::load(b"toolchains: {}\npi:\n  version: \"0.99.1\"\n").unwrap();
+        let text = dockerfile::emit(&yaml);
+        fs::write(&dockerfile, &text).expect("write");
+        let line_of = |needle: &str| {
+            text.lines()
+                .position(|line| line.contains(needle))
+                .expect("emitted line")
+                + 1
+        };
+        let summary = |line: usize| format!("Dockerfile:{line}\nERROR: failed to build\n");
+
+        // Act
+        let patch = step_at(
+            summary(line_of("for p in /opt/pi-patches")).as_bytes(),
+            &dockerfile,
+        );
+        let install = step_at(summary(line_of("npm install")).as_bytes(), &dockerfile);
+        let past_end = step_at(summary(10_000).as_bytes(), &dockerfile);
+        let unmatched = step_at(b"ERROR: failed to build\n", &dockerfile);
+
+        // Assert
+        assert_eq!(patch, BuildStep::PiPatches);
+        assert_eq!(install, BuildStep::PiInstall);
+        assert_eq!(past_end, BuildStep::Unknown);
+        assert_eq!(unmatched, BuildStep::Unknown);
+    }
+
+    #[test]
+    fn failed_step_is_unknown_without_readable_stderr() {
+        // Arrange
+        let mut stderr = CapturedOutput::default();
+        stderr.read_error = true;
+
+        // Act
+        let step = failed_step(&stderr, Path::new("/nonexistent/Dockerfile"));
+
+        // Assert
+        assert_eq!(step, BuildStep::Unknown);
+    }
 }

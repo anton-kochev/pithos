@@ -4,7 +4,7 @@ mod tempfile;
 
 use pithos::broker::{
     grant::HostGrant,
-    host::{HostError, HostInputs},
+    host::{HostError, HostInputs, ImageKind},
     runtime::RuntimePoll,
     transport::BrokerEndpoint,
 };
@@ -325,7 +325,10 @@ fn status_only_grant_child_fixture() {
         Err(failure) => failure,
         Ok(_) => panic!("fake Docker must fail the image query"),
     };
-    assert!(matches!(allowed_failure.error, HostError::Image));
+    assert!(matches!(
+        allowed_failure.error,
+        HostError::Image(ImageKind::Pi, _)
+    ));
     assert!(allowed_failure.signals.is_some());
     assert!(
         calls.exists(),
@@ -440,7 +443,7 @@ fn failed_image_query_child_fixture() {
         Ok(_) => panic!("failed query must not start Pi"),
         Err(failure) => failure,
     };
-    assert!(matches!(failure.error, HostError::Image));
+    assert!(matches!(failure.error, HostError::Image(ImageKind::Pi, _)));
     assert!(failure.signals.is_some());
     assert!(failure.prelease_docker.is_some());
     assert!(failure.recovery.is_none());

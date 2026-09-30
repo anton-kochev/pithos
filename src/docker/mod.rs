@@ -31,8 +31,8 @@ pub use managed::probes::{
 pub use managed::{AppBuild, PostgresImage};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use managed::{
-    ImmutableImageId, ManagedDocker, PreflightChildState, PreflightError, ReadOnlyPreflight,
-    VolumeName,
+    BuildStep, ImmutableImageId, ManagedDocker, PreflightChildState, PreflightError,
+    ReadOnlyPreflight, VolumeName,
 };
 pub use run::{RunEnvironment, RunError, RunRequest, run, run_request, tmux_wrap};
 #[cfg(any(target_os = "linux", target_os = "macos"))]

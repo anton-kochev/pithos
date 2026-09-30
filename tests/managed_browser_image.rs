@@ -158,6 +158,7 @@ fn miss_builds_the_identity_browser_image_from_embedded_assets() {
         args,
         [
             "build".to_string(),
+            "-q".into(),
             "--pull=false".into(),
             "-f".into(),
             context

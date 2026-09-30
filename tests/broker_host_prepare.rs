@@ -3,7 +3,7 @@
 use pithos::broker::runtime::RuntimePoll;
 use pithos::broker::{
     grant::HostGrant,
-    host::{HostError, HostInputs},
+    host::{HostError, HostInputs, ImageKind},
 };
 use pithos::docker::{HostDockerSnapshot, LegacyHomeUse};
 use std::{
@@ -244,7 +244,7 @@ fn prepared_start_rejects_changed_home_before_signals_or_docker_child() {
         Err(failure) => failure,
         Ok(_) => panic!("fake Docker must fail the image query"),
     };
-    assert!(matches!(allowed.error, HostError::Image));
+    assert!(matches!(allowed.error, HostError::Image(ImageKind::Pi, _)));
     assert!(allowed.signals.is_some());
     assert!(home_a.join("docker-calls").exists());
     assert_eq!(allowed.poll_cleanup(), RuntimePoll::Complete);

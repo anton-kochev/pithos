@@ -129,6 +129,7 @@ fn workspace_dockerfile_is_built_with_owned_labels_through_the_frozen_selection(
         args,
         [
             "build".to_string(),
+            "-q".into(),
             "--pull=false".into(),
             "-f".into(),
             f.workspace.join("api/Dockerfile").display().to_string(),

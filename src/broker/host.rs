@@ -15,7 +15,10 @@ use super::{
 };
 use crate::{
     config::{self, SessionStorage},
-    docker::{HostDockerSnapshot, HostIdentity, ManagedDocker, PreflightChildState, VolumeName},
+    docker::{
+        HostDockerSnapshot, HostIdentity, ManagedDocker, PreflightChildState, PreflightError,
+        VolumeName,
+    },
     dockerfile::PI_LAUNCH_ARGV,
     lifecycle::{InteractiveLimits, Shutdown, ShutdownReason, SignalGuard},
 };
@@ -71,12 +74,23 @@ pub enum HostError {
     Signals,
     #[error("host Docker selection unavailable")]
     Docker,
-    #[error("host managed image unavailable")]
-    Image,
+    #[error("host {0} image unavailable: {1}")]
+    Image(ImageKind, PreflightError),
     #[error("host broker endpoint unavailable")]
     Endpoint,
     #[error("host runtime failed: {0}")]
     Runtime(#[from] RuntimeError),
+}
+
+/// Which managed image a start could not resolve or build.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ImageKind {
+    #[error("Pi")]
+    Pi,
+    #[error("browser")]
+    Browser,
+    #[error("Postgres")]
+    Postgres,
 }
 
 /// Fully checked static selections. This does not freeze filesystem metadata:
@@ -369,7 +383,10 @@ impl ValidatedHostInputs {
             &self.input.stage_root,
         ) {
             Ok(image) => image,
-            Err(_) => return Err(HostFailure::prelease(HostError::Image, signals, docker)),
+            Err(error) => {
+                let error = HostError::Image(ImageKind::Pi, error);
+                return Err(HostFailure::prelease(error, signals, docker));
+            }
         };
         let browser = if self.browser.enabled {
             progress(StartStep::BrowserImage);
@@ -382,7 +399,10 @@ impl ValidatedHostInputs {
                     image,
                     mode: self.browser.mode,
                 }),
-                Err(_) => return Err(HostFailure::prelease(HostError::Image, signals, docker)),
+                Err(error) => {
+                    let error = HostError::Image(ImageKind::Browser, error);
+                    return Err(HostFailure::prelease(error, signals, docker));
+                }
             }
         } else {
             None
@@ -400,8 +420,9 @@ impl ValidatedHostInputs {
                         image,
                         database: config.database.clone(),
                     }),
-                    Err(_) => {
-                        return Err(HostFailure::prelease(HostError::Image, signals, docker));
+                    Err(error) => {
+                        let error = HostError::Image(ImageKind::Postgres, error);
+                        return Err(HostFailure::prelease(error, signals, docker));
                     }
                 }
             }
@@ -570,5 +591,30 @@ impl HostCoordinator {
         }
         self.signals.close()?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::docker::BuildStep;
+
+    #[test]
+    fn image_error_names_the_image_and_the_failed_build_step() {
+        // Arrange
+        let error = HostError::Image(
+            ImageKind::Pi,
+            PreflightError::BuildFailed(BuildStep::PiPatches),
+        );
+
+        // Act
+        let message = error.to_string();
+
+        // Assert
+        assert_eq!(
+            message,
+            "host Pi image unavailable: docker build failed at the Pi patch step \
+             (the pinned Pi may be newer than this pithos supports)"
+        );
     }
 }
