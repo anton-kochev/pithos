@@ -181,14 +181,43 @@ const patches = [
 	},
 ];
 
+// Pi releases re-nest the same code at different depths (0.84.x indents the
+// prompt() body by 12 spaces, 0.99.x by 8), so blocks are matched by their
+// relative shape, not their absolute indentation. Every width is tried because
+// the HTML export template mixes 2- and 4-space nesting.
+const MAX_INDENT = 48;
+
+function dedent(text) {
+	const lines = text.split("\n");
+	const indents = lines.filter((line) => line.trim() !== "").map((line) => line.match(/^ */)[0].length);
+	const common = indents.length > 0 ? Math.min(...indents) : 0;
+	return lines.map((line) => (line.trim() === "" ? line : line.slice(common))).join("\n");
+}
+
+function reindent(text, width) {
+	const pad = " ".repeat(width);
+	return text.split("\n").map((line) => (line.trim() === "" ? line : pad + line)).join("\n");
+}
+
+function findIndented(content, text) {
+	const base = dedent(text);
+	for (let width = 0; width <= MAX_INDENT; width += 1) {
+		const candidate = reindent(base, width);
+		if (content.includes(candidate)) return { candidate, width };
+	}
+	return undefined;
+}
+
 function applyEdit(content, edit, file) {
-	if (content.includes(edit.newText)) {
+	if (findIndented(content, edit.newText)) {
 		return { content, status: "already" };
 	}
-	if (!content.includes(edit.oldText)) {
+	const match = findIndented(content, edit.oldText);
+	if (!match) {
 		throw new Error(`${file}: could not find expected block for ${edit.label}`);
 	}
-	return { content: content.replace(edit.oldText, edit.newText), status: "patched" };
+	const replacement = reindent(dedent(edit.newText), match.width);
+	return { content: content.replace(match.candidate, replacement), status: "patched" };
 }
 
 let changedFiles = 0;
