@@ -18,6 +18,33 @@ pub const ENTRYPOINT_SH: &[u8] = include_bytes!("../entrypoint.sh");
 /// shim changes.
 pub const PI_BUN_COMPAT_MJS: &[u8] = include_bytes!("../scripts/pi-bun-compat.mjs");
 
+/// Pi patch scripts from `scripts/pi-patches/`, as (file name, content).
+/// The emitted Dockerfile re-copies them over the base image's copies before
+/// re-patching a pinned Pi, so a pithos newer than the local base ships its
+/// own patches. [`pi_patches_fingerprint`] names them in the Dockerfile text,
+/// which is what moves the cache keys when only a patch changes.
+pub const PI_PATCHES: &[(&str, &[u8])] = &[(
+    "suppress-prompt-template-display.mjs",
+    include_bytes!("../scripts/pi-patches/suppress-prompt-template-display.mjs"),
+)];
+
+/// SHA-256 over [`PI_PATCHES`], names and contents length-framed.
+pub fn pi_patches_fingerprint() -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    for (name, bytes) in PI_PATCHES {
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(name.as_bytes());
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Fixed build-only identity helper. Never invoke against a host or existing home.
 pub const IDENTITY_IMAGE_PY: &[u8] = include_bytes!("docker/identity_image.py");
 
@@ -27,6 +54,7 @@ pub const IDENTITY_IMAGE_PY: &[u8] = include_bytes!("docker/identity_image.py");
 /// <dest>/toolchains/<name>-install.sh             (mode 0o755 on unix, one per script in toolchains/)
 /// <dest>/entrypoint.sh                            (mode 0o755 on unix)
 /// <dest>/pi-bun-compat.mjs                        (mode 0o755 on unix)
+/// <dest>/pi-patches/<name>.mjs                    (mode 0o755 on unix, one per PI_PATCHES entry)
 /// <dest>/pi-config/{prompts,skills,themes}/       (empty dirs)
 /// ```
 ///
@@ -48,6 +76,11 @@ pub fn extract_to(dest: &Path) -> io::Result<()> {
     // 0o755 writer keeps the extraction path single-purpose; Dockerfile.base
     // resets the mode on the copy it bakes.
     write_executable(&dest.join("pi-bun-compat.mjs"), PI_BUN_COMPAT_MJS)?;
+    let patches = dest.join("pi-patches");
+    fs::create_dir_all(&patches)?;
+    for (name, bytes) in PI_PATCHES {
+        write_executable(&patches.join(name), bytes)?;
+    }
     for sub in ["prompts", "skills", "themes"] {
         fs::create_dir_all(dest.join("pi-config").join(sub))?;
     }
@@ -148,6 +181,12 @@ mod tests {
         );
         assert_executable(&preload);
 
+        for (name, bytes) in PI_PATCHES {
+            let p = dir.path().join("pi-patches").join(name);
+            assert_eq!(std::fs::read(&p).expect("read patch"), *bytes, "{name}");
+            assert_executable(&p);
+        }
+
         for sub in ["prompts", "skills", "themes"] {
             let p = dir.path().join("pi-config").join(sub);
             assert!(p.is_dir(), "missing pi-config/{sub}");
@@ -156,6 +195,39 @@ mod tests {
                 0,
                 "{} should be empty",
                 p.display()
+            );
+        }
+    }
+
+    #[test]
+    fn pi_patches_embed_every_script_in_the_patch_dir() {
+        // A new patch file must not be silently left out of the launcher.
+        // Arrange
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/pi-patches");
+
+        // Act
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("readdir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .into_string()
+                    .expect("utf-8")
+            })
+            .filter(|name| name.ends_with(".mjs"))
+            .collect();
+        on_disk.sort();
+        let mut embedded: Vec<String> = PI_PATCHES.iter().map(|(n, _)| n.to_string()).collect();
+        embedded.sort();
+
+        // Assert
+        assert_eq!(embedded, on_disk);
+        for (name, bytes) in PI_PATCHES {
+            assert_eq!(
+                std::fs::read(dir.join(name)).expect("read"),
+                *bytes,
+                "{name}"
             );
         }
     }

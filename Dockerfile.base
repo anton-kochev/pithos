@@ -100,9 +100,9 @@ RUN chmod 0644 /opt/pi-bun-compat.mjs
 # still sending the expanded prompt template to the model. Runs as root before
 # USER pi so it can write the chowned install tree. `set -e` makes the build
 # hard-fail if any patch throws (a Pi update changed the internals it patches) —
-# a loud signal to update the patch, never a silent unpatched image. The same
-# loop is re-run by per-project Dockerfiles after a pinned-version Pi re-install
-# (see src/dockerfile.rs).
+# a loud signal to update the patch, never a silent unpatched image. Per-project
+# Dockerfiles re-run the same loop after a pinned-version Pi re-install, first
+# replacing /opt/pi-patches with the launcher's own copies (see src/dockerfile.rs).
 COPY scripts/pi-patches/ /opt/pi-patches/
 RUN set -e; for p in /opt/pi-patches/*.mjs; do [ -e "$p" ] || continue; node "$p"; done
 
