@@ -124,8 +124,7 @@ is authoritative.
 
 ### Browser access (experimental)
 
-Optional browser support is default-off and requires a launcher built from this
-checkout (not a published release):
+Optional browser support is default-off and ships in releases from v0.18.0:
 
 ```yaml
 toolchains: {}
