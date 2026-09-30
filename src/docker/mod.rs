@@ -24,8 +24,8 @@ pub use image::{
 pub use managed::image_cache as managed_image_cache;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use managed::probes::{
-    AppInputs, AppLogs, AppState, BrowserInputs, PI_EXTENSION, PiBrowser, PiInputs, PostgresInputs,
-    ProbeError as OwnedProbeError, RunNetwork,
+    AppInputs, AppLogs, AppState, BrowserInputs, HomeRejection, PI_EXTENSION, PiBrowser, PiInputs,
+    PostgresInputs, ProbeError as OwnedProbeError, RunNetwork,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use managed::{AppBuild, PostgresImage};

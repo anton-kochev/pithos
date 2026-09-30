@@ -211,10 +211,10 @@ mod interpreter_startup {
                     markers.iter().all(|marker| !marker.exists()),
                     "Python startup hook executed before inspection: {output:?}"
                 );
-                let (code, stdout, stderr) = if !invalid && fixture_identity.is_some() {
-                    (0, "home inspection passed\n", "")
-                } else {
-                    (1, "", "home requires explicit migration\n")
+                let (code, stdout, stderr) = match (invalid, fixture_identity) {
+                    (false, Some(_)) => (0, "home inspection passed\n", ""),
+                    (true, Some(_)) => (1, "", "home requires explicit migration: layout\n"),
+                    (_, None) => (1, "", "home requires explicit migration: owner\n"),
                 };
                 assert_eq!(output.status.code(), Some(code), "{output:?}");
                 assert_eq!(output.stdout, stdout.as_bytes());

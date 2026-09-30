@@ -130,12 +130,66 @@ pub enum ProbeError {
     Credential,
     #[error("probe failed")]
     Failed,
+    #[error("the Pi home was rejected: {0}")]
+    HomeRejected(HomeRejection),
     #[error("matching successful account, home and credential probes are required")]
     Admission,
     #[error("workspace must be a trusted canonical directory outside host control state")]
     Workspace,
     #[error("probe ownership or outcome indeterminate; retain evidence")]
     Indeterminate,
+}
+
+/// Why the home inspection rejected a home. Only the script's fixed reason
+/// codes are read back, never its raw output, paths or inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum HomeRejection {
+    #[error("the check got invalid input")]
+    Input,
+    #[error("the scan took longer than 30 seconds")]
+    Timeout,
+    #[error("an entry is not owned by your user")]
+    Owner,
+    #[error(
+        "it holds a socket or FIFO, often left by a crashed tool (list them: `docker run --rm -v <pithos-home volume>:/h alpine find /h -type s -o -type p`)"
+    )]
+    SpecialFile,
+    #[error("it holds a hard-linked file")]
+    Hardlink,
+    #[error(
+        "`.pi`, `.pi/agent`, `.pi/agent/sessions` or the browser skill directory has the wrong shape"
+    )]
+    Layout,
+    #[error("a directory lacks owner read and search (or, for Pi directories, write) permission")]
+    Permissions,
+    #[error("it changed during the scan; is another container using it?")]
+    Changed,
+    #[error("it holds over 100000 entries or nests deeper than 64 levels")]
+    TooLarge,
+    #[error("part of it could not be read")]
+    Unreadable,
+}
+
+impl HomeRejection {
+    /// Accept only the exact `<failure>: <code>` line `admit_home.py` writes.
+    fn parse(stderr: &[u8]) -> Option<Self> {
+        let code = stderr
+            .strip_prefix(b"home requires explicit migration: ")?
+            .strip_suffix(b"\n")?;
+        Some(match code {
+            b"input" => Self::Input,
+            b"timeout" => Self::Timeout,
+            b"owner" => Self::Owner,
+            b"special-file" => Self::SpecialFile,
+            b"hardlink" => Self::Hardlink,
+            b"layout" => Self::Layout,
+            b"permissions" => Self::Permissions,
+            b"changed" => Self::Changed,
+            b"too-large" => Self::TooLarge,
+            b"unreadable" => Self::Unreadable,
+            _ => return None,
+        })
+    }
 }
 
 /// Successful fixed observation, returned only after owned resource cleanup.
@@ -1255,6 +1309,12 @@ impl ManagedDocker {
         r.local_reaped = true;
         resources.update(r.clone())?;
         self.active_probe = None;
+        let rejection = match (&r.spec.operation, &report) {
+            (ProbeKind::Home { .. }, Ok(report)) if report.stderr.is_complete() => {
+                HomeRejection::parse(report.stderr.raw_bytes())
+            }
+            _ => None,
+        };
         let normal_success = report.is_ok_and(|report| {
             matches!(report.outcome, Outcome::Exited(status) if status.success())
                 && report.stdout.is_complete()
@@ -1281,7 +1341,7 @@ impl ManagedDocker {
         if success {
             Ok(())
         } else {
-            Err(ProbeError::Failed)
+            Err(rejection.map_or(ProbeError::Failed, ProbeError::HomeRejected))
         }
     }
 
@@ -1603,6 +1663,27 @@ if args[0]=='run': sys.exit(99)
             _socket: socket,
             docker,
             resources,
+        }
+    }
+
+    #[test]
+    fn home_rejection_reads_only_exact_fixed_reason_lines() {
+        assert_eq!(
+            HomeRejection::parse(b"home requires explicit migration: special-file\n"),
+            Some(HomeRejection::SpecialFile)
+        );
+        assert_eq!(
+            HomeRejection::parse(b"home requires explicit migration: owner\n"),
+            Some(HomeRejection::Owner)
+        );
+        for stderr in [
+            &b"home requires explicit migration\n"[..],
+            b"home requires explicit migration: special-file",
+            b"home requires explicit migration: /home/pi/secret\n",
+            b"home requires explicit migration: owner\nextra\n",
+            b"",
+        ] {
+            assert_eq!(HomeRejection::parse(stderr), None, "{stderr:?}");
         }
     }
 

@@ -81,9 +81,13 @@ volume existence, admission, or authorization to run. No Docker was executed.
   a change after the final observation cannot be ruled out. The deadline cannot
   interrupt a blocked filesystem syscall. No inspection result authorizes a
   subsequent run.
-- CLI success is only `home inspection passed` (stdout, exit 0); any failure is
-  only `home requires explicit migration` (stderr, exit 1). No argument values,
-  filenames, exception messages, credentials, or tracebacks are emitted.
+- CLI success is only `home inspection passed` (stdout, exit 0). A detected
+  rejection is `home requires explicit migration: <reason>` (stderr, exit 1),
+  where `<reason>` is one fixed code: `input`, `timeout`, `owner`,
+  `special-file`, `hardlink`, `layout`, `permissions`, `changed`, `too-large`
+  or `unreadable`. Any other failure is only `home requires explicit migration`.
+  No argument values, filenames, exception messages, credentials, or tracebacks
+  are emitted. The broker reads back only an exact known reason line.
 
 Snapshots include inode, mode, UID/GID, mtime, ctime, and regular-file bytes or
 symlink text, before and after late rejection. **Atime is excluded**: directory

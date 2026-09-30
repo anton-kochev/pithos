@@ -176,7 +176,7 @@ fn cached_image_handoff_preserves_daemon_id_and_rejects_replacement_before_inten
     fs::write(f.root.path().join("changed"), "").unwrap();
     assert!(matches!(
         runtime.admit_and_start_pi(),
-        Err(RuntimeError::Admission)
+        Err(RuntimeError::Admission(_))
     ));
     f.no_pi_intent();
     assert!(Path::new(&f.root.path().join("leases")).exists());

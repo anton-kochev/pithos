@@ -2,6 +2,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import socket
 import stat
 import subprocess
 import sys
@@ -39,10 +40,12 @@ class HomeTests(unittest.TestCase):
                 info.st_mtime_ns, info.st_ctime_ns, data)
         return result
 
-    def assert_rejected_unchanged(self, **kwargs):
+    def assert_rejected_unchanged(self, reason=None, **kwargs):
         before = self.snapshot()
-        with self.assertRaisesRegex(ValueError, '^home requires explicit migration$'):
+        with self.assertRaisesRegex(ValueError, '^home requires explicit migration$') as caught:
             home.validate_home(self.root, self.uid, self.gid, **kwargs)
+        if reason is not None:
+            self.assertEqual(caught.exception.reason, reason)
         self.assertEqual(self.snapshot(), before)
 
     def test_missing_root_is_rejected_without_provisioning(self):
@@ -171,10 +174,15 @@ class HomeTests(unittest.TestCase):
         late.parent.mkdir()
         secret = self.root / 'auth.json'
         secret.write_text('canary-do-not-read')
-        for kind in ['fifo', 'hardlink', 'symlink-hardlink']:
+        for kind, reason in [('fifo', 'special-file'), ('socket', 'special-file'),
+                             ('hardlink', 'hardlink'), ('symlink-hardlink', 'hardlink')]:
             with self.subTest(kind=kind):
                 if kind == 'fifo':
                     os.mkfifo(late)
+                elif kind == 'socket':
+                    # A stale socket, as left by a crashed tool, stays on disk.
+                    with socket.socket(socket.AF_UNIX) as server:
+                        server.bind(str(late))
                 elif kind == 'hardlink':
                     os.link(secret, late)
                 else:
@@ -182,7 +190,7 @@ class HomeTests(unittest.TestCase):
                     source.symlink_to('/private/elsewhere')
                     os.link(source, late, follow_symlinks=False)
                 try:
-                    self.assert_rejected_unchanged()
+                    self.assert_rejected_unchanged(reason)
                 finally:
                     late.unlink()
 
@@ -426,22 +434,23 @@ class HomeTests(unittest.TestCase):
 
     def test_cli_failures_are_static_without_tracebacks_or_inputs(self):
         ids = [str(self.uid), str(self.gid)]
-        invalid = [[], [str(self.root)], [str(self.root), *ids, '--secret-token'],
-                   [str(self.root / 'secret-path-canary'), *ids],
-                   [str(self.root), '0', ids[1]]]
+        invalid = [([], 'input'), ([str(self.root)], 'input'),
+                   ([str(self.root), *ids, '--secret-token'], 'input'),
+                   ([str(self.root / 'secret-path-canary'), *ids], 'unreadable'),
+                   ([str(self.root), '0', ids[1]], 'input')]
         for value in ['credential-canary', '-1', '4294967294', '1' * 5000,
                       '+501', '0501', ' 501', '５01']:
-            invalid.append([str(self.root), value, ids[1]])
-        for args in invalid:
+            invalid.append(([str(self.root), value, ids[1]], 'input'))
+        for args, reason in invalid:
             with self.subTest(args=args[:1]):
                 result = self.invoke_cli(args)
                 self.assertEqual((result.returncode, result.stdout, result.stderr),
-                                 (1, '', 'home requires explicit migration\n'))
+                                 (1, '', f'home requires explicit migration: {reason}\n'))
         (self.root / '.pi').write_text('credential-canary-never-echo')
         before = self.snapshot()
         result = self.invoke_cli([str(self.root), *ids])
         self.assertEqual((result.returncode, result.stdout, result.stderr),
-                         (1, '', 'home requires explicit migration\n'))
+                         (1, '', 'home requires explicit migration: layout\n'))
         self.assertEqual(self.snapshot(), before)
 
     def test_inspection_opens_only_directories_and_never_reads_credentials(self):

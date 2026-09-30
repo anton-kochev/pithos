@@ -141,14 +141,75 @@ pub enum RuntimeError {
     Credential,
     #[error("runtime interactive owner unavailable")]
     Interactive,
-    #[error("runtime admission or Pi launch failed; retain evidence")]
-    Admission,
+    #[error("{0}; retain evidence")]
+    Admission(Box<AdmissionFailure>),
     #[error("runtime status listener or connection failed")]
     Status,
     #[error("runtime is not in the required lifecycle state")]
     State,
     #[error("runtime cleanup requires recovery")]
     Cleanup,
+}
+
+/// The admission or launch step that failed, named for the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AdmissionStep {
+    #[error("home volume setup")]
+    Provision,
+    #[error("home volume preflight")]
+    Preflight,
+    #[error("image account check")]
+    Account,
+    #[error("home check")]
+    Home,
+    #[error("credential check")]
+    Credential,
+    #[error("run network creation")]
+    Network,
+    #[error("Postgres file setup")]
+    PostgresFiles,
+    #[error("Postgres start")]
+    Postgres,
+    #[error("browser file setup")]
+    BrowserFiles,
+    #[error("browser start")]
+    Browser,
+    #[error("browser viewer setup")]
+    BrowserViewer,
+    #[error("app tools setup")]
+    Extension,
+    #[error("extensions list setup")]
+    ExtensionsList,
+    #[error("Pi start")]
+    Pi,
+}
+
+/// Boxed so the common unit-only [`RuntimeError`] stays small.
+#[derive(Debug, thiserror::Error)]
+#[error("{step} failed: {cause}")]
+pub struct AdmissionFailure {
+    pub step: AdmissionStep,
+    pub cause: String,
+}
+
+/// Keeps a step's typed error; those messages are static and path-free.
+fn failed<E: std::fmt::Display>(step: AdmissionStep) -> impl FnOnce(E) -> RuntimeError {
+    move |error| {
+        RuntimeError::Admission(Box::new(AdmissionFailure {
+            step,
+            cause: error.to_string(),
+        }))
+    }
+}
+
+/// Keeps only the kind: an I/O message could carry a host path.
+fn io_failed(step: AdmissionStep) -> impl FnOnce(io::Error) -> RuntimeError {
+    move |error| {
+        RuntimeError::Admission(Box::new(AdmissionFailure {
+            step,
+            cause: error.kind().to_string(),
+        }))
+    }
 }
 
 /// A construction error retaining the supplied Docker owner before a lease, or
@@ -460,10 +521,10 @@ impl BrokerRuntime {
                     &self.setup.image,
                     self.setup.identity,
                 )
-                .map_err(|_| RuntimeError::Admission)?;
+                .map_err(failed(AdmissionStep::Provision))?;
             docker
                 .preflight(&self.setup.volume, &self.setup.image, self.setup.identity)
-                .map_err(|_| RuntimeError::Admission)?;
+                .map_err(failed(AdmissionStep::Preflight))?;
             docker
                 .probe_account(
                     manifest,
@@ -471,7 +532,7 @@ impl BrokerRuntime {
                     &self.setup.image,
                     self.setup.identity,
                 )
-                .map_err(|_| RuntimeError::Admission)?;
+                .map_err(failed(AdmissionStep::Account))?;
             docker
                 .probe_home(
                     manifest,
@@ -480,7 +541,7 @@ impl BrokerRuntime {
                     &self.setup.image,
                     self.setup.identity,
                 )
-                .map_err(|_| RuntimeError::Admission)?;
+                .map_err(failed(AdmissionStep::Home))?;
             docker
                 .probe_credential(
                     manifest,
@@ -489,7 +550,7 @@ impl BrokerRuntime {
                     &self.setup.image,
                     self.setup.identity,
                 )
-                .map_err(|_| RuntimeError::Admission)?;
+                .map_err(failed(AdmissionStep::Credential))?;
             // Sidecar first: Pi's browser client needs it healthy. Its files
             // are debt from the first write until cleanup removes them.
             // Workspace runs (apps) and browser runs share one owned network.
@@ -498,7 +559,7 @@ impl BrokerRuntime {
                 Some(
                     docker
                         .create_run_network(manifest, NETWORK_REQUEST)
-                        .map_err(|_| RuntimeError::Admission)?,
+                        .map_err(failed(AdmissionStep::Network))?,
                 )
             } else {
                 None
@@ -516,7 +577,7 @@ impl BrokerRuntime {
                         &postgres.database,
                         postgres.image.data_root(),
                     )
-                    .map_err(|_| RuntimeError::Admission)?,
+                    .map_err(io_failed(AdmissionStep::PostgresFiles))?,
                 );
                 progress(StartStep::Postgres);
                 docker
@@ -530,13 +591,13 @@ impl BrokerRuntime {
                             env_file: files.env_path(),
                         },
                     )
-                    .map_err(|_| RuntimeError::Admission)?;
+                    .map_err(failed(AdmissionStep::Postgres))?;
             }
             if let (Some(browser), Some(network)) = (&self.setup.browser, &network) {
                 self.browser_files_cleaned = false;
                 let files = self.browser_files.insert(
                     BrowserFiles::create(&self.setup.run_directory, browser.mode)
-                        .map_err(|_| RuntimeError::Admission)?,
+                        .map_err(io_failed(AdmissionStep::BrowserFiles))?,
                 );
                 let interactive = browser.mode == BrowserMode::Interactive;
                 progress(StartStep::Browser);
@@ -553,12 +614,12 @@ impl BrokerRuntime {
                             viewer: interactive,
                         },
                     )
-                    .map_err(|_| RuntimeError::Admission)?;
+                    .map_err(failed(AdmissionStep::Browser))?;
                 if interactive {
                     self.viewer = Some(
                         docker
                             .browser_viewer(manifest, BROWSER_REQUEST)
-                            .map_err(|_| RuntimeError::Admission)?,
+                            .map_err(failed(AdmissionStep::BrowserViewer))?,
                     );
                 }
             }
@@ -568,7 +629,7 @@ impl BrokerRuntime {
                 self.extension_cleaned = false;
                 self.extension = Some(
                     ExtensionFile::create(&self.setup.run_directory)
-                        .map_err(|_| RuntimeError::Admission)?,
+                        .map_err(io_failed(AdmissionStep::Extension))?,
                 );
                 command.extend([
                     "--extension".to_owned(),
@@ -579,7 +640,7 @@ impl BrokerRuntime {
                 self.extensions_list_cleaned = false;
                 self.extensions_list = Some(
                     ExtensionsList::create(&self.setup.run_directory, manifest)
-                        .map_err(|_| RuntimeError::Admission)?,
+                        .map_err(io_failed(AdmissionStep::ExtensionsList))?,
                 );
             }
             let paths = self
@@ -609,7 +670,7 @@ impl BrokerRuntime {
                         env_file: self.postgres_files.as_ref().map(PostgresFiles::pi_env_path),
                     },
                 )
-                .map_err(|_| RuntimeError::Admission)?;
+                .map_err(failed(AdmissionStep::Pi))?;
             // Kept for app requests while Pi runs.
             Ok(network)
         })();
@@ -1057,5 +1118,34 @@ impl BrokerRuntime {
 
     pub fn active_status_connections(&self) -> usize {
         self.connections.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::docker::{HomeRejection, OwnedProbeError as ProbeError};
+
+    #[test]
+    fn admission_failure_names_the_step_and_cause() {
+        let error =
+            failed(AdmissionStep::Home)(ProbeError::HomeRejected(HomeRejection::SpecialFile));
+        let message = error.to_string();
+        assert!(
+            message.starts_with(
+                "home check failed: the Pi home was rejected: it holds a socket or FIFO"
+            ),
+            "{message}"
+        );
+        assert!(message.ends_with("; retain evidence"), "{message}");
+    }
+
+    #[test]
+    fn admission_io_failure_keeps_only_the_kind() {
+        let error = io_failed(AdmissionStep::Extension)(io::Error::other("/private/host/path"));
+        assert_eq!(
+            error.to_string(),
+            "app tools setup failed: other error; retain evidence"
+        );
     }
 }
