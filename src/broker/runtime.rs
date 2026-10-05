@@ -15,6 +15,7 @@ use super::{
     credential::RunCredential,
     extension::{ExtensionFile, ExtensionsList},
     grant::{Action, HostGrant},
+    pi_env::PiEnvFile,
     postgres::PostgresFiles,
     resources::ResourceManifest,
     status::{Phase, Snapshot},
@@ -24,7 +25,7 @@ use crate::{
     browser::BrowserMode,
     docker::{
         BrowserInputs, HomeLease, HostIdentity, ImmutableImageId, ManagedDocker, PiBrowser,
-        PiInputs, PreflightChildState, RunNetwork, VolumeName,
+        PiDaemon, PiInputs, PreflightChildState, RunNetwork, VolumeName,
     },
     lifecycle::{
         InteractiveChild, InteractiveLimits, InteractivePoll, InteractiveReport, Outcome, Shutdown,
@@ -94,6 +95,9 @@ pub struct RuntimeSetup {
     pub extensions: Option<String>,
     /// Workspace runs only: a database next to Pi.
     pub postgres: Option<RuntimePostgres>,
+    /// Host-granted isolated Docker daemon handed to Pi as environment;
+    /// Pithos never uses it.
+    pub pi_daemon: Option<PiDaemon>,
 }
 
 /// Runtime lifecycle. `Ready` means the managed Pi was durably launched and is
@@ -170,6 +174,8 @@ pub enum AdmissionStep {
     PostgresFiles,
     #[error("Postgres start")]
     Postgres,
+    #[error("Pi environment file setup")]
+    PiEnv,
     #[error("browser file setup")]
     BrowserFiles,
     #[error("browser start")]
@@ -267,6 +273,8 @@ pub struct BrokerRuntime {
     extensions_list_cleaned: bool,
     postgres_files: Option<PostgresFiles>,
     postgres_files_cleaned: bool,
+    pi_env: Option<PiEnvFile>,
+    pi_env_cleaned: bool,
     viewer: Option<String>,
     lease: Option<HomeLease>,
     home_debt_cleared: usize,
@@ -286,6 +294,7 @@ struct RuntimeInputs {
     stage_root: Option<PathBuf>,
     extensions: Option<String>,
     postgres: Option<RuntimePostgres>,
+    pi_daemon: Option<PiDaemon>,
     browser: Option<RuntimeBrowser>,
     run_id: String,
     volume: VolumeName,
@@ -399,6 +408,7 @@ impl BrokerRuntime {
             stage_root: setup.stage_root,
             extensions: setup.extensions,
             postgres: setup.postgres,
+            pi_daemon: setup.pi_daemon,
             browser: setup.browser,
             run_id: setup.run_id.clone(),
             volume: setup.volume,
@@ -435,6 +445,8 @@ impl BrokerRuntime {
             extensions_list_cleaned: true,
             postgres_files: None,
             postgres_files_cleaned: true,
+            pi_env: None,
+            pi_env_cleaned: true,
             viewer: None,
             home_debt_cleared,
             lease: Some(lease),
@@ -593,6 +605,21 @@ impl BrokerRuntime {
                     )
                     .map_err(failed(AdmissionStep::Postgres))?;
             }
+            // Pi's private environment: the database and the granted daemon.
+            let postgres_section = self.postgres_files.as_ref().map(PostgresFiles::pi_section);
+            let daemon_section = self.setup.pi_daemon.as_ref().map(PiDaemon::env_lines);
+            let sections: Vec<&str> = postgres_section
+                .iter()
+                .chain(&daemon_section)
+                .map(String::as_str)
+                .collect();
+            if !sections.is_empty() {
+                self.pi_env_cleaned = false;
+                self.pi_env = Some(
+                    PiEnvFile::create(&self.setup.run_directory, &sections)
+                        .map_err(io_failed(AdmissionStep::PiEnv))?,
+                );
+            }
             if let (Some(browser), Some(network)) = (&self.setup.browser, &network) {
                 self.browser_files_cleaned = false;
                 let files = self.browser_files.insert(
@@ -667,7 +694,7 @@ impl BrokerRuntime {
                             .map(|(client, skills)| PiBrowser { client, skills }),
                         extension: self.extension.as_ref().map(ExtensionFile::path),
                         extensions_list: self.extensions_list.as_ref().map(ExtensionsList::path),
-                        env_file: self.postgres_files.as_ref().map(PostgresFiles::pi_env_path),
+                        env_file: self.pi_env.as_ref().map(PiEnvFile::path),
                     },
                 )
                 .map_err(failed(AdmissionStep::Pi))?;
@@ -1004,6 +1031,17 @@ impl BrokerRuntime {
             self.postgres_files = None;
             self.postgres_files_cleaned = true;
         } else if !self.postgres_files_cleaned {
+            self.phase = RuntimePhase::RecoveryRequired;
+            return RuntimePoll::RecoveryRequired;
+        }
+        if let Some(file) = self.pi_env.as_mut() {
+            if file.cleanup().is_err() {
+                self.phase = RuntimePhase::RecoveryRequired;
+                return RuntimePoll::RecoveryRequired;
+            }
+            self.pi_env = None;
+            self.pi_env_cleaned = true;
+        } else if !self.pi_env_cleaned {
             self.phase = RuntimePhase::RecoveryRequired;
             return RuntimePoll::RecoveryRequired;
         }

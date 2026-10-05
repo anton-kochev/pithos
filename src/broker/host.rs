@@ -17,8 +17,8 @@ use crate::{
     browser::BrowserSelection,
     config::{self, SessionStorage},
     docker::{
-        HostDockerSnapshot, HostIdentity, ManagedDocker, PreflightChildState, PreflightError,
-        VolumeName,
+        HostDockerSnapshot, HostIdentity, ManagedDocker, PiDaemon, PreflightChildState,
+        PreflightError, VolumeName,
     },
     dockerfile::PI_LAUNCH_ARGV,
     lifecycle::{InteractiveLimits, Shutdown, ShutdownReason, SignalGuard},
@@ -105,6 +105,7 @@ pub struct ValidatedHostInputs {
     sessions: SessionStorage,
     browser: BrowserSelection,
     postgres: Option<config::PostgresConfig>,
+    pi_daemon: Option<PiDaemon>,
     progress: Option<Box<dyn FnMut(StartStep)>>,
 }
 
@@ -287,6 +288,7 @@ impl HostInputs {
             sessions,
             browser,
             postgres,
+            pi_daemon: None,
             progress: None,
         })
     }
@@ -296,6 +298,12 @@ impl ValidatedHostInputs {
     /// Select the browser before startup; this cannot toggle a running session.
     pub fn with_browser(mut self, browser: BrowserSelection) -> Self {
         self.browser = browser;
+        self
+    }
+
+    /// Hand Pi a host-checked isolated Docker daemon; Pithos never uses it.
+    pub fn with_pi_daemon(mut self, daemon: Option<PiDaemon>) -> Self {
+        self.pi_daemon = daemon;
         self
     }
 
@@ -477,6 +485,7 @@ impl ValidatedHostInputs {
             stage_root: Some(self.input.stage_root),
             extensions: Some(crate::extensions::manifest(&self.yaml)).filter(|m| !m.is_empty()),
             postgres,
+            pi_daemon: self.pi_daemon,
         };
         let mut runtime = match BrokerRuntime::begin_with_docker(grant, endpoint, setup, docker) {
             Ok(runtime) => runtime,

@@ -7,6 +7,7 @@ mod identity;
 mod image;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod managed;
+mod pi_daemon;
 mod run;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod selection;
@@ -34,6 +35,10 @@ pub use managed::{
     BuildStep, ImmutableImageId, ManagedDocker, PreflightChildState, PreflightError,
     ReadOnlyPreflight, VolumeName,
 };
+pub use pi_daemon::{PiDaemon, PiDaemonError};
+mod pi_vm;
+pub use pi_vm::ensure as ensure_pi_vm;
+pub use pi_vm::{PiVmError, VmStep};
 pub use run::{RunEnvironment, RunError, RunRequest, run, run_request, tmux_wrap};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use selection::{DockerSelection, HostDockerSnapshot};

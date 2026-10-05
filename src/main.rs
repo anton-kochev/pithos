@@ -9,6 +9,7 @@ use saphyr::YamlOwned;
 
 use pithos::broker::grant::{Action, HostGrant};
 use pithos::browser::{BrowserMode, BrowserSelection};
+use pithos::docker::{PiDaemon, VmStep};
 use pithos::output::{Style, narrate};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -55,6 +56,9 @@ const USAGE: &str = "usage: pithos [run | build | info | sessions | clean | rebu
 const BROKER_USAGE: &str =
     "--broker requires exactly one --broker=status or --broker=workspace in the run option prefix";
 const BROKER_ONLY: &str = "--broker launches only managed Pi; it cannot be combined with --tmux, --rebuild, --no-build, Pi arguments or a container command";
+// Never reflect a docker flag's untrusted value either.
+const DOCKER_USAGE: &str =
+    "--docker takes no value and may appear only once in the run option prefix";
 
 // Content written when the user accepts the prompt to create a missing `.pithos`.
 // Mirrors the example in the prompt narration; validates cleanly through `pithos::config::load`.
@@ -72,6 +76,9 @@ enum Subcommand {
         target: RunTarget,
         tmux: bool,
         grant: Option<HostGrant>,
+        /// Host-checked isolated Docker daemon handed to Pi as environment.
+        /// Hand Pi the isolated Docker daemon in the `pithos-docker` VM.
+        docker: bool,
     },
     Info,
     SessionsMigrate {
@@ -210,6 +217,7 @@ impl Subcommand {
         let mut target = RunTarget::Pi(Vec::new());
         let mut tmux = false;
         let mut grant = None;
+        let mut docker = false;
         let mut i = 0;
         while i < rest.len() {
             match rest[i].as_str() {
@@ -228,6 +236,13 @@ impl Subcommand {
                     return Self::Reject {
                         kind: RejectKind::Usage,
                         value: BROKER_USAGE.into(),
+                    };
+                }
+                "--docker" if !docker => docker = true,
+                s if s == "--docker" || s.starts_with("--docker=") => {
+                    return Self::Reject {
+                        kind: RejectKind::Usage,
+                        value: DOCKER_USAGE.into(),
                     };
                 }
                 s if s == "--browser" || s.starts_with("--browser=") => {
@@ -284,6 +299,7 @@ impl Subcommand {
             target,
             tmux,
             grant,
+            docker,
         }
     }
 
@@ -329,8 +345,9 @@ fn main() -> ExitCode {
         Subcommand::Run {
             grant: Some(grant),
             browser,
+            docker,
             ..
-        } => return run_broker(grant, browser, Style::detect()),
+        } => return run_broker(grant, browser, docker, Style::detect()),
         other => other,
     };
     if pithos::browser::install_signal_handlers().is_err() {
@@ -356,10 +373,33 @@ fn refuse_postgres(style: Style) -> ExitCode {
     ExitCode::from(2)
 }
 
+/// `--docker` readies the `pithos-docker` VM before any Dockerfile write,
+/// Docker call or home work: no Lima, no address or a silent daemon ends the
+/// run here. The VM stays running afterwards.
+fn prepare_pi_daemon(docker: bool, style: Style) -> Result<Option<PiDaemon>, ExitCode> {
+    if !docker {
+        return Ok(None);
+    }
+    pithos::docker::ensure_pi_vm(|step| {
+        let message = match step {
+            VmStep::Create => {
+                "creating the pithos-docker VM (first run only, takes a few minutes) ..."
+            }
+            VmStep::Start => "starting the pithos-docker VM ...",
+        };
+        narrate(style, "» docker:", message);
+    })
+    .map(Some)
+    .map_err(|error| {
+        narrate(style, "» ERROR:", &error.to_string());
+        ExitCode::from(2)
+    })
+}
+
 /// One managed Pi run under an explicit host grant. The coordinator owns
 /// Docker selection, images, the broker and cleanup; this only reports.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn run_broker(grant: HostGrant, browser: BrowserSelection, style: Style) -> ExitCode {
+fn run_broker(grant: HostGrant, browser: BrowserSelection, docker: bool, style: Style) -> ExitCode {
     use pithos::broker::{
         host::HostInputs,
         runtime::{RuntimePoll, StartStep},
@@ -400,6 +440,10 @@ fn run_broker(grant: HostGrant, browser: BrowserSelection, style: Style) -> Exit
         }
         Ok(_) => {}
     }
+    let pi_daemon = match prepare_pi_daemon(docker, style) {
+        Ok(daemon) => daemon,
+        Err(code) => return code,
+    };
     let fail = |error: &dyn std::fmt::Display| {
         narrate(style, "» ERROR:", &format!("broker: {error}"));
         ExitCode::from(1)
@@ -414,8 +458,9 @@ fn run_broker(grant: HostGrant, browser: BrowserSelection, style: Style) -> Exit
         Ok(inputs) => inputs,
         Err(e) => return fail(&e),
     };
+    let inputs = inputs.with_browser(browser).with_pi_daemon(pi_daemon);
     // Announce each step: an image build or home checks can take a while.
-    let inputs = inputs.with_browser(browser).with_progress(move |step| {
+    let inputs = inputs.with_progress(move |step| {
         let message = match step {
             StartStep::PiImage => {
                 "preparing the Pi image (the first run after a config change can take minutes) ..."
@@ -560,6 +605,11 @@ fn launch(subcommand: Subcommand) -> ExitCode {
     if matches!(subcommand, Subcommand::Run { .. }) && postgres_requested(&yaml) {
         return refuse_postgres(style);
     }
+    let docker = matches!(subcommand, Subcommand::Run { docker: true, .. });
+    let pi_daemon = match prepare_pi_daemon(docker, style) {
+        Ok(daemon) => daemon,
+        Err(code) => return code,
+    };
     let dockerfile_path = cwd.join(".pithos.d").join("Dockerfile");
     let browser = match &subcommand {
         Subcommand::Run { browser, .. } | Subcommand::Build { browser, .. } => *browser,
@@ -598,7 +648,7 @@ fn launch(subcommand: Subcommand) -> ExitCode {
         Subcommand::Build { rebuild, .. } => run_build(inputs, rebuild, style),
         Subcommand::Run {
             mode, target, tmux, ..
-        } => run_run(inputs, mode, &target, tmux, style),
+        } => run_run(inputs, mode, &target, tmux, pi_daemon.as_ref(), style),
         Subcommand::Info => run_info(&cwd, &yaml, &pithos_bytes, &dockerfile_content, style),
         Subcommand::SessionsMigrate { merge } => match pithos::sessions::migrate(&cwd, merge) {
             Ok(()) => ExitCode::SUCCESS,
@@ -768,6 +818,8 @@ fn help_text() -> String {
                    --broker=status     Managed Pi with a read-only broker status endpoint\n    \
                    --broker=workspace  Managed Pi that can also build, run and stop project apps\n    \
                      Both launch only Pi: no --tmux, --rebuild, --no-build or arguments.\n  \
+                   --docker   Hand Pi the isolated Docker daemon in the pithos-docker Lima VM\n    \
+                     (created on first use, left running) as DOCKER_HOST plus TESTCONTAINERS_HOST_OVERRIDE.\n  \
            build:  --rebuild, --browser[=interactive|headless]\n  \
                    Browser is invocation-scoped and default-disabled. --browser selects interactive;\n  \
                    --browser=interactive or --browser=headless select the runtime mode.\n  \
@@ -1221,6 +1273,7 @@ fn run_run(
     mode: RunMode,
     target: &RunTarget,
     tmux: bool,
+    pi_daemon: Option<&PiDaemon>,
     style: Style,
 ) -> ExitCode {
     let ensured = match ensure_image(inputs, mode, style) {
@@ -1339,6 +1392,7 @@ fn run_run(
             clipboard_url: clipboard_url.as_deref(),
             clipboard_shim: clipboard_bridge.as_ref().map(|bridge| bridge.shim_path()),
             browser: browser_run.as_ref(),
+            pi_daemon,
         },
         command: effective_cmd,
     }) {
@@ -1788,6 +1842,88 @@ mod tests {
     }
 
     #[test]
+    fn docker_flag_parses_in_the_pithos_prefix_with_any_run_shape() {
+        for (argv, target) in [
+            (args(&["--docker"]), RunTarget::Pi(vec![])),
+            (
+                args(&["--docker", "--broker=workspace"]),
+                RunTarget::Pi(vec![]),
+            ),
+            (
+                args(&["--broker=status", "--docker"]),
+                RunTarget::Pi(vec![]),
+            ),
+            (args(&["--docker", "--tmux"]), RunTarget::Pi(vec![])),
+            (
+                args(&["--docker", "--session", "x"]),
+                RunTarget::Pi(args(&["--session", "x"])),
+            ),
+            (
+                args(&["--docker", "bash"]),
+                RunTarget::Command(args(&["bash"])),
+            ),
+        ] {
+            match Subcommand::parse_run(&argv) {
+                Subcommand::Run {
+                    docker: true,
+                    target: actual,
+                    ..
+                } => assert_eq!(actual, target, "{argv:?}"),
+                other => panic!("{argv:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn docker_flag_with_a_value_or_twice_is_a_usage_error_without_echo() {
+        for argv in [
+            args(&["--docker="]),
+            args(&["--docker=192.168.64.3:2375"]),
+            args(&["--docker=secret-canary\nx"]),
+            args(&["--docker", "--docker"]),
+            args(&["--broker=workspace", "--docker", "--tmux", "--docker"]),
+        ] {
+            assert_eq!(
+                Subcommand::parse_run(&argv),
+                Subcommand::Reject {
+                    kind: RejectKind::Usage,
+                    value: DOCKER_USAGE.into(),
+                },
+                "{argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn docker_flag_in_an_opaque_tail_is_forwarded_verbatim() {
+        for (boundary, target) in [
+            ("--pi", RunTarget::Pi(args(&["--docker"]))),
+            ("--", RunTarget::Command(args(&["--docker"]))),
+            ("--session", RunTarget::Pi(args(&["--session", "--docker"]))),
+            ("bash", RunTarget::Command(args(&["bash", "--docker"]))),
+        ] {
+            match Subcommand::parse_run(&args(&[boundary, "--docker"])) {
+                Subcommand::Run {
+                    docker: false,
+                    target: actual,
+                    ..
+                } => assert_eq!(actual, target, "{boundary}"),
+                other => panic!("{boundary}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn docker_lookalikes_are_opaque_pi_tails() {
+        for flag in ["--docker-host=192.168.64.3:2375", "--dockerfile"] {
+            assert!(matches!(
+                Subcommand::parse_run(&args(&[flag, "x"])),
+                Subcommand::Run { docker: false, target: RunTarget::Pi(tail), .. } if tail == args(&[flag, "x"])
+            ));
+        }
+    }
+
+    #[test]
     fn browser_cli_respects_opaque_boundaries_defaults_and_broker_restrictions() {
         for prefix in [
             vec!["pithos"],
@@ -2145,6 +2281,7 @@ mod tests {
                     },
                     tmux: false,
                     grant: None,
+                    docker: false,
                 },
                 "host parsing crossed {boundary}"
             );
@@ -2201,6 +2338,7 @@ mod tests {
                 target: RunTarget::Pi(vec![]),
                 tmux: false,
                 grant: Some(HostGrant::managed_pi_run()),
+                docker: false,
             }
         );
     }
@@ -2220,6 +2358,7 @@ mod tests {
                     target: RunTarget::Pi(vec![]),
                     tmux: false,
                     grant: Some(HostGrant::workspace()),
+                    docker: false,
                 }
             );
         }
@@ -2268,6 +2407,7 @@ mod tests {
                 grant: None,
                 target: RunTarget::Pi(vec![]),
                 tmux: false,
+                docker: false,
             }
         );
     }
@@ -2293,6 +2433,7 @@ mod tests {
                 grant: None,
                 target: RunTarget::Pi(vec![]),
                 tmux: true,
+                docker: false,
             }
         );
     }
@@ -2327,6 +2468,7 @@ mod tests {
                 ]),
                 grant: None,
                 tmux: false,
+                docker: false,
             }
         );
     }
@@ -2358,6 +2500,7 @@ mod tests {
                 ]),
                 grant: None,
                 tmux: false,
+                docker: false,
             }
         );
     }
@@ -2372,6 +2515,7 @@ mod tests {
                 grant: None,
                 target: RunTarget::Pi(vec!["--plan".to_string(), "carefully".to_string()]),
                 tmux: false,
+                docker: false,
             }
         );
     }
@@ -2392,6 +2536,7 @@ mod tests {
                 grant: None,
                 target: RunTarget::Pi(vec!["--session".to_string(), "01a0335e".to_string(),]),
                 tmux: true,
+                docker: false,
             }
         );
     }
@@ -2417,6 +2562,7 @@ mod tests {
                 ]),
                 grant: None,
                 tmux: false,
+                docker: false,
             }
         );
     }
@@ -2431,6 +2577,7 @@ mod tests {
                 grant: None,
                 target: RunTarget::Pi(vec!["Review this repository".to_string()]),
                 tmux: false,
+                docker: false,
             }
         );
     }
@@ -2445,6 +2592,7 @@ mod tests {
                 grant: None,
                 target: RunTarget::Pi(vec!["--".to_string(), "- bullet point".to_string()]),
                 tmux: false,
+                docker: false,
             }
         );
     }
@@ -2459,6 +2607,7 @@ mod tests {
                 grant: None,
                 target: RunTarget::Pi(vec!["--tmux".to_string(), "--rebuild".to_string(),]),
                 tmux: false,
+                docker: false,
             }
         );
     }
@@ -2477,6 +2626,7 @@ mod tests {
                 ]),
                 grant: None,
                 tmux: false,
+                docker: false,
             }
         );
     }
@@ -2491,6 +2641,7 @@ mod tests {
                 grant: None,
                 target: RunTarget::Command(vec!["bash".to_string()]),
                 tmux: true,
+                docker: false,
             }
         );
     }
@@ -2509,6 +2660,7 @@ mod tests {
                 ]),
                 grant: None,
                 tmux: false,
+                docker: false,
             }
         );
     }

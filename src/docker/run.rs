@@ -17,6 +17,8 @@ pub struct RunEnvironment<'a> {
     pub clipboard_url: Option<&'a str>,
     pub clipboard_shim: Option<&'a Path>,
     pub browser: Option<&'a crate::browser::BrowserRun>,
+    /// Host-granted isolated Docker daemon handed to Pi as environment.
+    pub pi_daemon: Option<&'a super::PiDaemon>,
 }
 
 /// Inputs for launching a project container.
@@ -62,6 +64,7 @@ pub struct RunRequest<'a> {
 ///            -e COLORTERM=truecolor
 ///            [-v <clipboard-shim>:/usr/local/bin/xclip:ro]
 ///            [-e PITHOS_CLIPBOARD_URL]
+///            [-e DOCKER_HOST=... -e TESTCONTAINERS_HOST_OVERRIDE=...]
 ///            -w /workspace/<project> <image_tag> [<cmd>...]
 /// ```
 pub fn run(
@@ -595,6 +598,12 @@ fn render_run_args(
         }
         args.push("-e".into());
         args.push("PITHOS_CLIPBOARD_URL".into());
+    }
+    if let Some(daemon) = environment.pi_daemon {
+        for (key, value) in daemon.env() {
+            args.push("-e".into());
+            args.push(format!("{key}={value}").into());
+        }
     }
     args.push("-w".into());
     args.push(workdir.into());

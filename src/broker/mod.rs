@@ -19,6 +19,8 @@ pub mod grant;
 pub mod host;
 pub mod journal;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod pi_env;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod postgres;
 pub mod resources;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

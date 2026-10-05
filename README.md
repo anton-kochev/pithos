@@ -209,6 +209,43 @@ Linux is not verified yet.
   time. If a run is killed, the next broker run clears its leftover home lock
   by itself, but only when no container still uses the volume.
 
+### Isolated Docker daemon for Pi (experimental)
+
+Integration tests built on Testcontainers need a Docker API. Pi never gets the
+host's. `--docker` hands it a separate one instead, in a Lima VM that Pithos
+manages:
+
+```sh
+brew install lima        # once; verified with Lima 2.2.1
+pithos --docker          # any run form, also with --broker=... or a command
+```
+
+- The first `--docker` run creates the `pithos-docker` VM (about 1.5 min on an
+  M3 Pro). A stopped VM is started (about 45 s). Afterwards the VM stays
+  running, so the next run adds about a second. Stop it with
+  `limactl stop pithos-docker`; remove it with `limactl delete pithos-docker`.
+- The VM mounts nothing from the host. Root inside it reaches nothing on the
+  Mac: the boundary is the hypervisor. Its disk, and so its image cache,
+  survives restarts.
+- Pi's container gets `DOCKER_HOST=tcp://<vm-ip>:2375` and
+  `TESTCONTAINERS_HOST_OVERRIDE=<vm-ip>`. Nothing else changes. The image has no
+  Docker CLI; add `docker.io` under `extras.apt` if you want one. Testcontainers
+  does not need it.
+- Pithos checks the daemon with `GET /_ping` before anything else and exits 2
+  when Lima is missing or the daemon does not answer. Only the command line
+  turns this on; `.pithos` cannot.
+- Published ports are reached on the VM's address, never on the Mac's
+  loopback: Lima's port forwarding is off.
+- Known limits. macOS only. One VM serves every project; anything on the Mac
+  that can reach its address can manage its containers, so another project's
+  test containers are fair game, the host is not. Bind mounts in tests do not
+  work: the paths live in Pi's container, not in the VM; use resource
+  mappings. A broker run with `postgres:` still gets its own database next to
+  Pi; the VM is only for what Pi starts itself.
+- Measured on an M3 Pro: 1367 Testcontainers-backed integration tests of a .NET
+  project ran inside Pi against the VM (4 vCPU, 4 GiB) in 2 m 36 s, after a
+  first run that also pulled `postgres:17` into the VM.
+
 ### Clipboard screenshots
 
 When `pithos` launches the container it starts a short-lived host clipboard bridge

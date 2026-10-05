@@ -25,10 +25,10 @@ fn env_file_is_private_with_a_fresh_password_and_removed_on_cleanup() {
     );
     let meta = fs::symlink_metadata(files.env_path()).unwrap();
     assert!(meta.is_file() && meta.mode() & 0o777 == 0o600);
-    // Pi's copy: how to reach and log in to the run's database.
-    assert_eq!(files.pi_env_path(), run.path().join("pi-postgres.env"));
+    // Pi's section: how to reach and log in to the run's database. It goes
+    // into the run's one Pi env file, never a file of its own.
     assert_eq!(
-        fs::read_to_string(files.pi_env_path()).unwrap(),
+        files.pi_section(),
         format!(
             "PITHOS_POSTGRES_HOST=pithos-postgres\nPITHOS_POSTGRES_PORT=5432\n\
              PITHOS_POSTGRES_USER=postgres\nPITHOS_POSTGRES_PASSWORD={password}\n\
@@ -36,12 +36,11 @@ fn env_file_is_private_with_a_fresh_password_and_removed_on_cleanup() {
              PITHOS_POSTGRES_URL=postgresql://postgres:{password}@pithos-postgres:5432/app\n"
         )
     );
-    let meta = fs::symlink_metadata(files.pi_env_path()).unwrap();
-    assert!(meta.is_file() && meta.mode() & 0o777 == 0o600);
+    assert!(!run.path().join("pi-postgres.env").exists());
     // Never adopt existing state.
     assert!(PostgresFiles::create(run.path(), "app", "/var/lib/postgresql/data").is_err());
     files.cleanup().unwrap();
-    assert!(!files.env_path().exists() && !files.pi_env_path().exists());
+    assert!(!files.env_path().exists());
     files.cleanup().unwrap();
     // Every run gets its own password.
     let other = PostgresFiles::create(run.path(), "app", "/var/lib/postgresql/data").unwrap();

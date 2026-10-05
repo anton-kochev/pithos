@@ -449,6 +449,7 @@ fn assemble_run_args_inherits_clipboard_bridge_url_without_exposing_value() {
             clipboard_url: Some("http://host.docker.internal:49152/token"),
             clipboard_shim: Some(Path::new("/tmp/pithos-xclip")),
             browser: None,
+            pi_daemon: None,
         },
         &[],
     );
@@ -474,6 +475,50 @@ fn assemble_run_args_inherits_clipboard_bridge_url_without_exposing_value() {
             "missing host-gateway mapping in {args:?}"
         );
     }
+}
+
+#[test]
+fn assemble_run_args_hands_pi_the_granted_daemon_as_environment() {
+    // Arrange
+    let daemon = super::super::PiDaemon::parse("192.168.64.3:2375").unwrap();
+    let render = |pi_daemon| {
+        assemble_run_args(
+            "pithos:proj",
+            "proj",
+            Path::new("/work"),
+            None,
+            None,
+            RunEnvironment {
+                pi_daemon,
+                ..Default::default()
+            },
+            &[],
+        )
+    };
+
+    // Act
+    let granted = render(Some(&daemon));
+    let plain = render(None);
+
+    // Assert
+    let docker_host = granted
+        .windows(2)
+        .position(|w| w[0] == "-e" && w[1] == "DOCKER_HOST=tcp://192.168.64.3:2375")
+        .unwrap_or_else(|| panic!("missing DOCKER_HOST in {granted:?}"));
+    assert_eq!(granted[docker_host + 2], "-e");
+    assert_eq!(
+        granted[docker_host + 3],
+        "TESTCONTAINERS_HOST_OVERRIDE=192.168.64.3"
+    );
+    let workdir = granted.iter().position(|a| a == "-w").unwrap();
+    assert!(docker_host + 3 < workdir, "{granted:?}");
+    assert!(
+        plain.iter().all(|arg| {
+            let arg = arg.to_string_lossy();
+            !arg.contains("DOCKER_HOST") && !arg.contains("TESTCONTAINERS")
+        }),
+        "{plain:?}"
+    );
 }
 
 // tmux_wrap — named-session observability wrapper
