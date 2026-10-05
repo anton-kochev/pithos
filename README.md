@@ -44,6 +44,7 @@ pithos --fork 01a0335e                      # pass Pi options through unchanged
 pithos --model openai/gpt-4o -p "Review"    # Pi options and arguments
 pithos --pi "Review this project"           # positional-first Pi arguments
 pithos run bash                             # launch another container command
+pithos --docker                             # give Pi an isolated Docker daemon (Testcontainers)
 pithos build                                # build without launching
 pithos info                                 # show project, fingerprint, image status
 pithos clean                                # remove images (--all for tagged too)
@@ -52,8 +53,8 @@ pithos help                                 # full command reference
 pithos version                              # print the pithos version
 ```
 
-Pithos owns `--rebuild`, `--no-build`, `--tmux`, and `--browser[=interactive|headless]`
-(and the explicit broker grants below). Any other leading option
+Pithos owns `--rebuild`, `--no-build`, `--tmux`, `--browser[=interactive|headless]`
+and `--docker` (and the explicit broker grants below). Any other leading option
 starts an opaque argument tail that is forwarded verbatim to Pi, so Pithos also
 works with flags added by newer Pi versions or extensions. Put Pithos options
 before Pi options. Use `--pi` when the Pi argument list starts with a positional,
