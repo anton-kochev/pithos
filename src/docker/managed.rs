@@ -985,7 +985,23 @@ impl ManagedDocker {
         pithos: &[u8],
         identity: HostIdentity,
     ) -> Result<Option<ImmutableImageId>, PreflightError> {
-        image_cache::resolve(self, yaml, pithos, identity)
+        self.resolve_identity_image_with_browser(
+            yaml,
+            pithos,
+            identity,
+            crate::browser::BrowserClientLayer::Absent,
+        )
+    }
+
+    /// Resolve the explicitly selected, mode-independent client image.
+    pub fn resolve_identity_image_with_browser(
+        &mut self,
+        yaml: &saphyr::YamlOwned,
+        pithos: &[u8],
+        identity: HostIdentity,
+        client: crate::browser::BrowserClientLayer,
+    ) -> Result<Option<ImmutableImageId>, PreflightError> {
+        image_cache::resolve(self, yaml, pithos, identity, client)
     }
 
     /// Resolve or build an identity image using only the frozen host Docker selection.
@@ -1000,7 +1016,35 @@ impl ManagedDocker {
         workspace: &Path,
         staging_root: &Path,
     ) -> Result<ImmutableImageId, PreflightError> {
-        image_build::ensure(self, yaml, pithos, identity, workspace, staging_root)
+        self.ensure_identity_image_with_browser(
+            yaml,
+            pithos,
+            identity,
+            workspace,
+            staging_root,
+            crate::browser::BrowserClientLayer::Absent,
+        )
+    }
+
+    /// Prepare the selected client layer without selecting a runtime display mode.
+    pub fn ensure_identity_image_with_browser(
+        &mut self,
+        yaml: &saphyr::YamlOwned,
+        pithos: &[u8],
+        identity: HostIdentity,
+        workspace: &Path,
+        staging_root: &Path,
+        client: crate::browser::BrowserClientLayer,
+    ) -> Result<ImmutableImageId, PreflightError> {
+        image_build::ensure(
+            self,
+            yaml,
+            pithos,
+            identity,
+            workspace,
+            staging_root,
+            client,
+        )
     }
 
     /// Resolve or build the identity Chromium sidecar image through the frozen

@@ -154,12 +154,20 @@ sys.stdout.write((root/key).read_text())
         self.valid_candidate_for(RAW);
     }
     fn valid_candidate_for(&self, raw: &[u8]) {
+        self.valid_candidate_with_browser(raw, pithos::browser::BrowserClientLayer::Absent);
+    }
+    fn valid_candidate_with_browser(
+        &self,
+        raw: &[u8],
+        client: pithos::browser::BrowserClientLayer,
+    ) {
         let yaml = pithos::config::load(raw).unwrap();
-        let hash = pithos::docker::managed_image_cache::fingerprint(
+        let hash = pithos::docker::managed_image_cache::fingerprint_with_browser(
             &yaml,
             raw,
             identity(),
             &ImmutableImageId::new(&id('a')).unwrap(),
+            client,
         )
         .unwrap();
         self.set("candidate", json!({"id":id('b'),"user":identity().docker_user(),"env":["HOME=/home/pi","USER=pi","LOGNAME=pi"],"volumes":null,"labels":{LABEL:hash}}).to_string());
@@ -301,17 +309,19 @@ fn miss_builds_only_private_embedded_context_with_pinned_base_and_verifies_image
 
 #[test]
 fn browser_enabled_builds_the_client_layer_from_embedded_assets() {
-    let raw = b"toolchains: {}\nbrowser:\n  enabled: true\n";
+    let raw = RAW;
+    let client = pithos::browser::BrowserClientLayer::Included;
     let f = Fixture::new();
-    f.valid_candidate_for(raw);
+    f.valid_candidate_with_browser(raw, client);
     let got = f
         .docker()
-        .ensure_identity_image(
+        .ensure_identity_image_with_browser(
             &pithos::config::load(raw).unwrap(),
             raw,
             identity(),
             &f.workspace,
             &f.stage,
+            client,
         )
         .unwrap();
     assert_eq!(got.as_str(), id('b'));
@@ -380,10 +390,29 @@ fn unsafe_stage_and_invalid_input_never_query_docker() {
     assert!(f.calls().is_empty());
     let mut docker = f.docker();
     let yaml = pithos::config::load(RAW).unwrap();
-    assert_eq!(
-        docker.ensure_identity_image(&yaml, b"toolchains: [", identity(), &f.workspace, &f.stage),
-        Err(PreflightError::InvalidInput)
-    );
+    for client in [
+        pithos::browser::BrowserClientLayer::Absent,
+        pithos::browser::BrowserClientLayer::Included,
+    ] {
+        for raw in [
+            b"toolchains: [".as_slice(),
+            b"toolchains: {rust: '1.85.0'}",
+            b"toolchains: {}\nbrowser: null\n",
+        ] {
+            assert_eq!(
+                docker.ensure_identity_image_with_browser(
+                    &yaml,
+                    raw,
+                    identity(),
+                    &f.workspace,
+                    &f.stage,
+                    client
+                ),
+                Err(PreflightError::InvalidInput)
+            );
+            assert_eq!(fs::read_dir(&f.stage).unwrap().count(), 0);
+        }
+    }
     assert!(f.calls().is_empty());
 }
 

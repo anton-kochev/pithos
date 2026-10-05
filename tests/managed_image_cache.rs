@@ -313,24 +313,49 @@ fn failures_are_static_and_do_not_lose_the_owned_handle() {
 }
 
 #[test]
-fn browser_enabled_config_is_resolved_like_any_other() {
+fn explicit_browser_layer_resolves_its_own_key_for_identical_raw_yaml() {
+    use pithos::browser::{BrowserClientLayer, BrowserMode, BrowserSelection};
+    use pithos::docker::managed_image_cache::{fingerprint, fingerprint_with_browser};
     let f = Fixture::new();
-    let bytes = b"toolchains: {}\nbrowser:\n  enabled: true\n";
-    let yaml = pithos::config::load(bytes.as_slice()).unwrap();
-    let base = pithos::docker::ImmutableImageId::new(&id('a')).unwrap();
-    let browser =
-        pithos::docker::managed_image_cache::fingerprint(&yaml, bytes, identity(), &base).unwrap();
-    let plain = pithos::docker::managed_image_cache::fingerprint(
-        &pithos::config::load(PROJECT).unwrap(),
-        PROJECT,
+    let bytes = b"toolchains: {}\n";
+    let yaml = pithos::config::load(bytes).unwrap();
+    let base = ImmutableImageId::new(&id('a')).unwrap();
+    let plain = fingerprint(&yaml, bytes, identity(), &base).unwrap();
+    assert_eq!(
+        plain,
+        fingerprint_with_browser(&yaml, bytes, identity(), &base, BrowserClientLayer::Absent)
+            .unwrap()
+    );
+    let enabled = fingerprint_with_browser(
+        &yaml,
+        bytes,
         identity(),
         &base,
+        BrowserClientLayer::Included,
     )
     .unwrap();
-    // The emitted client layer names the asset fingerprint, so the key moves.
-    assert_ne!(browser, plain);
-    let _ = f.managed().resolve_identity_image(&yaml, bytes, identity());
-    assert!(!f.calls().is_empty());
+    assert_ne!(enabled, plain);
+    for mode in [BrowserMode::Interactive, BrowserMode::Headless] {
+        let client = BrowserSelection::Enabled(mode).client_layer();
+        assert_eq!(
+            enabled,
+            fingerprint_with_browser(&yaml, bytes, identity(), &base, client).unwrap()
+        );
+        f.output("list", format!("{}\n", json!(id('b'))));
+        f.candidate(&id('b'), &enabled);
+        assert_eq!(
+            f.managed()
+                .resolve_identity_image_with_browser(&yaml, bytes, identity(), client)
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            id('b')
+        );
+        assert_eq!(
+            fs::read_to_string(f.dir.path().join("filter")).unwrap(),
+            format!("label={LABEL}={enabled}")
+        );
+    }
 }
 
 #[test]
@@ -358,11 +383,30 @@ fn invalid_raw_and_disagreeing_yaml_never_query_docker() {
         ),
     ] {
         let f = Fixture::new();
-        let yaml = pithos::config::load(yaml_bytes).unwrap();
-        assert_eq!(
-            f.managed().resolve_identity_image(&yaml, raw, identity()),
-            Err(expected)
-        );
+        let yaml = YamlOwned::load_from_str(std::str::from_utf8(yaml_bytes).unwrap())
+            .unwrap()
+            .remove(0);
+        for client in [
+            pithos::browser::BrowserClientLayer::Absent,
+            pithos::browser::BrowserClientLayer::Included,
+        ] {
+            assert_eq!(
+                f.managed()
+                    .resolve_identity_image_with_browser(&yaml, raw, identity(), client),
+                Err(expected)
+            );
+            let base = ImmutableImageId::new(&id('a')).unwrap();
+            assert_eq!(
+                pithos::docker::managed_image_cache::fingerprint_with_browser(
+                    &yaml,
+                    raw,
+                    identity(),
+                    &base,
+                    client
+                ),
+                Err(expected)
+            );
+        }
         assert!(f.calls().is_empty(), "invalid input queried Docker");
     }
 }

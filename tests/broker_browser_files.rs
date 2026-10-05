@@ -4,7 +4,7 @@
 #[path = "fixtures/canonical_temp.rs"]
 mod tempfile;
 
-use pithos::{broker::browser::BrowserFiles, browser::assets, config::BrowserMode};
+use pithos::{broker::browser::BrowserFiles, browser::BrowserMode, browser::assets};
 use serde_json::Value;
 use std::{
     fs,

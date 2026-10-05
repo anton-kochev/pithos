@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use crate::browser::BrowserClientLayer;
 use saphyr::YamlOwned;
 
 const BASE: &str = "\
@@ -35,6 +36,12 @@ pub const PI_LAUNCH_ARGV: [&str; 4] =
 /// already confirmed the top-level `toolchains` mapping exists and all
 /// name/version scalars are well-formed strings; it will panic otherwise.
 pub fn emit(yaml: &YamlOwned) -> String {
+    emit_with_browser(yaml, BrowserClientLayer::Absent)
+}
+
+/// Emit with an invocation-selected, mode-independent browser client layer.
+/// Same validated-config precondition as [`emit`].
+pub fn emit_with_browser(yaml: &YamlOwned, client: BrowserClientLayer) -> String {
     let mut out = String::with_capacity(BASE.len() + 128);
     out.push_str(BASE);
     let toolchains = sorted_toolchains(yaml);
@@ -101,10 +108,7 @@ pub fn emit(yaml: &YamlOwned) -> String {
         )
         .unwrap();
     }
-    if crate::config::browser_config(yaml)
-        .expect("validated config")
-        .enabled
-    {
+    if client == BrowserClientLayer::Included {
         writeln!(
             out,
             "\n# Browser assets: {}",
@@ -162,8 +166,19 @@ pub fn emit(yaml: &YamlOwned) -> String {
 /// Opt-in image-build overlay applied after all toolchain and Pi installation.
 /// Same validated-config precondition as [`emit`]. Pair with
 /// [`crate::embed::extract_with_identity_to`]. The legacy launch path remains unwired.
+/// Browser clients are absent; use [`emit_with_identity_and_browser`] to include them.
 pub fn emit_with_identity(yaml: &YamlOwned, identity: crate::docker::HostIdentity) -> String {
-    let mut out = emit(yaml);
+    emit_with_identity_and_browser(yaml, identity, BrowserClientLayer::Absent)
+}
+
+/// Identity overlay plus the explicitly selected browser client layer.
+/// Same validated-config precondition as [`emit`].
+pub fn emit_with_identity_and_browser(
+    yaml: &YamlOwned,
+    identity: crate::docker::HostIdentity,
+    client: BrowserClientLayer,
+) -> String {
+    let mut out = emit_with_browser(yaml, client);
     out.push_str(&crate::docker::identity_overlay(
         identity,
         crate::docker::ImageRole::Pi,

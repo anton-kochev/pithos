@@ -1,5 +1,3 @@
-mod browser;
-pub use browser::{BrowserConfig, BrowserMode, browser_config};
 mod error;
 mod extras;
 mod pi;
@@ -30,6 +28,14 @@ fn validate_top_level(
         // Null, scalar, or sequence — none of these carry a `toolchains` key.
         return Err(ConfigError::MissingToolchains);
     };
+
+    // Reject presence before inspecting the value or reporting unrelated keys.
+    if mapping
+        .iter()
+        .any(|(key, _)| key.as_str() == Some("browser"))
+    {
+        return Err(ConfigError::RemovedBrowser);
+    }
 
     let mut toolchains: Option<&YamlOwned> = None;
     let mut extras: Option<&YamlOwned> = None;
@@ -76,7 +82,6 @@ pub fn load(bytes: &[u8]) -> Result<YamlOwned, ConfigError> {
         pi::validate(pi)?;
     }
     session_storage(&doc)?;
-    browser_config(&doc)?;
     postgres_config(&doc)?;
     Ok(doc)
 }

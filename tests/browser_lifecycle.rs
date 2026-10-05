@@ -1,8 +1,5 @@
 #![cfg(unix)]
-use pithos::{
-    browser::BrowserRun,
-    config::{BrowserConfig, BrowserMode},
-};
+use pithos::browser::{BrowserMode, BrowserRun};
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 // The self-spawned test process keeps PATH/HOME/handler changes isolated from
@@ -26,14 +23,7 @@ fn lifecycle_child() {
     } else {
         BrowserMode::Headless
     };
-    let result = BrowserRun::start(
-        BrowserConfig {
-            enabled: true,
-            mode,
-        },
-        "browser-image",
-        "dev-image",
-    );
+    let result = BrowserRun::start(mode, "browser-image", "dev-image");
     if scenario == "failure" || scenario == "old-pi" || scenario == "recovery-blocked" {
         assert!(result.is_err());
         return;

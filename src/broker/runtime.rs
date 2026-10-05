@@ -21,7 +21,7 @@ use super::{
     transport::{BrokerEndpoint, HostAccess},
 };
 use crate::{
-    config::BrowserMode,
+    browser::BrowserMode,
     docker::{
         BrowserInputs, HomeLease, HostIdentity, ImmutableImageId, ManagedDocker, PiBrowser,
         PiInputs, PreflightChildState, RunNetwork, VolumeName,

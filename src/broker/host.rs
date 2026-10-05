@@ -14,6 +14,7 @@ use super::{
     transport::{BrokerEndpoint, HostAccess},
 };
 use crate::{
+    browser::BrowserSelection,
     config::{self, SessionStorage},
     docker::{
         HostDockerSnapshot, HostIdentity, ManagedDocker, PreflightChildState, PreflightError,
@@ -102,7 +103,7 @@ pub struct ValidatedHostInputs {
     project: String,
     volume: VolumeName,
     sessions: SessionStorage,
-    browser: config::BrowserConfig,
+    browser: BrowserSelection,
     postgres: Option<config::PostgresConfig>,
     progress: Option<Box<dyn FnMut(StartStep)>>,
 }
@@ -153,7 +154,6 @@ fn validate_project(
     let project = crate::project::name_from_path(workspace).ok_or(HostError::Workspace)?;
     let yaml = config::load(pithos).map_err(|_| HostError::Config)?;
     config::session_storage(&yaml).map_err(|_| HostError::Config)?;
-    config::browser_config(&yaml).map_err(|_| HostError::Config)?;
     let identity = HostIdentity::effective().map_err(|_| HostError::Identity)?;
     VolumeName::new(&format!("pithos-home-{project}")).map_err(|_| HostError::Volume)?;
     Ok((yaml, identity, project))
@@ -276,7 +276,7 @@ impl HostInputs {
             }
         }
         let sessions = config::session_storage(&yaml).map_err(|_| HostError::Config)?;
-        let browser = config::browser_config(&yaml).map_err(|_| HostError::Config)?;
+        let browser = BrowserSelection::Disabled;
         let postgres = config::postgres_config(&yaml).map_err(|_| HostError::Config)?;
         Ok(ValidatedHostInputs {
             input: self,
@@ -293,13 +293,19 @@ impl HostInputs {
 }
 
 impl ValidatedHostInputs {
+    /// Select the browser before startup; this cannot toggle a running session.
+    pub fn with_browser(mut self, browser: BrowserSelection) -> Self {
+        self.browser = browser;
+        self
+    }
+
     /// The fixed Pi launch argv; project-stored sessions go to the workspace.
     pub fn pi_command(&self) -> Vec<String> {
         let mut command: Vec<String> = PI_LAUNCH_ARGV.iter().map(|arg| (*arg).into()).collect();
         if self.sessions == SessionStorage::Project {
             command.extend(["--session-dir".into(), PROJECT_SESSION_DIR.into()]);
         }
-        if self.browser.enabled {
+        if self.browser.mode().is_some() {
             command.extend(["--skill".into(), BROWSER_SKILL.into()]);
         }
         command
@@ -375,12 +381,13 @@ impl ValidatedHostInputs {
         };
         let mut progress = self.progress.take().unwrap_or_else(|| Box::new(|_| {}));
         progress(StartStep::PiImage);
-        let image = match docker.ensure_identity_image(
+        let image = match docker.ensure_identity_image_with_browser(
             &self.yaml,
             &self.input.pithos,
             self.identity,
             &self.input.workspace,
             &self.input.stage_root,
+            self.browser.client_layer(),
         ) {
             Ok(image) => image,
             Err(error) => {
@@ -388,17 +395,14 @@ impl ValidatedHostInputs {
                 return Err(HostFailure::prelease(error, signals, docker));
             }
         };
-        let browser = if self.browser.enabled {
+        let browser = if let Some(mode) = self.browser.mode() {
             progress(StartStep::BrowserImage);
             match docker.ensure_browser_image(
                 self.identity,
                 &self.input.workspace,
                 &self.input.stage_root,
             ) {
-                Ok(image) => Some(RuntimeBrowser {
-                    image,
-                    mode: self.browser.mode,
-                }),
+                Ok(image) => Some(RuntimeBrowser { image, mode }),
                 Err(error) => {
                     let error = HostError::Image(ImageKind::Browser, error);
                     return Err(HostFailure::prelease(error, signals, docker));

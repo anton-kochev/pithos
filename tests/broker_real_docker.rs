@@ -464,11 +464,11 @@ fn broker_child() {
     let pg_dotnet = mode == "pg-dotnet";
     // Default config (project-stored sessions), plus the sidecar when asked.
     let config: &[u8] = if browser || dotnet {
-        b"toolchains: {}\nbrowser: {enabled: true}\n"
+        b"toolchains: {}\n"
     } else if postgres {
         b"toolchains: {}\npostgres: {version: \"17.10\", database: app}\n"
     } else if pg_dotnet {
-        b"toolchains: {dotnet: \"10.0\"}\nbrowser: {enabled: true}\npostgres: {version: \"17.10\", database: app}\n"
+        b"toolchains: {dotnet: \"10.0\"}\npostgres: {version: \"17.10\", database: app}\n"
     } else {
         b"toolchains: {}\n"
     };
@@ -504,7 +504,13 @@ fn broker_child() {
             fs::write(api.join(name), content).unwrap();
         }
     }
-    let inputs = HostInputs::prepare(HostGrant::workspace(), workspace, pithos).unwrap();
+    let inputs = HostInputs::prepare(HostGrant::workspace(), workspace, pithos)
+        .unwrap()
+        .with_browser(if browser || dotnet || pg_dotnet {
+            pithos::browser::BrowserSelection::Enabled(pithos::browser::BrowserMode::Interactive)
+        } else {
+            pithos::browser::BrowserSelection::Disabled
+        });
     let mut coordinator = match inputs.start(HostGrant::workspace()) {
         Ok(coordinator) => coordinator,
         Err(mut failure) => {
@@ -857,12 +863,12 @@ fn docker_desktop_cli_workspace_run_shows_viewer_and_settles_when_pi_quits() {
     let _home = HomeVolume::absent();
     // A pi.extensions package, installed by the image entrypoint as in legacy runs.
     let (_parent, workspace, _) = project(
-        b"toolchains: {}\nbrowser: {enabled: true}\npi:\n  version: \"0.84.4\"\n  extensions:\n    \"@pithos-kit/themes\": npm:0.1.0\n",
+        b"toolchains: {}\npi:\n  version: \"0.84.4\"\n  extensions:\n    \"@pithos-kit/themes\": npm:0.1.0\n",
     );
     let mut command = Command::new(env!("CARGO_BIN_EXE_pithos"));
     command
         .current_dir(&workspace)
-        .arg("--broker=workspace")
+        .args(["--broker=workspace", "--browser"])
         .env("NO_COLOR", "1");
     let (mut child, mut master) = spawn_in_pty(command);
     let mut output = Vec::new();

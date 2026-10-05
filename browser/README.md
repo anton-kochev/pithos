@@ -1,47 +1,85 @@
 # Optional browser access
 
 **Experimental implementation.** The launcher, client, sidecar, viewer and skill
-are wired together, and [`MACOS-ACCEPTANCE.md`](MACOS-ACCEPTANCE.md) has been run
-end to end on Apple Silicon macOS with Docker Desktop. Independent review is still
-outstanding, and the offline and fake-Docker tests remain no substitute for
-running the acceptance on your own machine.
+are wired together. Historical Apple Silicon Docker Desktop results are recorded
+in [`VERIFICATION.md`](VERIFICATION.md); they predate CLI-only browser opt-in.
+The updated [`MACOS-ACCEPTANCE.md`](MACOS-ACCEPTANCE.md) instructions must be rerun
+for this interface. Offline and fake-Docker tests are no substitute for actual
+runtime acceptance on your own machine.
 The pinned Playwright CLI currently requires an **alpha** runtime. Review the
 [compatibility/provenance record](runtime/PROVENANCE.md) before enabling it.
 
-- [Enable](#enable-on-the-next-launch)
+- [Enable](#enable-for-this-invocation)
+- [Migration](#migration-from-project-configuration)
 - [Viewer and handoff](#interactive-viewer-and-human-handoff)
 - [Applications, CLI and screenshots](#local-applications-cli-and-screenshots)
 - [Isolation, lifecycle and troubleshooting](#isolation-lifecycle-and-troubleshooting)
 - [Verification](#verification-and-remaining-acceptance)
 
-## Enable on the next launch
+## Enable for this invocation
 
-```yaml
-toolchains: {}
-browser:
-  enabled: true
-  mode: interactive
+Keep `.pithos` browser-free (a minimal project uses `toolchains: {}`), then choose:
+
+```sh
+pithos --browser                 # interactive (the bare flag's default)
+pithos --browser=interactive     # interactive with an authenticated viewer
+pithos --browser=headless        # true headless; no display or viewer
+pithos build --browser           # prewarm client and sidecar images only
+pithos --browser --no-build      # launch from existing caches without fetching
+pithos run --browser bash        # explicit command with the same browser environment
+pithos --broker=workspace --browser          # managed Pi and app tools
+pithos --broker=status --browser=headless    # managed Pi and read-only broker
 ```
 
-Run `pithos` normally. On first use it builds the optional client layer and pinned
-sidecar image; subsequent launches reuse matching caches. No host Node/Python or
-pithos-kit package is needed. Enabling, disabling, or changing mode takes effect
-on the next invocation, not in an existing Pi session.
+First use builds the optional client layer and pinned sidecar image; subsequent
+launches reuse matching caches. Interactive/headless modes share enabled images,
+while browser-disabled client images have separate fingerprints. No host
+Node/Python or pithos-kit package is needed. Selection is never persisted, and
+cannot change browser availability inside an already-running Pi session.
 
-- Omitted `browser` or omitted `enabled`: disabled. No browser build/download,
-  client installation, skill activation, network, secret, sidecar, or viewer.
-- `mode`: `interactive` (default) or `headless`. Every supplied value is validated,
-  including in disabled configurations. Unknown keys and wrong types are errors.
-- `pithos build` prepares enabled images but starts no browser/viewer services.
-- `pithos --no-build` is cache-only for both images: missing assets fail without
-  fetching them. Enabled runs also avoid the legacy base-image bootstrap pull;
-  helper and dev containers use `--pull=never` to fail closed on cache races. Pi's `--offline`/`PI_OFFLINE` are not provisioning controls or an
-  OS browser firewall; Pi arguments continue to be forwarded opaquely.
-- `help`/`version` do not inspect or provision browser assets. `info` describes
-  configured future mode, not live state, and retains existing image inspection.
-- Explicit commands (`pithos run bash`) and `--tmux` get the same enabled browser
-  environment without changing their command arguments. A sidecar failure ends
-  the owned dev run with an error rather than silently continuing browserless.
+- No browser flag: disabled. No browser build/download, client layer, skill,
+  browser-specific network, secret, sidecar, or viewer. Broker workspace runs still
+  have the independent network needed for app tools and Postgres.
+- Only the three spellings above are accepted. Invalid equals-values and repeated
+  selections are errors, even if both selections specify the same mode. Modes are
+  not space-separated arguments: `pithos --browser headless` launches a command
+  named `headless` with an interactive browser.
+- Put Pithos options first. `--pi`, `--`, a positional command, or an unowned
+  leading option starts an opaque tail. For example, `pithos --pi --browser=headless`
+  forwards the token to Pi without enabling a Pithos browser.
+- `pithos build --browser[=interactive|headless]` prepares enabled images but starts
+  no network, credentials, sidecar, or viewer. Plain `pithos build` is disabled.
+  This prewarms legacy images, not the broker's identity-specific Pi/sidecar caches.
+- `pithos --browser[=interactive|headless] --no-build` is cache-only for base,
+  project, and sidecar images: missing assets fail with exit 4 without fetching.
+  Prepare them with a flagged build, such as `pithos build --browser=headless`.
+  Enabled helpers/dev containers use `--pull=never` to fail closed on cache races.
+  Pi's `--offline`/`PI_OFFLINE` are not provisioning controls or an OS browser
+  firewall; Pi arguments continue to be forwarded opaquely.
+- `help`/`version` do not inspect or provision browser assets. `info` assesses the
+  browser-disabled image and retains project-tag inspection, not live state or a
+  configured future mode. It accepts no browser flags.
+- Explicit commands and `--tmux` require the browser flag too; their command
+  arguments remain unchanged. A sidecar failure ends the owned dev run with an
+  error rather than silently continuing browserless. Broker launches retain their
+  Pi-only restrictions and do not accept `--tmux`, `--rebuild`, `--no-build`, or
+  Pi/container arguments.
+
+## Migration from project configuration
+
+Remove any top-level `browser:` entry from `.pithos`, including disabled, empty,
+null, or malformed settings. Its presence is rejected with an actionable migration
+error even when a browser CLI flag is supplied. Pithos never rewrites the file.
+Use an explicit flag for every run or build that needs browser access.
+
+For Rust library consumers, `config::BrowserConfig` and `config::browser_config`
+have been removed; mode now lives at `browser::BrowserMode`. Runtime selection is
+`browser::BrowserSelection`, whose `client_layer()` projects to the mode-independent
+`browser::BrowserClientLayer`. `BrowserRun::start` now takes a `BrowserMode` rather
+than a YAML configuration value. The existing Dockerfile/managed image APIs remain
+default-disabled wrappers; explicit `*_with_browser` variants select the client
+layer. Validated broker inputs offer a consuming `with_browser(selection)` builder
+before startup, not a toggle on a running coordinator.
 
 ## Interactive viewer and human handoff
 
@@ -64,7 +102,7 @@ re-snapshot before continuing. Closing/reopening the viewer does not stop the
 browser session; closing the CLI session or exiting Pithos does. Human handoff is
 a coordination convention, not a hard exclusive-control lock.
 
-For true headless operation use `mode: headless` and restart. It launches no Xvfb,
+For true headless operation restart with `pithos --browser=headless`. It launches no Xvfb,
 window manager, VNC server, HTTP viewer or viewer port. An unopened interactive
 viewer is still headed mode; there is no live headless-to-headed promotion.
 
@@ -76,10 +114,12 @@ publish the app to the Mac just for this connection. Browser `localhost` is the
 sidecar, not the app or host. The bridge permits Internet and other services on
 that network; it is not comprehensive egress/SSRF filtering.
 
-Pi discovers the owned `browser-automation` skill automatically using native
-`~/.agents/skills` discovery. Pi >= **0.84.4** is required; its discovery/opt-out
-implementation was inspected in the versioned npm source. The launcher never
+Legacy launches discover the owned `browser-automation` skill automatically using
+native `~/.agents/skills` discovery. Pi >= **0.84.4** is required; its discovery/opt-out
+implementation was inspected in the versioned npm source. The legacy launcher never
 injects `--skill` and never seeds browser skill bytes into persistent homes.
+Broker launches retain their separate explicit, read-only skill mount and fixed
+`--skill /run/pithos-browser/skills/browser-automation` launch argument.
 `--no-skills` and native resource controls remain authoritative. The stable mount
 `~/.agents/skills/pithos-browser` must be empty; collisions/symlink ancestors are
 rejected instead of replacing user content. Existing `PITHOS_REPO/pi-config/skills`
@@ -167,7 +207,8 @@ Troubleshooting:
 
 ## Verification and remaining acceptance
 
-Run `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
+Run `cargo test --locked -- --test-threads=1`,
+`cargo clippy --locked --all-targets -- -D warnings`, and `cargo fmt --check`.
 This environment needs a writable `CARGO_HOME` (for example `/tmp/pithos-cargo`).
 From `browser/`, run `npm ci --ignore-scripts --no-audit --no-fund` then `npm test`.
 Run `python3 tests/browser_skill_mount_test.py` for the home-mount filesystem
@@ -183,8 +224,9 @@ cross-origin WebSockets, and authenticated VNC transport against a fake TCP serv
 See [`VERIFICATION.md`](VERIFICATION.md) for exact results and the observed
 parallel-test `ETXTBSY` failure (the affected test passes individually/serially).
 
-**Executed:** every step of [`MACOS-ACCEPTANCE.md`](MACOS-ACCEPTANCE.md) has been
-exercised on Apple Silicon macOS with Docker Desktop — image build, Chromium
+**Historical acceptance (before CLI-only opt-in):** the earlier version of
+[`MACOS-ACCEPTANCE.md`](MACOS-ACCEPTANCE.md) was exercised on Apple Silicon macOS
+with Docker Desktop — image build, Chromium
 sandbox verification, remote handshake and actions, screenshot delivery, the
 interactive handoff and viewer reconnection, an external page, true-headless
 process inspection, the browser and skill opt-outs, and the Docker sidecar-crash,
@@ -192,11 +234,13 @@ signal, force-kill and concurrency cases. [`VERIFICATION.md`](VERIFICATION.md)
 records the results and marks which parts are operator-reported rather than
 observed.
 
-**Still unexecuted:** the additional cases in [`SMOKE.md`](SMOKE.md) —
+**Still unexecuted for the CLI-only interface:** the updated acceptance guide and
+the additional cases in [`SMOKE.md`](SMOKE.md) —
 customization collisions, symlink refusal, and further cache and
 resource-control scenarios. Do not infer those from the unit tests.
 
-Two original CLI tests that require a Docker executable failed in the earlier
-Docker-less environment and pass once an engine is available. Guild handovers
-failed during child startup; no independent Guild review completed. No installed
-Pi patches, version bump, release, tag or publication was performed.
+Historical verification includes two CLI tests that require an installed Docker
+executable and failed in a Docker-less environment. Those historical results and
+previous review limitations are retained in `VERIFICATION.md`; they are not evidence
+for this interface change. No version bump, release, tag, or publication is part
+of this change.

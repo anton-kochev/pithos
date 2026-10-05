@@ -8,12 +8,12 @@ feature. Do not mark a row passed without observing it.
 ## Initial build and safety gates
 
 1. Build the current launcher from this source checkout (no release/publication).
-   Use a disposable project `.pithos` with `toolchains: {}` and
-   `browser: {enabled: true, mode: interactive}`. Use Pi >= 0.84.4.
-2. `pithos build` must build only images: no viewer, network or secret directory.
+   Use a disposable project `.pithos` with `toolchains: {}` and no `browser` key.
+   Use Pi >= 0.84.4. Select browser access explicitly on each invocation.
+2. `pithos build --browser` must build only images: no viewer, network or secret directory.
    Record local image IDs, native architecture, installed package versions and
    actual Chromium version without dumping container environment/configuration.
-3. Launch `pithos` normally. Require sandbox/RPC readiness, then the viewer URL.
+3. Launch `pithos --browser`. Require sandbox/RPC readiness, then the viewer URL.
    Check owned sidecar mounts/flags **selectively**, not a full inspect/config dump:
    no workspace/home/Docker socket, no privileges/SYS_ADMIN, no raw RPC/VNC ports,
    loopback-only viewer mapping. Effective sandbox readiness must have succeeded.
@@ -60,7 +60,8 @@ No uploads/downloads, personal accounts, real credentials or CAPTCHA bypass.
 
 ## Separate true-headless run
 
-Exit Pithos, set `mode: headless`, and launch normally. Repeat the fixture and
+Exit Pithos and launch `pithos --browser=headless`, without changing `.pithos`.
+Repeat the fixture and
 external-page observation. Verify there is no viewer port and no Xvfb, Openbox,
 x11vnc or viewer listener. Confirm Chromium is actually launched headless, rather
 than merely having no open viewer. Do not claim this from config alone.
@@ -69,24 +70,36 @@ than merely having no open viewer. Do not claim this from config alone.
 
 - Normal exit and nonzero arbitrary commands preserve exit behavior and remove
   owned sidecar/network/config. `pithos run bash` and `--tmux` retain argument
-  ordering; test both default Pi and explicit shell commands.
+  ordering with `pithos run --browser bash` and `pithos --browser --tmux`;
+  test both default Pi and explicit shell commands.
 - Interrupt/terminate during startup and during a running session: SIGINT → 130,
   SIGTERM → 143, with owned cleanup. Exercise sidecar crash/readiness failure.
 - Force-kill one host launcher; next enabled launch reclaims only its stale
   labelled resources. A second live invocation must retain its browser/state.
 - Run two invocations concurrently: distinct names/networks/ports/credentials,
   no shared browser state and no cross-cleanup. Do not record credential values.
-- Reuse the same home enabled → disabled → enabled. Disabled runs must have no
-  owned skill bytes/config/service/client layer. Empty discovery mountpoint
-  directories alone are not active skills.
-- Test `--no-skills` and native Pi resource disabling. No injected `--skill` may
+- Reuse the same home with `pithos --browser` → unflagged `pithos` →
+  `pithos --browser`. Disabled runs must have no owned skill bytes/config/service/
+  client layer. The raw `.pithos` must stay unchanged. Empty discovery mountpoint
+  directories alone are not active skills. Enabled/disabled launches must use their
+  own immutable client image despite a concurrently retagged project alias.
+- For broker runs, exercise `--broker=status` and `--broker=workspace` with both
+  browser modes. Browserless workspace runs must retain app/Postgres networking;
+  browserless status runs must not create browser services. Broker skill argv is
+  intentionally separate from the following legacy native-discovery opt-out test.
+- Test `pithos --browser --no-skills` and native Pi resource disabling. No injected `--skill` may
   override them. Test existing `PITHOS_REPO/pi-config/skills` customizations and
   collisions/symlinks at `~/.agents/skills/pithos-browser` without overwriting data.
-- Test `--no-build` with both cached images, then a deliberately missing browser
+- Test `pithos --browser --no-build` with cached images, then a deliberately missing browser
   cache image (and separately a missing local base tag): fail without builds or
   bootstrap pulls. Exercise a cached-image removal race: no implicit pull by
   helper/dev containers. `help`, `version`, `info`, and
-  `build` must not start browser/viewer services.
+  `build --browser` must not start browser/viewer services. Plain `build` must not
+  prepare browser images, and `info` must label its browser-disabled assessment.
+- Supply the obsolete top-level `browser` key, including `enabled: false`, and
+  require a migration error before provisioning, with or without a CLI opt-in.
+  Invalid modes and repeated browser flags must fail before configuration/Docker
+  side effects. Do not claim these checks from help text alone.
 
 Fake-Docker tests already cover parts of the ownership/rollback/lease/signal logic,
 and loopback tests cover the viewer transport checks. They do not replace this

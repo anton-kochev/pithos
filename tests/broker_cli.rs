@@ -284,7 +284,7 @@ fn config_cannot_grant_broker_or_docker_authority() {
         assert_eq!(
             String::from_utf8_lossy(&result.get_output().stderr),
             format!(
-                "» ERROR: .pithos: unknown top-level key `{key}`; valid keys: `toolchains`, `extras`, `pi`, `sessions`, `browser`, `postgres`\n"
+                "» ERROR: .pithos: unknown top-level key `{key}`; valid keys: `toolchains`, `extras`, `pi`, `sessions`, `postgres`\n"
             )
         );
         assert_eq!(fixture.snapshot(), before);
@@ -338,5 +338,61 @@ fn postgres_is_refused_without_the_workspace_broker() {
             "{args:?}"
         );
         assert_eq!(fixture.snapshot(), before, "{args:?}");
+    }
+}
+
+#[test]
+fn early_broker_dispatch_keeps_explicit_browser_selection_in_managed_lookup() {
+    use pithos::{
+        browser::BrowserClientLayer,
+        docker::{HostIdentity, ImmutableImageId},
+    };
+    use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    let raw = b"toolchains: {}\n";
+    for grant in ["--broker=status", "--broker=workspace"] {
+        for flag in ["--browser", "--browser=interactive", "--browser=headless"] {
+            let f = Fixture::new(Some(std::str::from_utf8(raw).unwrap()));
+            // Replace only our fixture symlink, never its installed target.
+            fs::remove_file(f.bin.join("docker")).unwrap();
+            let socket = f.home.join("docker.sock");
+            let _listener = UnixListener::bind(&socket).unwrap();
+            let script = format!(
+                r#"#!/usr/bin/python3
+import json, pathlib, sys
+a = sys.argv[5:]
+if a[0] == 'info':
+    print(json.dumps({{'id':'daemon-one','os_type':'linux','security_options':[]}}))
+elif a[:2] == ['image','inspect']:
+    print(json.dumps({{'id':'sha256:'+'a'*64}}))
+elif a[:2] == ['image','ls']:
+    pathlib.Path({log}).write_text(a[a.index('--filter')+1])
+    sys.exit(42)
+else: sys.exit(99)
+"#,
+                log = serde_json::to_string(&f.home.join("filter")).unwrap()
+            );
+            fs::write(f.bin.join("docker"), script).unwrap();
+            fs::set_permissions(f.bin.join("docker"), fs::Permissions::from_mode(0o700)).unwrap();
+            f.command()
+                .env("DOCKER_HOST", format!("unix://{}", socket.display()))
+                .args(["run", grant, flag])
+                .assert()
+                .code(1);
+            let hash = pithos::docker::managed_image_cache::fingerprint_with_browser(
+                &pithos::config::load(raw).unwrap(),
+                raw,
+                HostIdentity::effective().unwrap(),
+                &ImmutableImageId::new(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+                BrowserClientLayer::Included,
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read_to_string(f.home.join("filter")).unwrap(),
+                format!("label=io.pithos.broker.identity-fingerprint={hash}"),
+                "early broker arm lost {flag}"
+            );
+            assert!(!f.project.join(".pithos.d").exists());
+            assert_eq!(fs::read(f.project.join(".pithos")).unwrap(), raw);
+        }
     }
 }

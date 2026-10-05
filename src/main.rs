@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use saphyr::YamlOwned;
 
 use pithos::broker::grant::{Action, HostGrant};
+use pithos::browser::{BrowserMode, BrowserSelection};
 use pithos::output::{Style, narrate};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -62,9 +63,11 @@ const MINIMAL_PITHOS: &str = "toolchains: {}\n";
 #[derive(Debug, PartialEq, Eq)]
 enum Subcommand {
     Build {
+        browser: BrowserSelection,
         rebuild: bool,
     },
     Run {
+        browser: BrowserSelection,
         mode: RunMode,
         target: RunTarget,
         tmux: bool,
@@ -97,9 +100,21 @@ impl Subcommand {
             Some(s) if s.starts_with('-') => Self::parse_run(&args[1..]),
             Some("build") => {
                 let mut rebuild = false;
+                let mut browser = BrowserSelection::Disabled;
                 for arg in args.iter().skip(2) {
                     match arg.as_str() {
                         "--rebuild" => rebuild = true,
+                        s if s == "--browser" || s.starts_with("--browser=") => {
+                            match select_browser(s, browser) {
+                                Ok(selected) => browser = selected,
+                                Err(message) => {
+                                    return Self::Reject {
+                                        kind: RejectKind::Usage,
+                                        value: message.into(),
+                                    };
+                                }
+                            }
+                        }
                         other => {
                             return Self::Reject {
                                 kind: RejectKind::Flag,
@@ -108,7 +123,7 @@ impl Subcommand {
                         }
                     }
                 }
-                Self::Build { rebuild }
+                Self::Build { rebuild, browser }
             }
             Some("help") => match args.get(2) {
                 None => Self::Help,
@@ -190,6 +205,7 @@ impl Subcommand {
     /// A positional or `--` before a Pi tail retains the existing explicit
     /// container-command behavior.
     fn parse_run(rest: &[String]) -> Self {
+        let mut browser = BrowserSelection::Disabled;
         let mut mode = RunMode::Default;
         let mut target = RunTarget::Pi(Vec::new());
         let mut tmux = false;
@@ -213,6 +229,17 @@ impl Subcommand {
                         kind: RejectKind::Usage,
                         value: BROKER_USAGE.into(),
                     };
+                }
+                s if s == "--browser" || s.starts_with("--browser=") => {
+                    match select_browser(s, browser) {
+                        Ok(selected) => browser = selected,
+                        Err(message) => {
+                            return Self::Reject {
+                                kind: RejectKind::Usage,
+                                value: message.into(),
+                            };
+                        }
+                    }
                 }
                 "--tmux" => tmux = true,
                 "--rebuild" => match mode {
@@ -252,6 +279,7 @@ impl Subcommand {
             };
         }
         Self::Run {
+            browser,
             mode,
             target,
             tmux,
@@ -275,6 +303,23 @@ impl Subcommand {
     }
 }
 
+/// Called only inside the Pithos-owned prefix, never on an opaque tail.
+fn select_browser(flag: &str, current: BrowserSelection) -> Result<BrowserSelection, &'static str> {
+    if current != BrowserSelection::Disabled {
+        return Err("select --browser only once per invocation");
+    }
+    let mode = match flag {
+        "--browser" | "--browser=interactive" => BrowserMode::Interactive,
+        "--browser=headless" => BrowserMode::Headless,
+        _ => {
+            return Err(
+                "--browser accepts only --browser, --browser=interactive or --browser=headless",
+            );
+        }
+    };
+    Ok(BrowserSelection::Enabled(mode))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let subcommand = Subcommand::from_args(&args);
@@ -282,8 +327,10 @@ fn main() -> ExitCode {
     // legacy launch path, its signal handlers or its Dockerfile emission.
     let subcommand = match subcommand {
         Subcommand::Run {
-            grant: Some(grant), ..
-        } => return run_broker(grant, Style::detect()),
+            grant: Some(grant),
+            browser,
+            ..
+        } => return run_broker(grant, browser, Style::detect()),
         other => other,
     };
     if pithos::browser::install_signal_handlers().is_err() {
@@ -312,7 +359,7 @@ fn refuse_postgres(style: Style) -> ExitCode {
 /// One managed Pi run under an explicit host grant. The coordinator owns
 /// Docker selection, images, the broker and cleanup; this only reports.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn run_broker(grant: HostGrant, style: Style) -> ExitCode {
+fn run_broker(grant: HostGrant, browser: BrowserSelection, style: Style) -> ExitCode {
     use pithos::broker::{
         host::HostInputs,
         runtime::{RuntimePoll, StartStep},
@@ -368,7 +415,7 @@ fn run_broker(grant: HostGrant, style: Style) -> ExitCode {
         Err(e) => return fail(&e),
     };
     // Announce each step: an image build or home checks can take a while.
-    let inputs = inputs.with_progress(move |step| {
+    let inputs = inputs.with_browser(browser).with_progress(move |step| {
         let message = match step {
             StartStep::PiImage => {
                 "preparing the Pi image (the first run after a config change can take minutes) ..."
@@ -514,7 +561,11 @@ fn launch(subcommand: Subcommand) -> ExitCode {
         return refuse_postgres(style);
     }
     let dockerfile_path = cwd.join(".pithos.d").join("Dockerfile");
-    let dockerfile_content = pithos::dockerfile::emit(&yaml);
+    let browser = match &subcommand {
+        Subcommand::Run { browser, .. } | Subcommand::Build { browser, .. } => *browser,
+        _ => BrowserSelection::Disabled,
+    };
+    let dockerfile_content = pithos::dockerfile::emit_with_browser(&yaml, browser.client_layer());
     let extensions_manifest_path = cwd.join(".pithos.d").join("extensions.list");
     let extensions_manifest_content = pithos::extensions::manifest(&yaml);
     if subcommand.writes_dockerfile() {
@@ -537,14 +588,14 @@ fn launch(subcommand: Subcommand) -> ExitCode {
     }
 
     let inputs = ProjectInputs {
+        browser,
         cwd: &cwd,
         yaml: &yaml,
         pithos_bytes: &pithos_bytes,
-        dockerfile_path: &dockerfile_path,
         dockerfile_content: &dockerfile_content,
     };
     match subcommand {
-        Subcommand::Build { rebuild } => run_build(inputs, rebuild, style),
+        Subcommand::Build { rebuild, .. } => run_build(inputs, rebuild, style),
         Subcommand::Run {
             mode, target, tmux, ..
         } => run_run(inputs, mode, &target, tmux, style),
@@ -654,8 +705,18 @@ fn resolve_build_action(mode: RunMode, cached: Option<&str>) -> BuildAction<'_> 
 
 /// Narration body for the `--no-build` + cache-miss abort. Pure so the
 /// wording is lockable in a unit test without reaching through `ensure_image`.
-fn abort_message(project: &str) -> String {
-    format!("image pithos:{project} not found; run `pithos build` to create it (--no-build is set)")
+fn browser_build_command(browser: BrowserSelection) -> String {
+    match browser.mode() {
+        None => "pithos build".into(),
+        Some(mode) => format!("pithos build --browser={}", mode.as_str()),
+    }
+}
+
+fn abort_message(project: &str, browser: BrowserSelection) -> String {
+    format!(
+        "image pithos:{project} not found; run `{}` to create it (--no-build is set)",
+        browser_build_command(browser)
+    )
 }
 
 /// Materialize Pi's launch argv when arguments must be appended. An empty
@@ -703,11 +764,15 @@ fn help_text() -> String {
            version        Print the pithos version\n\
          \n\
          Options:\n  \
-           run:    --rebuild, --no-build, --tmux, --pi <args...>, -- <cmd...>\n  \
+           run:    --rebuild, --no-build, --tmux, --browser[=interactive|headless], --pi <args...>, -- <cmd...>\n  \
                    --broker=status     Managed Pi with a read-only broker status endpoint\n    \
                    --broker=workspace  Managed Pi that can also build, run and stop project apps\n    \
                      Both launch only Pi: no --tmux, --rebuild, --no-build or arguments.\n  \
-           build:  --rebuild\n\
+           build:  --rebuild, --browser[=interactive|headless]\n  \
+                   Browser is invocation-scoped and default-disabled. --browser selects interactive;\n  \
+                   --browser=interactive or --browser=headless select the runtime mode.\n  \
+                   Build prepares client/sidecar images only; it starts no viewer or services.\n  \
+                   info assesses the browser-disabled image; it accepts no browser flags.\n\
          \n\
          Pi arguments:\n  \
            Any other leading option starts an opaque argument tail that is forwarded\n  \
@@ -720,8 +785,6 @@ fn help_text() -> String {
          \n\
          Config (.pithos):\n  \
            sessions.storage: project (default) or volume (legacy compatibility)\n  \
-           browser.enabled: false (default); true prepares an experimental Chromium sidecar\n  \
-           browser.mode: interactive (default) or headless; applies on next launch\n  \
            Toolchains use the flat form — a quoted numeric version per name; nested\n  \
            `version:` keys are not supported. Prefer N.N.N exact pins; Node also\n  \
            accepts N or N.N and resolves the newest matching release:\n    \
@@ -755,15 +818,15 @@ fn require_daemon(style: Style) -> Result<(), ExitCode> {
 /// `run_run` reads just `cwd` itself while passing the rest straight on.
 #[derive(Clone, Copy)]
 struct ProjectInputs<'a> {
+    browser: BrowserSelection,
     cwd: &'a Path,
     yaml: &'a YamlOwned,
     pithos_bytes: &'a [u8],
-    dockerfile_path: &'a Path,
     dockerfile_content: &'a str,
 }
 
 struct EnsuredImage {
-    // Browser-enabled runs freeze the immutable ID, not the mutable project tag.
+    // All runs freeze the immutable ID, never the mutable project tag.
     tag: String,
     project: String,
 }
@@ -778,10 +841,10 @@ fn ensure_image(
     style: Style,
 ) -> Result<EnsuredImage, ExitCode> {
     let ProjectInputs {
+        browser,
         cwd,
         yaml,
         pithos_bytes,
-        dockerfile_path,
         dockerfile_content,
     } = inputs;
     let project = match pithos::project::name_from_path(cwd) {
@@ -812,10 +875,7 @@ fn ensure_image(
         };
         installers.insert(name.clone(), bytes.to_vec());
     }
-    let cache_only_browser = mode == RunMode::NoBuild
-        && pithos::config::browser_config(yaml)
-            .expect("validated config")
-            .enabled;
+    let cache_only_browser = mode == RunMode::NoBuild && browser.mode().is_some();
     let base_lookup = if cache_only_browser {
         pithos::browser::cached_base_id()
     } else {
@@ -824,7 +884,15 @@ fn ensure_image(
     let base_image_id = match base_lookup {
         Ok(id) => id,
         Err(e) => {
-            narrate(style, "» ERROR:", &format!("{e}"));
+            let message = if cache_only_browser {
+                format!(
+                    "{e}; after restoring Docker access run `{}`",
+                    browser_build_command(browser)
+                )
+            } else {
+                e.to_string()
+            };
+            narrate(style, "» ERROR:", &message);
             return Err(ExitCode::from(if cache_only_browser { 4 } else { 1 }));
         }
     };
@@ -837,7 +905,11 @@ fn ensure_image(
         &base_image_id,
     );
 
-    let cached = match pithos::docker::find_image_by_fingerprint(&hash) {
+    let version_labels: Vec<String> = toolchain_names
+        .iter()
+        .map(|name| pithos::fingerprint::version_label_key(name))
+        .collect();
+    let cached = match pithos::docker::find_image_by_fingerprint(&hash, &version_labels) {
         Ok(opt) => opt,
         Err(e) => {
             narrate(style, "» ERROR:", &format!("{e}"));
@@ -856,17 +928,11 @@ fn ensure_image(
                 "»",
                 &format!("cached image {id} matches fingerprint; reusing as {tag}"),
             );
-            let tag = run_image_reference(
-                pithos::config::browser_config(yaml)
-                    .expect("validated config")
-                    .enabled,
-                &tag,
-                id,
-            );
+            let tag = run_image_reference(id);
             return Ok(EnsuredImage { tag, project });
         }
         BuildAction::Abort => {
-            narrate(style, "» ERROR:", &abort_message(&project));
+            narrate(style, "» ERROR:", &abort_message(&project, browser));
             return Err(ExitCode::from(4));
         }
         BuildAction::Build => {}
@@ -895,10 +961,7 @@ fn ensure_image(
         return Err(ExitCode::from(1));
     }
 
-    if pithos::config::browser_config(yaml)
-        .expect("validated config")
-        .enabled
-    {
+    if browser.mode().is_some() {
         narrate(
             style,
             "» browser:",
@@ -914,12 +977,17 @@ fn ensure_image(
         }
     }
 
+    // Public .pithos.d/Dockerfile is informational and may be overwritten by
+    // another invocation. Build only this invocation's fingerprinted snapshot.
+    let dockerfile_path = context.path().join("Dockerfile");
+    write_dockerfile(&dockerfile_path, dockerfile_content, style)?;
+
     // First pass: fingerprint label only. Installer RUN steps populate
     // /opt/pithos-versions/<tc> inside the image as a side-effect.
     match pithos::docker::build_request(
         pithos::docker::BuildRequest {
             context: context.path(),
-            dockerfile: dockerfile_path,
+            dockerfile: &dockerfile_path,
             project: &project,
             fingerprint: &hash,
             extra_labels: &BTreeMap::new(),
@@ -953,51 +1021,45 @@ fn ensure_image(
 
     if toolchain_names.is_empty() {
         // Nothing to extract; single-pass is sufficient.
-        return finish_built_image(yaml, tag, project, &hash, style);
+        return finish_built_image(project, &hash, &[], style);
     }
 
+    let first_pass = finish_built_image(project.clone(), &hash, &[], style)?;
     rebuild_with_version_labels(
         &toolchain_names,
         context.path(),
-        dockerfile_path,
+        &dockerfile_path,
         &project,
         &hash,
-        &tag,
+        &first_pass.tag,
         style,
     )?;
-    finish_built_image(yaml, tag, project, &hash, style)
+    finish_built_image(project, &hash, &version_labels, style)
 }
 
-fn run_image_reference(browser: bool, tag: &str, id: &str) -> String {
-    if browser { id.into() } else { tag.into() }
+fn run_image_reference(id: &str) -> String {
+    id.into()
 }
 
 fn finish_built_image(
-    yaml: &YamlOwned,
-    tag: String,
     project: String,
     hash: &str,
+    version_labels: &[String],
     style: Style,
 ) -> Result<EnsuredImage, ExitCode> {
-    if !pithos::config::browser_config(yaml)
-        .expect("validated config")
-        .enabled
-    {
-        return Ok(EnsuredImage { tag, project });
-    }
     // Another invocation may retag pithos:<project> between build and run. Query
     // the intended fingerprint rather than trusting that mutable tag for the
     // client/server compatibility contract.
-    match pithos::docker::find_image_by_fingerprint(hash) {
+    match pithos::docker::find_image_by_fingerprint(hash, version_labels) {
         Ok(Some(id)) => Ok(EnsuredImage {
-            tag: run_image_reference(true, &tag, &id),
+            tag: run_image_reference(&id),
             project,
         }),
         _ => {
             narrate(
                 style,
                 "» ERROR:",
-                "cannot resolve the browser-compatible dev image by fingerprint; rebuild and retry",
+                "cannot resolve the dev image by fingerprint; rebuild and retry",
             );
             Err(ExitCode::from(1))
         }
@@ -1097,7 +1159,7 @@ fn run_build(inputs: ProjectInputs<'_>, rebuild: bool, style: Style) -> ExitCode
         RunMode::Default
     };
     match ensure_image(inputs, mode, style) {
-        Ok(_) => match prepare_browser_image(inputs.yaml, mode, style) {
+        Ok(_) => match prepare_browser_image(inputs.browser, mode, style) {
             Ok(_) => ExitCode::SUCCESS,
             Err(code) => code,
         },
@@ -1106,20 +1168,25 @@ fn run_build(inputs: ProjectInputs<'_>, rebuild: bool, style: Style) -> ExitCode
 }
 
 fn prepare_browser_image(
-    yaml: &YamlOwned,
+    browser: BrowserSelection,
     mode: RunMode,
     style: Style,
 ) -> Result<Option<String>, ExitCode> {
-    if !pithos::config::browser_config(yaml)
-        .expect("validated config")
-        .enabled
-    {
+    if browser.mode().is_none() {
         return Ok(None);
     }
     pithos::browser::ensure_image(mode == RunMode::NoBuild, mode == RunMode::Rebuild, style)
         .map(Some)
         .map_err(|e| {
-            narrate(style, "» ERROR:", &e.to_string());
+            let message = if matches!(e, pithos::browser::BrowserError::CacheMiss) {
+                format!(
+                    "browser image is not cached; run `{}` to prepare it (--no-build is set)",
+                    browser_build_command(browser)
+                )
+            } else {
+                e.to_string()
+            };
+            narrate(style, "» ERROR:", &message);
             ExitCode::from(if matches!(e, pithos::browser::BrowserError::CacheMiss) {
                 4
             } else {
@@ -1160,13 +1227,13 @@ fn run_run(
         Ok(e) => e,
         Err(code) => return code,
     };
-    let browser_image = match prepare_browser_image(inputs.yaml, mode, style) {
+    let browser_image = match prepare_browser_image(inputs.browser, mode, style) {
         Ok(image) => image,
         Err(code) => return code,
     };
     let browser_run = if let Some(image) = browser_image {
         match pithos::browser::BrowserRun::start(
-            pithos::config::browser_config(inputs.yaml).expect("validated config"),
+            inputs.browser.mode().expect("selected browser image"),
             &image,
             &ensured.tag,
         ) {
@@ -1314,15 +1381,7 @@ fn summarize_config(yaml: &YamlOwned) -> String {
         1 => "extras.apt: 1 package".to_string(),
         n => format!("extras.apt: {n} packages"),
     };
-    let browser = pithos::config::browser_config(yaml).expect("validated config");
-    if browser.enabled {
-        format!(
-            "{tc_part}; {apt_part}; browser: {} (configured for next launch)",
-            browser.mode.as_str()
-        )
-    } else {
-        format!("{tc_part}; {apt_part}")
-    }
+    format!("{tc_part}; {apt_part}")
 }
 
 fn format_size(bytes: u64) -> String {
@@ -1354,6 +1413,7 @@ fn render_info(
     let mut out = String::new();
     out.push_str(&format!("project:      {project}\n"));
     out.push_str(&format!("config:       {config_summary}\n"));
+    out.push_str("scope:        browser-disabled (opt in per run/build with --browser)\n");
     out.push_str(&format!("fingerprint:  {fingerprint}\n"));
     out.push_str(&format!("image:        {tag}\n"));
     if let Some(info) = image {
@@ -1727,6 +1787,173 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    #[test]
+    fn browser_cli_respects_opaque_boundaries_defaults_and_broker_restrictions() {
+        for prefix in [
+            vec!["pithos"],
+            vec!["pithos", "run"],
+            vec!["pithos", "build"],
+        ] {
+            match Subcommand::from_args(&args(&prefix)) {
+                Subcommand::Run { browser, .. } | Subcommand::Build { browser, .. } => {
+                    assert_eq!(browser, BrowserSelection::Disabled)
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        for (boundary, target) in [
+            ("--pi", RunTarget::Pi(args(&["--browser=headless"]))),
+            ("--", RunTarget::Command(args(&["--browser=headless"]))),
+            (
+                "--session",
+                RunTarget::Pi(args(&["--session", "--browser=headless"])),
+            ),
+            (
+                "bash",
+                RunTarget::Command(args(&["bash", "--browser=headless"])),
+            ),
+            (
+                "--browserish",
+                RunTarget::Pi(args(&["--browserish", "--browser=headless"])),
+            ),
+            (
+                "--no-browser",
+                RunTarget::Pi(args(&["--no-browser", "--browser=headless"])),
+            ),
+        ] {
+            assert!(
+                matches!(Subcommand::parse_run(&args(&[boundary, "--browser=headless"])), Subcommand::Run { browser: BrowserSelection::Disabled, target: actual, .. } if actual == target)
+            );
+        }
+        assert!(
+            matches!(Subcommand::parse_run(&args(&["--browser", "headless"])), Subcommand::Run { browser: BrowserSelection::Enabled(BrowserMode::Interactive), target: RunTarget::Command(cmd), .. } if cmd == args(&["headless"]))
+        );
+        assert!(
+            matches!(Subcommand::parse_run(&args(&["--browser", "--pi", "--browser=headless"])), Subcommand::Run { browser: BrowserSelection::Enabled(BrowserMode::Interactive), target: RunTarget::Pi(tail), .. } if tail == args(&["--browser=headless"]))
+        );
+        for grant in ["--broker=status", "--broker=workspace"] {
+            for argv in [
+                args(&[grant, "--browser=headless"]),
+                args(&["--browser=headless", grant]),
+            ] {
+                assert!(matches!(
+                    Subcommand::parse_run(&argv),
+                    Subcommand::Run {
+                        browser: BrowserSelection::Enabled(BrowserMode::Headless),
+                        grant: Some(_),
+                        ..
+                    }
+                ));
+                for forbidden in ["--tmux", "--rebuild", "--no-build", "bash", "--session"] {
+                    let mut invalid = argv.clone();
+                    invalid.push(forbidden.into());
+                    assert!(
+                        matches!(Subcommand::parse_run(&invalid), Subcommand::Reject { kind: RejectKind::Usage, value } if value == BROKER_ONLY)
+                    );
+                }
+            }
+        }
+        assert!(matches!(
+            Subcommand::from_args(&args(&[
+                "pithos",
+                "build",
+                "--rebuild",
+                "--browser",
+                "--rebuild"
+            ])),
+            Subcommand::Build {
+                rebuild: true,
+                browser: BrowserSelection::Enabled(BrowserMode::Interactive)
+            }
+        ));
+        assert!(matches!(
+            Subcommand::from_args(&args(&["pithos", "info", "--browser"])),
+            Subcommand::Reject {
+                kind: RejectKind::Flag,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_cli_invalid_equals_modes_are_usage_errors() {
+        for flag in [
+            "--browser=",
+            "--browser=false",
+            "--browser=INTERACTIVE",
+            "--browser=secret-canary",
+        ] {
+            for prefix in [
+                vec!["pithos"],
+                vec!["pithos", "run"],
+                vec!["pithos", "build"],
+            ] {
+                let mut argv = args(&prefix);
+                argv.push(flag.into());
+                let Subcommand::Reject {
+                    kind: RejectKind::Usage,
+                    value,
+                } = Subcommand::from_args(&argv)
+                else {
+                    panic!("accepted {argv:?}")
+                };
+                assert!(value.contains("interactive") && value.contains("headless"));
+                assert!(!value.contains("secret-canary"));
+            }
+        }
+    }
+
+    #[test]
+    fn browser_cli_rejects_every_second_owned_selection() {
+        for first in ["--browser", "--browser=interactive", "--browser=headless"] {
+            for second in ["--browser", "--browser=interactive", "--browser=headless"] {
+                for prefix in [
+                    vec!["pithos"],
+                    vec!["pithos", "run"],
+                    vec!["pithos", "build"],
+                ] {
+                    let mut argv = args(&prefix);
+                    argv.extend(args(&[first, second]));
+                    assert!(
+                        matches!(
+                            Subcommand::from_args(&argv),
+                            Subcommand::Reject {
+                                kind: RejectKind::Usage,
+                                ..
+                            }
+                        ),
+                        "accepted {argv:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn browser_cli_spellings_select_invocation_mode() {
+        use pithos::browser::{BrowserMode, BrowserSelection};
+        for (flag, mode) in [
+            ("--browser", BrowserMode::Interactive),
+            ("--browser=interactive", BrowserMode::Interactive),
+            ("--browser=headless", BrowserMode::Headless),
+        ] {
+            for prefix in [
+                vec!["pithos"],
+                vec!["pithos", "run"],
+                vec!["pithos", "build"],
+            ] {
+                let mut argv = args(&prefix);
+                argv.push(flag.into());
+                match Subcommand::from_args(&argv) {
+                    Subcommand::Run { browser, .. } | Subcommand::Build { browser, .. } => {
+                        assert_eq!(browser, BrowserSelection::Enabled(mode))
+                    }
+                    other => panic!("browser selection rejected: {other:?}"),
+                }
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn exit_code_from_status_propagates_normal_exit_code() {
@@ -1806,7 +2033,7 @@ mod tests {
     fn abort_message_mentions_pithos_build_and_flag_and_project() {
         // Lock the three user-facing tokens so the guidance can't silently
         // drift — CI runners grep for "pithos build" to diagnose exit 4.
-        let m = abort_message("widgets");
+        let m = abort_message("widgets", BrowserSelection::Disabled);
         assert!(m.contains("pithos build"), "missing 'pithos build': {m}");
         assert!(m.contains("--no-build"), "missing '--no-build': {m}");
         assert!(m.contains("widgets"), "missing project name: {m}");
@@ -1909,6 +2136,7 @@ mod tests {
             assert_eq!(
                 Subcommand::from_args(&argv),
                 Subcommand::Run {
+                    browser: BrowserSelection::Disabled,
                     mode: RunMode::Default,
                     target: if is_pi {
                         RunTarget::Pi(expected)
@@ -1968,6 +2196,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--broker=status"])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 target: RunTarget::Pi(vec![]),
                 tmux: false,
@@ -1986,6 +2215,7 @@ mod tests {
             assert_eq!(
                 Subcommand::from_args(&args(&argv)),
                 Subcommand::Run {
+                    browser: BrowserSelection::Disabled,
                     mode: RunMode::Default,
                     target: RunTarget::Pi(vec![]),
                     tmux: false,
@@ -1999,7 +2229,10 @@ mod tests {
     fn from_args_build_without_flag() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "build"])),
-            Subcommand::Build { rebuild: false }
+            Subcommand::Build {
+                rebuild: false,
+                browser: BrowserSelection::Disabled
+            }
         );
     }
 
@@ -2007,7 +2240,10 @@ mod tests {
     fn from_args_build_with_rebuild() {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "build", "--rebuild"])),
-            Subcommand::Build { rebuild: true }
+            Subcommand::Build {
+                rebuild: true,
+                browser: BrowserSelection::Disabled
+            }
         );
     }
 
@@ -2027,6 +2263,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos"])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 grant: None,
                 target: RunTarget::Pi(vec![]),
@@ -2051,6 +2288,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--tmux", "--rebuild"])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Rebuild,
                 grant: None,
                 target: RunTarget::Pi(vec![]),
@@ -2080,6 +2318,7 @@ mod tests {
                 "Continue from here",
             ])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 target: RunTarget::Pi(vec![
                     "--fork".to_string(),
@@ -2106,6 +2345,7 @@ mod tests {
                 "Review this",
             ])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 target: RunTarget::Pi(vec![
                     "--provider".to_string(),
@@ -2127,6 +2367,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "--plan", "carefully"])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 grant: None,
                 target: RunTarget::Pi(vec!["--plan".to_string(), "carefully".to_string()]),
@@ -2146,6 +2387,7 @@ mod tests {
                 "01a0335e",
             ])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::NoBuild,
                 grant: None,
                 target: RunTarget::Pi(vec!["--session".to_string(), "01a0335e".to_string(),]),
@@ -2165,6 +2407,7 @@ mod tests {
                 "--tmux",
             ])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 target: RunTarget::Pi(vec![
                     "--fork".to_string(),
@@ -2183,6 +2426,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "--pi", "Review this repository"])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 grant: None,
                 target: RunTarget::Pi(vec!["Review this repository".to_string()]),
@@ -2196,6 +2440,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "--pi", "--", "- bullet point"])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 grant: None,
                 target: RunTarget::Pi(vec!["--".to_string(), "- bullet point".to_string()]),
@@ -2209,6 +2454,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "--pi", "--tmux", "--rebuild"])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 grant: None,
                 target: RunTarget::Pi(vec!["--tmux".to_string(), "--rebuild".to_string(),]),
@@ -2222,6 +2468,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "bash", "-lc", "echo hi"])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 target: RunTarget::Command(vec![
                     "bash".to_string(),
@@ -2239,6 +2486,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "run", "--tmux", "--", "bash"])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 grant: None,
                 target: RunTarget::Command(vec!["bash".to_string()]),
@@ -2252,6 +2500,7 @@ mod tests {
         assert_eq!(
             Subcommand::from_args(&args(&["pithos", "-p", "--", "- bullet point"])),
             Subcommand::Run {
+                browser: BrowserSelection::Disabled,
                 mode: RunMode::Default,
                 target: RunTarget::Pi(vec![
                     "-p".to_string(),
@@ -2529,38 +2778,17 @@ mod tests {
     }
 
     #[test]
-    fn browser_run_freezes_client_image_while_disabled_keeps_existing_tag() {
-        assert_eq!(
-            run_image_reference(true, "pithos:project", "sha256:expected"),
-            "sha256:expected"
-        );
-        assert_eq!(
-            run_image_reference(false, "pithos:project", "sha256:expected"),
-            "pithos:project"
-        );
+    fn every_run_freezes_the_immutable_client_image() {
+        assert_eq!(run_image_reference("sha256:expected"), "sha256:expected");
     }
 
     #[test]
-    fn summarize_config_reports_configured_browser_not_live_state() {
-        for mode in ["interactive", "headless"] {
-            let yaml = pithos::config::load(
-                format!("toolchains: {{}}\nbrowser: {{enabled: true, mode: {mode}}}").as_bytes(),
-            )
-            .unwrap();
-            assert!(
-                summarize_config(&yaml)
-                    .contains(&format!("browser: {mode} (configured for next launch)"))
-            );
-        }
-    }
-
-    #[test]
-    fn summarize_config_disabled_browser_preserves_existing_summary() {
-        let baseline = pithos::config::load(b"toolchains: {}").unwrap();
-        let disabled =
-            pithos::config::load(b"toolchains: {}\nbrowser: {enabled: false, mode: headless}")
-                .unwrap();
-        assert_eq!(summarize_config(&baseline), summarize_config(&disabled));
+    fn summarize_config_has_no_persistent_browser_state() {
+        let yaml = pithos::config::load(b"toolchains: {}").unwrap();
+        assert_eq!(
+            summarize_config(&yaml),
+            "toolchains: none; extras.apt: none"
+        );
     }
 
     #[test]

@@ -37,18 +37,29 @@ fn browser_overlay_provisions_python_before_running_helper() {
 
 #[test]
 fn pi_identity_emitter_is_strictly_late_and_legacy_is_unchanged() {
-    let yaml = pithos::config::load(b"toolchains:\n  rust: \"1.85.0\"\n  node: \"22\"\npi:\n  version: \"0.84.4\"\nbrowser:\n  enabled: true\n" as &[u8]).unwrap();
+    let yaml = pithos::config::load(
+        b"toolchains:\n  rust: \"1.85.0\"\n  node: \"22\"\npi:\n  version: \"0.84.4\"\n" as &[u8],
+    )
+    .unwrap();
     let identity = HostIdentity::new(12345, 23456).unwrap();
-    let legacy = pithos::dockerfile::emit(&yaml);
-    let output = pithos::dockerfile::emit_with_identity(&yaml, identity);
+    let legacy =
+        pithos::dockerfile::emit_with_browser(&yaml, pithos::browser::BrowserClientLayer::Included);
+    let output = pithos::dockerfile::emit_with_identity_and_browser(
+        &yaml,
+        identity,
+        pithos::browser::BrowserClientLayer::Included,
+    );
     assert_eq!(
         output,
         legacy.clone() + &identity_overlay(identity, ImageRole::Pi)
     );
     assert!(!legacy.contains("identity_image.py"));
     assert!(legacy.contains("USER pi\n"));
-    let other =
-        pithos::dockerfile::emit_with_identity(&yaml, HostIdentity::new(12346, 23456).unwrap());
+    let other = pithos::dockerfile::emit_with_identity_and_browser(
+        &yaml,
+        HostIdentity::new(12346, 23456).unwrap(),
+        pithos::browser::BrowserClientLayer::Included,
+    );
     assert_ne!(output, other);
 }
 

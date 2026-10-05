@@ -54,10 +54,7 @@ fn launches_do_not_automatically_import_workspace_env() {
 
             let log = fs::read_to_string(log_path).unwrap();
             let args: Vec<_> = log.lines().collect();
-            let image = args
-                .iter()
-                .position(|arg| *arg == "pithos:project")
-                .unwrap();
+            let image = args.iter().position(|arg| *arg == "sha256:fake").unwrap();
             let options = &args[..image];
             assert!(!options.contains(&"--env-file"));
             assert!(!log.contains("PITHOS_TEST_SECRET"));

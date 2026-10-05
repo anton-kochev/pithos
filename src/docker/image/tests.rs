@@ -91,6 +91,72 @@ exit 2"#,
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn fingerprint_lookup_prefers_image_with_version_labels() {
+    let (_tempdir, docker) = fake_docker(
+        r#"printf '%s\n' "$*" >> "$0.log"
+case "$*" in
+  *version*) printf 'sha256:labelled\n' ;;
+  *) printf 'sha256:first-pass\nsha256:labelled\n' ;;
+esac"#,
+    );
+    let labels = [crate::fingerprint::version_label_key("node")];
+
+    let id = find_image_by_fingerprint_with("abc", &labels, &docker).unwrap();
+
+    assert_eq!(id.as_deref(), Some("sha256:labelled"));
+    let calls = std::fs::read_to_string(docker.with_extension("log")).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        [format!(
+            "image ls --no-trunc --filter label={} --filter label={} --format {{{{.ID}}}}",
+            crate::fingerprint::label("abc"),
+            labels[0]
+        )]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fingerprint_lookup_falls_back_when_no_image_has_version_labels() {
+    let (_tempdir, docker) = fake_docker(
+        r#"printf '%s\n' "$*" >> "$0.log"
+case "$*" in
+  *version*) ;;
+  *) printf 'sha256:first-pass\n' ;;
+esac"#,
+    );
+    let labels = [crate::fingerprint::version_label_key("node")];
+
+    let id = find_image_by_fingerprint_with("abc", &labels, &docker).unwrap();
+
+    assert_eq!(id.as_deref(), Some("sha256:first-pass"));
+    let calls = std::fs::read_to_string(docker.with_extension("log")).unwrap();
+    assert_eq!(calls.lines().count(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn fingerprint_lookup_without_version_labels_runs_one_query() {
+    let (_tempdir, docker) = fake_docker(
+        r#"printf '%s\n' "$*" >> "$0.log"
+printf 'sha256:only\n'"#,
+    );
+
+    let id = find_image_by_fingerprint_with("abc", &[], &docker).unwrap();
+
+    assert_eq!(id.as_deref(), Some("sha256:only"));
+    let calls = std::fs::read_to_string(docker.with_extension("log")).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        [format!(
+            "image ls --no-trunc --filter label={} --format {{{{.ID}}}}",
+            crate::fingerprint::label("abc")
+        )]
+    );
+}
+
 #[test]
 fn parse_image_ids_returns_empty_for_no_output() {
     assert!(parse_image_ids("").is_empty());

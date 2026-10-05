@@ -1,20 +1,15 @@
 use std::fmt;
 
-pub(super) const VALID_TOP_LEVEL: &[&str] = &[
-    "toolchains",
-    "extras",
-    "pi",
-    "sessions",
-    "browser",
-    "postgres",
-];
+pub(super) const VALID_TOP_LEVEL: &[&str] = &["toolchains", "extras", "pi", "sessions", "postgres"];
 pub(super) const VALID_EXTRAS: &[&str] = &["apt"];
 pub(super) const VALID_PI: &[&str] = &["version", "extensions"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error(".pithos browser: {0}")]
-    Browser(String),
+    #[error(
+        ".pithos: remove `browser` from .pithos; opt in per invocation with `pithos [run] --browser`, `--browser=interactive` or `--browser=headless` (also supported by `pithos build`)"
+    )]
+    RemovedBrowser,
     #[error(".pithos postgres: {0}")]
     Postgres(String),
     #[error(".pithos sessions: {0}")]

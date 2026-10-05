@@ -4,25 +4,57 @@ use std::process::{Command, Stdio};
 use crate::fingerprint;
 
 /// Query local Docker for an image carrying the given fingerprint label
-/// (FR-203, T-202). Returns the first matching image ID, or `None` if no
-/// image is labeled with this hash. Used by the launcher to decide whether
-/// to skip `pithos build` and proceed directly to launch.
+/// (FR-203, T-202). Returns a matching image ID, or `None` if no image is
+/// labeled with this hash. Used by the launcher to decide whether to skip
+/// `pithos build` and proceed directly to launch.
+///
+/// The two-pass build leaves two images with the same fingerprint: the
+/// first pass (no version labels) and the rebuild that adds them. Both can
+/// share a creation second, so `docker image ls` order cannot tell them
+/// apart. When `version_labels` is non-empty, an image carrying every one of
+/// those label keys wins; any fingerprint match is the fallback.
 ///
 /// `hash` is expected to be `compute()` output (64-char lowercase hex);
 /// behavior with arbitrary input is unspecified — empty or shell-meta
 /// input is interpolated into the `--filter` value verbatim.
 ///
-/// Shells out to:
-///   `docker image ls --filter label=<KEY>=<hash> --format {{.ID}}`
+/// Shells out to (labelled query skipped when `version_labels` is empty):
+///   `docker image ls --no-trunc --filter label=<KEY>=<hash> --filter label=<version key>... --format {{.ID}}`
+///   `docker image ls --no-trunc --filter label=<KEY>=<hash> --format {{.ID}}`
 ///
 /// Errors surface as `io::Error`:
 /// - `docker` not in PATH → spawn error propagates
 /// - daemon unreachable / non-zero exit → wrapped with stderr in the message
-pub fn find_image_by_fingerprint(hash: &str) -> std::io::Result<Option<String>> {
-    let filter = format!("label={}", fingerprint::label(hash));
-    let output = Command::new("docker")
-        .args(["image", "ls", "--filter", &filter, "--format", "{{.ID}}"])
-        .output()?;
+pub fn find_image_by_fingerprint(
+    hash: &str,
+    version_labels: &[String],
+) -> std::io::Result<Option<String>> {
+    find_image_by_fingerprint_with(hash, version_labels, Path::new("docker"))
+}
+
+fn find_image_by_fingerprint_with(
+    hash: &str,
+    version_labels: &[String],
+    docker: &Path,
+) -> std::io::Result<Option<String>> {
+    let fingerprint_filter = format!("label={}", fingerprint::label(hash));
+    if !version_labels.is_empty() {
+        let mut filters = vec![fingerprint_filter.clone()];
+        filters.extend(version_labels.iter().map(|key| format!("label={key}")));
+        if let Some(id) = first_image_id(&filters, docker)? {
+            return Ok(Some(id));
+        }
+    }
+    first_image_id(&[fingerprint_filter], docker)
+}
+
+fn first_image_id(filters: &[String], docker: &Path) -> std::io::Result<Option<String>> {
+    let mut command = Command::new(docker);
+    command.args(["image", "ls", "--no-trunc"]);
+    for filter in filters {
+        command.args(["--filter", filter]);
+    }
+    let output = command.args(["--format", "{{.ID}}"]).output()?;
     if !output.status.success() {
         return Err(std::io::Error::other(format!(
             "docker image ls failed (exit {:?}): {}",
@@ -38,7 +70,8 @@ pub fn find_image_by_fingerprint(hash: &str) -> std::io::Result<Option<String>> 
 /// an existing tag). Used after a fingerprint cache hit so that
 /// `docker run pithos:<project>` resolves locally — the fingerprint lookup
 /// finds the image by label and may return an ID whose only tag belongs to
-/// a different project. `docker tag` is idempotent: re-tagging an image
+/// a different project. Launch still uses the fingerprint-resolved full ID.
+/// `docker tag` is idempotent: re-tagging an image
 /// that already carries the same tag is a no-op.
 ///
 /// Shells out to:

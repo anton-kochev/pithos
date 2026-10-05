@@ -7,7 +7,7 @@ Declarative Docker development containers.
 
 Describe your project's toolchain in a `.pithos` YAML file; `pithos` builds a
 reproducible container image and launches Pi with the toolchain ready to use.
-Image rebuilds are skipped when the config hasn't changed.
+Image rebuilds are skipped when the configuration and selected image inputs haven't changed.
 
 ## Installation
 
@@ -52,7 +52,8 @@ pithos help                                 # full command reference
 pithos version                              # print the pithos version
 ```
 
-Pithos owns `--rebuild`, `--no-build`, and `--tmux`. Any other leading option
+Pithos owns `--rebuild`, `--no-build`, `--tmux`, and `--browser[=interactive|headless]`
+(and the explicit broker grants below). Any other leading option
 starts an opaque argument tail that is forwarded verbatim to Pi, so Pithos also
 works with flags added by newer Pi versions or extensions. Put Pithos options
 before Pi options. Use `--pi` when the Pi argument list starts with a positional,
@@ -124,25 +125,37 @@ is authoritative.
 
 ### Browser access (experimental)
 
-Optional browser support is default-off and ships in releases from v0.18.0:
+Browser access is **explicit for each invocation**, not a project default:
 
-```yaml
-toolchains: {}
-browser:
-  enabled: true
-  mode: interactive # or headless
+```sh
+pithos --browser                 # interactive Chromium with a loopback viewer
+pithos --browser=interactive     # the same explicit interactive selection
+pithos --browser=headless        # Chromium without a display or viewer
+pithos build --browser           # prepare client/sidecar images; no services
+pithos --browser --no-build      # cache-only interactive launch
+pithos run --browser bash        # explicit command with browser access
 ```
 
-On the next normal launch, Pithos prepares an isolated Chromium sidecar and owned
-remote CLI/skill. Interactive mode reports an authenticated loopback viewer;
-headless mode starts no display or viewer. `--no-build` never fetches missing
-browser assets. No pithos-kit package or second-terminal helper is required.
+Without a browser flag, runs and builds are browser-disabled. First use prepares
+an isolated Chromium sidecar image and optional client layer; matching caches are
+reused, and interactive/headless modes share those images. An interactive run
+reports an authenticated loopback viewer; headless starts no display or viewer.
+`--no-build` never fetches missing browser assets. No pithos-kit package or
+second-terminal helper is required. `pithos info` assesses the browser-disabled
+image, not live browser availability or a saved mode.
+
+**Migration:** remove any top-level `browser:` entry from `.pithos`, even if it
+says `enabled: false`. It is now rejected with migration guidance. Put the browser
+flag before Pi options or a container command; duplicate selections and invalid
+modes are errors. Flags after `--pi`, `--`, or another opaque tail are not Pithos
+options. No configuration files are automatically rewritten.
 
 **Experimental, and the pinned CLI requires an alpha Playwright runtime.**
-Startup fails closed if sandbox/readiness checks fail. Apple Silicon acceptance on
-Docker Desktop has been run end to end; independent review is still outstanding.
-See [`browser/README.md`](browser/README.md) for security boundaries and setup,
-and [`browser/VERIFICATION.md`](browser/VERIFICATION.md) for observed results.
+Startup fails closed if sandbox/readiness checks fail. Historical Apple Silicon
+acceptance on Docker Desktop predates this CLI-only interface and is not
+verification of the new invocation contract. See [`browser/README.md`](browser/README.md)
+for security boundaries, library API migration, and setup, and
+[`browser/VERIFICATION.md`](browser/VERIFICATION.md) for historical observed results.
 
 ### Managed broker (experimental)
 
@@ -153,6 +166,8 @@ broker runs every Docker operation for it:
 ```sh
 pithos --broker=workspace   # Pi plus app tools and project services
 pithos --broker=status      # Pi plus a read-only broker status endpoint only
+pithos --broker=workspace --browser           # app tools plus interactive browser
+pithos --broker=status --browser=headless     # read-only broker plus headless browser
 ```
 
 Ships in releases from v0.18.0. Verified on Docker Desktop for macOS; native
@@ -160,8 +175,10 @@ Linux is not verified yet.
 
 - **Pi only.** A broker run launches Pi with its fixed command. `--tmux`,
   `--rebuild`, `--no-build`, Pi arguments and container commands are refused.
-  `.pithos` must already exist. `browser` and `pi.extensions` work as usual,
-  and the viewer URL is printed at startup.
+  `.pithos` must already exist. `pi.extensions` work as usual; add a browser
+  flag explicitly to either broker grant. Interactive runs print the viewer URL
+  at startup. Workspace app/Postgres networking remains available without a browser.
+  `pithos build --browser` prewarms legacy images, not broker identity-specific images.
 - **App tools** (`--broker=workspace` only). Pi gets `pithos_app_build`,
   `pithos_app_run`, `pithos_app_status`, `pithos_app_logs` and
   `pithos_app_stop`:

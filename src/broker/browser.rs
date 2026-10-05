@@ -1,7 +1,7 @@
 //! Private per-run files for the Chromium sidecar and Pi's browser client.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use crate::config::BrowserMode;
+use crate::browser::BrowserMode;
 use std::{
     fs,
     io::{self, Write},

@@ -1,5 +1,6 @@
 //! Managed identity Pi cache lookup; no build or runtime authority.
 use super::{ImageInfo, ImmutableImageId, ManagedDocker, PreflightError};
+use crate::browser::BrowserClientLayer;
 use crate::{
     docker::{BASE_IMAGE_REF, HostIdentity},
     dockerfile, embed,
@@ -153,8 +154,19 @@ pub fn fingerprint(
     identity: HostIdentity,
     base: &ImmutableImageId,
 ) -> Result<String, PreflightError> {
+    fingerprint_with_browser(yaml, pithos, identity, base, BrowserClientLayer::Absent)
+}
+
+/// Explicit client layer; raw validation and cache framing match [`fingerprint`].
+pub fn fingerprint_with_browser(
+    yaml: &YamlOwned,
+    pithos: &[u8],
+    identity: HostIdentity,
+    base: &ImmutableImageId,
+    client: BrowserClientLayer,
+) -> Result<String, PreflightError> {
     let parsed = validated_config(yaml, pithos)?;
-    fingerprint_validated(&parsed, pithos, identity, base)
+    fingerprint_validated(&parsed, pithos, identity, base, client)
 }
 
 fn validated_config(yaml: &YamlOwned, pithos: &[u8]) -> Result<YamlOwned, PreflightError> {
@@ -170,12 +182,13 @@ fn fingerprint_validated(
     pithos: &[u8],
     identity: HostIdentity,
     base: &ImmutableImageId,
+    client: BrowserClientLayer,
 ) -> Result<String, PreflightError> {
     let mut hash = Sha256::new();
     hash.update(DOMAIN);
     frame(
         &mut hash,
-        dockerfile::emit_with_identity(parsed, identity).as_bytes(),
+        dockerfile::emit_with_identity_and_browser(parsed, identity, client).as_bytes(),
     );
     frame(&mut hash, pithos);
     for name in dockerfile::toolchain_names(parsed) {
@@ -203,9 +216,10 @@ pub(super) fn resolve(
     yaml: &YamlOwned,
     pithos: &[u8],
     identity: HostIdentity,
+    client: BrowserClientLayer,
 ) -> Result<Option<ImmutableImageId>, PreflightError> {
     // Validate raw input and agreement before any Docker query.
-    Ok(resolve_with_base(docker, yaml, pithos, identity)?.0)
+    Ok(resolve_with_base(docker, yaml, pithos, identity, client)?.0)
 }
 
 pub(super) fn resolve_with_base(
@@ -213,10 +227,11 @@ pub(super) fn resolve_with_base(
     yaml: &YamlOwned,
     pithos: &[u8],
     identity: HostIdentity,
+    client: BrowserClientLayer,
 ) -> Result<(Option<ImmutableImageId>, ImmutableImageId), PreflightError> {
     let parsed = validated_config(yaml, pithos)?;
     let base = inspect_base(docker)?;
-    let hash = fingerprint_validated(&parsed, pithos, identity, &base)?;
+    let hash = fingerprint_validated(&parsed, pithos, identity, &base, client)?;
     let Some(id) = unique_labelled(docker, LABEL_KEY, &hash)? else {
         return Ok((None, base));
     };

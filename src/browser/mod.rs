@@ -1,11 +1,10 @@
 //! Optional host-owned browser lifecycle. No Docker authority enters either container.
+mod selection;
+pub use selection::{BrowserClientLayer, BrowserMode, BrowserSelection};
 pub mod assets;
 mod process;
 
-use crate::{
-    config::{BrowserConfig, BrowserMode},
-    output::{Style, narrate},
-};
+use crate::output::{Style, narrate};
 use fs2::FileExt;
 use process::{args, docker};
 use std::{
@@ -98,7 +97,7 @@ pub enum BrowserError {
     Io(#[from] io::Error),
     #[error("browser: {0}")]
     Operation(&'static str),
-    #[error("browser image is not cached; run `pithos build` without --no-build")]
+    #[error("browser image is not cached; run `pithos build --browser` without --no-build")]
     CacheMiss,
 }
 type Result<T> = std::result::Result<T, BrowserError>;
@@ -130,7 +129,7 @@ pub fn cached_base_id() -> io::Result<String> {
         return Ok(reply.stdout);
     }
     Err(io::Error::other(
-        "base image is not cached or cannot be inspected; run pithos build without --no-build after restoring Docker access",
+        "base image is not cached or cannot be inspected; explicit browser image preparation is required",
     ))
 }
 
@@ -274,11 +273,8 @@ pub struct BrowserRun {
     viewer_url: Option<String>,
 }
 impl BrowserRun {
-    pub fn start(config: BrowserConfig, image: &str, dev_image: &str) -> Result<Self> {
+    pub fn start(mode: BrowserMode, image: &str, dev_image: &str) -> Result<Self> {
         let _operation = OPERATION.lock().unwrap();
-        if !config.enabled {
-            return Err(BrowserError::Operation("disabled browser must not start"));
-        }
         let home =
             std::env::var_os("HOME")
                 .filter(|x| !x.is_empty())
@@ -322,14 +318,14 @@ impl BrowserRun {
             ));
         }
         let capability = random_hex(32)?;
-        let password = if config.mode == BrowserMode::Interactive {
+        let password = if mode == BrowserMode::Interactive {
             Some(random_hex(32)?)
         } else {
             None
         };
         let server = format!(
             "{{\"mode\":\"{}\",\"runId\":\"{}\",\"capability\":\"{}\"{}}}",
-            config.mode.as_str(),
+            mode.as_str(),
             run.owned.id,
             capability,
             password
@@ -358,7 +354,7 @@ impl BrowserRun {
             "cannot create browser network",
         )?;
         checked(
-            &Self::sidecar_args(&run.owned, config.mode, image)?,
+            &Self::sidecar_args(&run.owned, mode, image)?,
             "cannot start sandboxed browser sidecar",
         )?;
         let deadline = Instant::now() + Duration::from_secs(65);
@@ -383,7 +379,7 @@ impl BrowserRun {
             }
             thread::sleep(Duration::from_millis(250));
         }
-        if config.mode == BrowserMode::Interactive {
+        if mode == BrowserMode::Interactive {
             let address = checked(
                 &args(&["port", &run.owned.sidecar(), "6080/tcp"]),
                 "cannot resolve loopback viewer port",

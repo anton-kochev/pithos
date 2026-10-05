@@ -97,12 +97,10 @@ pub(super) fn ensure(
     identity: HostIdentity,
     workspace: &Path,
     staging_root: &Path,
+    client: crate::browser::BrowserClientLayer,
 ) -> Result<ImmutableImageId, PreflightError> {
     // Validate input, identity, and staging before ANY Docker query or filesystem write.
     let parsed = crate::config::load(pithos).map_err(|_| PreflightError::InvalidInput)?;
-    let browser = crate::config::browser_config(&parsed)
-        .map_err(|_| PreflightError::InvalidInput)?
-        .enabled;
     if &parsed != yaml {
         return Err(PreflightError::InvalidInput);
     }
@@ -113,22 +111,22 @@ pub(super) fn ensure(
     if docker.work_shutdown.is_requested() {
         return Err(PreflightError::Unavailable);
     }
-    let (cached, base) = image_cache::resolve_with_base(docker, yaml, pithos, identity)?;
+    let (cached, base) = image_cache::resolve_with_base(docker, yaml, pithos, identity, client)?;
     if let Some(id) = cached {
         return Ok(id);
     }
-    let hash = image_cache::fingerprint(yaml, pithos, identity, &base)?;
+    let hash = image_cache::fingerprint_with_browser(yaml, pithos, identity, &base, client)?;
     if docker.has_child() {
         return Err(PreflightError::ChildPending);
     }
     let stage = Stage::new(root)?;
     embed::extract_with_identity_to(&stage.context).map_err(|_| PreflightError::Unavailable)?;
     // The emitted client layer copies these; its text names their fingerprint.
-    if browser {
+    if client == crate::browser::BrowserClientLayer::Included {
         crate::browser::assets::extract_to(&stage.context)
             .map_err(|_| PreflightError::Unavailable)?;
     }
-    let emitted = dockerfile::emit_with_identity(&parsed, identity);
+    let emitted = dockerfile::emit_with_identity_and_browser(&parsed, identity, client);
     // Name the base by tag: BuildKit cannot build `FROM sha256:<id>`. The pin
     // is enforced by the unchanged tag ID and the built image's layer chain.
     if !emitted.contains(&format!("FROM {} AS base", crate::docker::BASE_IMAGE_REF)) {

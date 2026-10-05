@@ -23,10 +23,7 @@ fn legacy_child() {
     let browser = if scenario == "browser" || scenario == "nested" {
         Some(
             pithos::browser::BrowserRun::start(
-                pithos::config::BrowserConfig {
-                    enabled: true,
-                    mode: pithos::config::BrowserMode::Headless,
-                },
+                pithos::browser::BrowserMode::Headless,
                 "browser-image",
                 "dev-image",
             )

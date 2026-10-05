@@ -377,6 +377,58 @@ fn pi_fixture() {
     let f = Fixture::new();
     if mode.starts_with("host-coordinator") {
         f.mode("host-coordinator");
+        let browser = if mode.contains("interactive") {
+            pithos::browser::BrowserSelection::Enabled(pithos::browser::BrowserMode::Interactive)
+        } else if mode.contains("headless") {
+            pithos::browser::BrowserSelection::Enabled(pithos::browser::BrowserMode::Headless)
+        } else {
+            pithos::browser::BrowserSelection::Disabled
+        };
+        if browser.mode().is_some() {
+            let path = f.root.path().join("docker");
+            let base = ImmutableImageId::new(&format!("sha256:{}", "b".repeat(64))).unwrap();
+            let parsed = pithos::config::load(HOST_CONFIG).unwrap();
+            let disabled = pithos::docker::managed_image_cache::fingerprint(
+                &parsed,
+                HOST_CONFIG,
+                identity(),
+                &base,
+            )
+            .unwrap();
+            let enabled = pithos::docker::managed_image_cache::fingerprint_with_browser(
+                &parsed,
+                HOST_CONFIG,
+                identity(),
+                &base,
+                browser.client_layer(),
+            )
+            .unwrap();
+            let script = fs::read_to_string(&path)
+                .unwrap()
+                .replace(&disabled, &enabled);
+            let extra = r#"elif a[:2]==['image','ls'] and 'browser-fingerprint' in opt('--filter'):
+    emit('sha256:'+'c'*64)
+elif a[:2]==['image','inspect'] and a[-1]=='sha256:'+'c'*64:
+    emit({'id':a[-1],'user':__USER__,'env':['HOME=/tmp/browser-home','USER=browser','LOGNAME=browser'],
+          'volumes':None,'labels':{'io.pithos.broker.browser-fingerprint':__BROWSER_HASH__}})
+elif a[0]=='run' and 'sha256:'+'c'*64 in a:
+    mounts=[a[i+1] for i,v in enumerate(a) if v=='--mount']
+    server=next(dict(p.split('=',1) for p in next(csv.reader([m])) if '=' in p)['source'] for m in mounts if 'server.json' in m)
+    observed=json.loads(pathlib.Path(server).read_text())
+    observed['published']='-p' in a
+    (root/'browser-observed.json').write_text(json.dumps(observed))
+    sys.exit(73) # Deliberate external startup failure; verify retained cleanup.
+"#.replace("__USER__", &serde_json::to_string(&identity().docker_user()).unwrap())
+  .replace("__BROWSER_HASH__", &serde_json::to_string(&pithos::browser::assets::fingerprint_with_identity(identity())).unwrap());
+            fs::write(
+                &path,
+                script.replace(
+                    "elif a[:2]==['image','ls'] and mode('host-coordinator'):",
+                    &(extra + "elif a[:2]==['image','ls'] and mode('host-coordinator'):"),
+                ),
+            )
+            .unwrap();
+        }
         let (debt, busy) = (mode.contains("-debt"), mode.ends_with("-busy"));
         if busy {
             f.mode("busy");
@@ -407,7 +459,8 @@ fn pi_fixture() {
             interactive_limits: InteractiveLimits::default(),
         }
         .validate()
-        .unwrap();
+        .unwrap()
+        .with_browser(browser);
         let volume = VolumeName::new(&format!(
             "pithos-home-{}",
             pithos::project::name_from_path(&f.workspace()).unwrap()
@@ -438,7 +491,64 @@ fn pi_fixture() {
         let sink = steps.clone();
         let selected = selected.with_progress(move |step| sink.borrow_mut().push(step));
         let endpoint = BrokerEndpoint::offline(listener).unwrap();
-        let started = selected.start_offline(HostGrant::workspace(), endpoint);
+        let grant = if mode.ends_with("-status") {
+            HostGrant::managed_pi_run()
+        } else {
+            HostGrant::workspace()
+        };
+        let started = selected.start_offline(grant, endpoint);
+        if let Some(mode) = browser.mode() {
+            let Err(mut failure) = started else {
+                panic!("external browser failure ignored")
+            };
+            assert!(
+                steps.borrow().contains(&StartStep::Browser),
+                "did not reach selected browser runtime: {:?}; {}",
+                steps.borrow(),
+                failure.error
+            );
+            let observed: Value = serde_json::from_slice(
+                &fs::read(f.root.path().join("browser-observed.json")).unwrap_or_else(|_| {
+                    panic!(
+                        "browser observation missing: {}; calls: {}",
+                        failure.error,
+                        fs::read_to_string(f.root.path().join("calls")).unwrap()
+                    )
+                }),
+            )
+            .unwrap();
+            assert_eq!(observed["mode"], mode.as_str());
+            assert_eq!(
+                observed["published"],
+                mode == pithos::browser::BrowserMode::Interactive
+            );
+            assert_eq!(
+                observed.get("password").is_some(),
+                mode == pithos::browser::BrowserMode::Interactive
+            );
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let terminal = loop {
+                let poll = failure.poll_cleanup();
+                if poll != RuntimePoll::Running {
+                    break poll;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(2));
+            };
+            // A failed detached create is uncertain, not proof of absence.
+            // Preserve the failure owner and private files until reconciliation.
+            assert_eq!(terminal, RuntimePoll::RecoveryRequired);
+            assert!(failure.recovery.is_some());
+            assert!(
+                f.root
+                    .path()
+                    .join("credential/browser/server.json")
+                    .exists()
+            );
+            assert!(f.root.path().join("credential/broker-client.json").exists());
+            assert!(!f.root.path().join("pi-ran").exists());
+            return;
+        }
         if busy {
             // A container still mounts the home: the debt stays and the run refuses.
             let Err(mut failure) = started else {
@@ -1684,4 +1794,13 @@ fn known_interactive_preexec_failures_leave_no_daemon_debt() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn selected_host_coordinator_propagates_image_mode_files_and_fatal_cleanup() {
+    for mode in ["interactive", "headless"] {
+        for grant in ["status", "workspace"] {
+            run_fixture(&format!("host-coordinator-{mode}-{grant}"));
+        }
+    }
 }

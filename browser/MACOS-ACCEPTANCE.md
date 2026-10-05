@@ -4,7 +4,7 @@ This procedure tests the **modified Pithos launcher on your Apple Silicon Mac**.
 
 **Do the main acceptance test first. Stop at the first failure.** The later lifecycle tests are useful only after the browser, sandbox, viewer, and Pi integration work.
 
-These steps build local artifacts only. They do **not** commit, publish, release, or replace your installed Pithos binary. Docker Desktop acceptance has not yet been completed; this is a procedure, not a record of passing results.
+These steps build local artifacts only. They do **not** commit, publish, release, or replace your installed Pithos binary. Historical results predate CLI-only browser opt-in; this updated procedure has not been executed and is not a record of passing results. Keep `.pithos` browser-free and supply a browser flag for each enabled invocation.
 
 ## 1. Prepare two Mac terminals
 
@@ -83,7 +83,7 @@ Confirm the new source files exist:
 test -f browser/runtime/rpc.mjs
 test -f browser/runtime/server.mjs
 test -f src/browser/mod.rs
-test -f src/config/browser.rs
+test -f src/browser/selection.rs
 ```
 
 Each command should finish without an error.
@@ -121,9 +121,6 @@ toolchains: {}
 pi:
   version: "0.84.4"
   extensions: {}
-browser:
-  enabled: true
-  mode: interactive
 YAML
 
 cd "$SMOKE"
@@ -177,7 +174,7 @@ In Terminal A:
 
 ```bash
 cd "$SMOKE"
-"$PITHOS" build
+"$PITHOS" build --browser
 ```
 
 The first build downloads the required packages and browser binaries. It may take several minutes.
@@ -201,7 +198,7 @@ This first launch separates browser infrastructure problems from Pi authenticati
 In Terminal A:
 
 ```bash
-"$PITHOS" run bash
+"$PITHOS" run --browser bash
 ```
 
 Wait for:
@@ -516,7 +513,7 @@ In Terminal A:
 
 ```bash
 cd "$SMOKE"
-"$PITHOS" --no-build
+"$PITHOS" --browser --no-build
 ```
 
 This should use the images already prepared.
@@ -629,28 +626,17 @@ Exit Pi normally, then repeat the run-specific cleanup checks from Step 7.
 
 ## 9. Test true headless mode
 
-After the interactive run has exited, replace only the disposable project configuration:
-
-```bash
-cat > "$SMOKE/.pithos" <<'YAML'
-toolchains: {}
-pi:
-  version: "0.84.4"
-  extensions: {}
-browser:
-  enabled: true
-  mode: headless
-YAML
-```
-
-Launch normally:
+After the interactive run has exited, keep the disposable `.pithos` unchanged
+and select headless mode explicitly:
 
 ```bash
 cd "$SMOKE"
-"$PITHOS"
+"$PITHOS" --browser=headless --no-build
 ```
 
-A changed configuration may require a new development-image fingerprint, so do not use `--no-build` for this first headless launch.
+Interactive and headless share the enabled client/sidecar image caches, so the
+images prepared earlier should suffice. This must not change `.pithos` or build
+another mode-specific image.
 
 Expected:
 
@@ -719,12 +705,12 @@ These are two different controls.
 With browser support still enabled, exit the current run and launch:
 
 ```bash
-"$PITHOS" --no-skills
+"$PITHOS" --browser=headless --no-skills
 ```
 
 Expected:
 
-- The configured browser sidecar still starts.
+- The explicitly selected browser sidecar still starts.
 - The owned skill is absent from native skill-command autocomplete.
 - The launcher does not force it back with `--skill`.
 
@@ -732,21 +718,7 @@ Do not manually read the skill file during this negative test.
 
 ### 10.2 Disable browser support
 
-Exit, then write:
-
-```bash
-cat > "$SMOKE/.pithos" <<'YAML'
-toolchains: {}
-pi:
-  version: "0.84.4"
-  extensions: {}
-browser:
-  enabled: false
-  mode: headless
-YAML
-```
-
-Launch:
+Exit and leave `.pithos` unchanged. Launch without a browser flag:
 
 ```bash
 "$PITHOS" run bash
@@ -773,11 +745,15 @@ It should contain no owned skill files. An empty structural directory is accepta
 
 There should be no new browser sidecar or viewer.
 
-Exit, re-enable browser support, and confirm the skill and browser work again with the same project home.
+Exit, launch `"$PITHOS" --browser` again, and confirm the skill and browser work
+with the same project home. No configuration rewrite is needed. A top-level
+`browser:` key, even with `enabled: false`, must instead fail with a migration
+message before any image preparation or run resources.
 
 ## 11. Run lifecycle tests
 
-Use the disposable project with browser support enabled. Headless mode is sufficient here.
+Use the same browser-free disposable project and supply `--browser=headless`
+on each lifecycle test launch. Headless mode is sufficient here.
 
 Re-identify the run each time.
 
@@ -786,7 +762,7 @@ Re-identify the run each time.
 On the Mac:
 
 ```bash
-"$PITHOS" run bash -c 'exit 7'
+"$PITHOS" run --browser=headless bash -c 'exit 7'
 printf 'Exit code: %s\n' "$?"
 ```
 
@@ -797,7 +773,7 @@ Expected: `7`, followed by complete owned-resource cleanup.
 In Terminal A:
 
 ```bash
-"$PITHOS" run bash
+"$PITHOS" run --browser=headless bash
 printf 'Exit code: %s\n' "$?"
 ```
 
@@ -862,7 +838,7 @@ kill -KILL "$PID"
 
 Immediate cleanup is not guaranteed—that is the point of this test.
 
-Start Pithos again with browser support enabled.
+Start Pithos again with `--browser=headless`.
 
 Expected:
 
@@ -874,7 +850,10 @@ Check the old ID specifically, not all browser resources, because the new run is
 
 ### Concurrent runs
 
-Open a third terminal, initialize its `PITHOS` and `SMOKE` variables, and start another invocation from the same disposable project while the first remains active.
+Open a third terminal, initialize its `PITHOS` and `SMOKE` variables, and start
+`"$PITHOS" --browser=headless` from the same disposable project while the first
+remains active. Repeat with `--browser` on both launches to check independent
+viewer ports.
 
 Expected:
 
@@ -885,16 +864,36 @@ Expected:
 
 Do not compare credentials by printing them; distinct run ownership and independent sessions are the operational checks.
 
+### Managed broker selection
+
+After the legacy runs have exited, also test:
+
+```bash
+"$PITHOS" --broker=status --browser
+"$PITHOS" --broker=workspace --browser=headless
+```
+
+Exit each run before the next, and repeat with the other mode for each grant.
+Broker runs build their own identity-specific caches, so the earlier legacy build
+does not prewarm them. Require interactive viewer authentication, no headless
+viewer, matching skill/client availability, and owned cleanup. Use the broker's
+reported run/resources, not the legacy `dev.pithos.browser-run` names above.
+
+Finally run `"$PITHOS" --broker=workspace` without a browser: app tools and their
+network must still work, but no browser client/skill/sidecar/viewer is enabled.
+A browserless status run must start no browser services. Record these results
+separately; legacy acceptance is not proof of broker propagation.
+
 ## 12. Test cache-only failure carefully
 
 Do this only when all test runs have exited and no other launch is using the cache you are about to perturb.
 
-First warm the current configuration in Terminal A’s Mac shell:
+First warm the explicitly selected headless images in Terminal A’s Mac shell:
 
 ```bash
 cd "$SMOKE"
-"$PITHOS" build
-"$PITHOS" --no-build
+"$PITHOS" build --browser=headless
+"$PITHOS" --browser=headless --no-build
 ```
 
 Exit normally. Cache-only startup should have succeeded.
@@ -925,7 +924,7 @@ Then use a temporary backup tag so no image data needs to be deleted:
 
   docker image rm "$BROWSER_TAG" || exit 1
 
-  "$PITHOS" --no-build
+  "$PITHOS" --browser=headless --no-build
   RESULT=$?
 
   printf 'Cache-miss exit code: %s\n' "$RESULT"
@@ -973,7 +972,12 @@ Screenshot read by Pi: PASS / FAIL
 Viewer reconnection: PASS / FAIL
 External example page: PASS / FAIL
 True headless mode: PASS / FAIL
-Browser disabled: PASS / FAIL
+Unflagged browser disabled: PASS / FAIL
+CLI opt-in leaves .pithos unchanged: PASS / FAIL
+Interactive/headless cache reuse: PASS / FAIL
+Removed YAML key migration: PASS / FAIL
+Broker status/workspace in both modes: PASS / FAIL
+Browserless broker workspace networking: PASS / FAIL
 --no-skills: PASS / FAIL
 Exit code 7: PASS / FAIL
 SIGINT/SIGTERM: PASS / FAIL

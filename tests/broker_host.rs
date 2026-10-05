@@ -138,17 +138,21 @@ fn host_inputs_validation_child_fixture() {
         "--skill".to_string(),
         "/run/pithos-browser/skills/browser-automation".into(),
     ];
-    for (yaml, expected) in [
+    use pithos::browser::{BrowserMode, BrowserSelection};
+    for (yaml, selection, expected) in [
         (
-            b"toolchains: {}\nsessions: {storage: volume}\nbrowser: {enabled: true}\n".as_slice(),
+            base.as_slice(),
+            BrowserSelection::Enabled(BrowserMode::Interactive),
             [launch.clone(), skill.clone()].concat(),
         ),
         (
-            b"toolchains: {}\nbrowser: {enabled: true, mode: headless}\n",
+            b"toolchains: {}\n".as_slice(),
+            BrowserSelection::Enabled(BrowserMode::Headless),
             [project_launch.clone(), skill.clone()].concat(),
         ),
         (
-            b"toolchains: {}\nbrowser: {enabled: false}\n",
+            b"toolchains: {}\n".as_slice(),
+            BrowserSelection::Disabled,
             project_launch.clone(),
         ),
     ] {
@@ -156,6 +160,7 @@ fn host_inputs_validation_child_fixture() {
             input(workspace.clone(), yaml)
                 .validate()
                 .unwrap()
+                .with_browser(selection)
                 .pi_command(),
             expected
         );
