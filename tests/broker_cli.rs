@@ -273,6 +273,7 @@ const DOCKER_USAGE_LINE: &str =
 
 /// A fake `limactl` in the fixture's PATH: `sh <subcommand>` runs the script
 /// of that name from the project directory, like the fake `docker`.
+#[cfg(target_os = "macos")]
 fn fake_lima(fixture: &Fixture, list: &str, address: &str) {
     std::os::unix::fs::symlink("/bin/sh", fixture.bin.join("limactl")).unwrap();
     let log = "printf 'limactl %s %s\\n' \"$0\" \"$*\" >> \"$PITHOS_TEST_LIMA_CALLS\"\n";
@@ -289,6 +290,7 @@ fn fake_lima(fixture: &Fixture, list: &str, address: &str) {
     .unwrap();
 }
 
+#[cfg(target_os = "macos")]
 fn lima_calls(fixture: &Fixture) -> String {
     fs::read_to_string(fixture.home.join("lima-calls")).unwrap_or_default()
 }
@@ -312,6 +314,20 @@ fn docker_flag_rejects_values_and_duplicates_without_side_effects() {
         );
         assert_eq!(fixture.snapshot(), before, "{args:?}");
     }
+}
+
+#[test]
+#[cfg(not(target_os = "macos"))]
+fn docker_flag_is_refused_off_macos_without_side_effects() {
+    let fixture = Fixture::new(Some("toolchains: {}\n"));
+    let before = fixture.snapshot();
+    let result = fixture.command().arg("--docker").assert().code(2);
+    assert_eq!(
+        String::from_utf8_lossy(&result.get_output().stderr),
+        "» ERROR: --docker is supported on macOS only\n"
+    );
+    assert!(!fixture.home.join("docker-calls").exists());
+    assert_eq!(fixture.snapshot(), before);
 }
 
 #[test]
