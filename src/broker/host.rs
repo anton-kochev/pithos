@@ -109,9 +109,6 @@ pub struct ValidatedHostInputs {
     progress: Option<Box<dyn FnMut(StartStep)>>,
 }
 
-/// Container path of project-stored sessions: `<workspace>/.pi/sessions`
-/// through the `/workspace` bind, the same host folder legacy runs use.
-const PROJECT_SESSION_DIR: &str = "/workspace/.pi/sessions";
 /// The bundled skill, mounted read-only for browser-enabled runs.
 const BROWSER_SKILL: &str = "/run/pithos-browser/skills/browser-automation";
 
@@ -149,7 +146,8 @@ fn validate_project(
     workspace: &Path,
     pithos: &[u8],
 ) -> Result<(YamlOwned, HostIdentity, String), HostError> {
-    if !trusted_directory(workspace, false) {
+    if !trusted_directory(workspace, false) || crate::docker::workspace::target(workspace).is_err()
+    {
         return Err(HostError::Workspace);
     }
     let project = crate::project::name_from_path(workspace).ok_or(HostError::Workspace)?;
@@ -311,7 +309,13 @@ impl ValidatedHostInputs {
     pub fn pi_command(&self) -> Vec<String> {
         let mut command: Vec<String> = PI_LAUNCH_ARGV.iter().map(|arg| (*arg).into()).collect();
         if self.sessions == SessionStorage::Project {
-            command.extend(["--session-dir".into(), PROJECT_SESSION_DIR.into()]);
+            // The workspace is mounted at its host path, so this is the same
+            // `<workspace>/.pi/sessions` folder legacy runs use.
+            let sessions = self.input.workspace.join(".pi/sessions");
+            command.extend([
+                "--session-dir".into(),
+                sessions.to_string_lossy().into_owned(),
+            ]);
         }
         if self.browser.mode().is_some() {
             command.extend(["--skill".into(), BROWSER_SKILL.into()]);

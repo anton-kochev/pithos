@@ -8,6 +8,8 @@ use std::process::{Command, Stdio};
 pub enum RunError {
     #[error("docker run: {0}")]
     Spawn(#[from] std::io::Error),
+    #[error(transparent)]
+    Workspace(#[from] super::workspace::WorkspacePathError),
     #[error("cannot initialize home volume {volume}: {detail}")]
     InitializeHome { volume: String, detail: String },
 }
@@ -56,7 +58,7 @@ pub struct RunRequest<'a> {
 /// Shells out to:
 /// ```text
 /// docker run --rm -it --name ... --hostname ... --user 501:20
-///            -v <PWD>:/workspace/<project>:cached
+///            --mount type=bind,source=<PWD>,target=<PWD>
 ///            -v pithos-home-<project>:/home/pi
 ///            [--mount type=bind,source=<session_root>,target=/home/pi/.pi/agent/sessions]
 ///            [-v <PITHOS_REPO>/pi-config/... per Layer 3 item, if exists]
@@ -65,7 +67,9 @@ pub struct RunRequest<'a> {
 ///            [-v <clipboard-shim>:/usr/local/bin/xclip:ro]
 ///            [-e PITHOS_CLIPBOARD_URL]
 ///            [-e DOCKER_HOST=... -e TESTCONTAINERS_HOST_OVERRIDE=...]
-///            -w /workspace/<project> <image_tag> [<cmd>...]
+///            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory
+///            -e GIT_CONFIG_VALUE_0=<PWD>
+///            -w <PWD> <image_tag> [<cmd>...]
 /// ```
 pub fn run(
     image_tag: &str,
@@ -95,6 +99,7 @@ pub fn run(
 /// query/settlement failures and mutable named contexts retain evidence without
 /// changing the observed interactive exit status.
 pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, RunError> {
+    super::workspace::target(request.workspace)?;
     let mut args = assemble_run_args(
         request.image_tag,
         request.project,
@@ -555,13 +560,9 @@ fn render_run_args(
     let container_name = format!("pithos-{project}-{pid}");
     let hostname = format!("pithos-{project}");
     let volume = format!("pithos-home-{project}");
-    let workspace_bind = {
-        let mut s = OsString::from(workspace);
-        s.push(format!(":/workspace/{project}:cached"));
-        s
-    };
+    // `run_request` admits only `workspace::target`-checked paths.
+    let workdir = workspace.to_string_lossy();
     let home_bind = format!("{volume}:/home/pi");
-    let workdir = format!("/workspace/{project}");
 
     let mut args: Vec<OsString> = vec![
         "run".into(),
@@ -573,8 +574,8 @@ fn render_run_args(
         hostname.into(),
         "--user".into(),
         "501:20".into(),
-        "-v".into(),
-        workspace_bind,
+        "--mount".into(),
+        super::workspace::mount(&workdir),
         "-v".into(),
         home_bind.into(),
     ];
@@ -605,8 +606,12 @@ fn render_run_args(
             args.push(format!("{key}={value}").into());
         }
     }
+    for entry in super::workspace::git_safe_directory(&workdir) {
+        args.push("-e".into());
+        args.push(entry.into());
+    }
     args.push("-w".into());
-    args.push(workdir.into());
+    args.push(workdir.as_ref().into());
     args.push(image_tag.into());
     for arg in cmd {
         args.push(arg.into());

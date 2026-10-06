@@ -111,7 +111,10 @@ fn host_inputs_validation_child_fixture() {
         .collect();
     let project_launch = [
         launch.clone(),
-        vec!["--session-dir".into(), "/workspace/.pi/sessions".into()],
+        vec![
+            "--session-dir".into(),
+            format!("{}/.pi/sessions", workspace.display()),
+        ],
     ]
     .concat();
     for yaml in [

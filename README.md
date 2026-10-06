@@ -63,6 +63,28 @@ flag, `run` is implied — `pithos --tmux` and `pithos run --tmux` are the same
 command. Run `pithos help`
 for the full reference.
 
+### Project path inside the container
+
+**Breaking change:** the project is mounted inside the container at the same
+absolute path it has on the host (for example `/Users/you/src/app`), and Pi
+starts there. Earlier releases used `/workspace/<project>` (and `/workspace` for
+broker runs). Same paths on both sides keep build outputs and caches that store
+absolute paths usable from the host and from Pi, for example .NET `obj/`,
+`bin/` and `MvcTestingAppManifest.json`. Error messages and stack traces from Pi
+show paths you can open on the host as they are.
+
+- Git inside the container trusts exactly that path (`safe.directory`), set at
+  launch.
+- A project at a path the container itself uses is refused with exit 2: `/`,
+  `/home/pi` and anything under it, and ancestors of Pithos-owned container
+  paths such as `/opt`, `/usr`, `/usr/local` or `/run`.
+- Pi files sessions under the encoded working directory, so sessions started
+  under `/workspace/<project>` stay in `.pi/sessions/--workspace-<project>--/`
+  and `--resume` does not list them. Open one with
+  `pithos --session .pi/sessions/--workspace-<project>--/<file>.jsonl`.
+- After upgrading, clean build outputs once (for example `dotnet clean`) so no
+  output built under the old path is reused.
+
 ### Environment files and secrets
 
 **Breaking change:** Pithos no longer discovers or forwards the project's `.env`
@@ -243,9 +265,11 @@ pithos --docker          # any run form, also with --broker=... or a command
   work: the paths live in Pi's container, not in the VM; use resource
   mappings. A broker run with `postgres:` still gets its own database next to
   Pi; the VM is only for what Pi starts itself.
-- Measured on an M3 Pro: 1367 Testcontainers-backed integration tests of a .NET
-  project ran inside Pi against the VM (4 vCPU, 4 GiB) in 2 m 36 s, after a
-  first run that also pulled `postgres:17` into the VM.
+- The VM gets 8 vCPU and 8 GiB. On an M3 Pro, 1387 Testcontainers-backed
+  integration tests of a .NET project passed inside Pi against it in 2 m 33 s;
+  with 4 vCPU and 4 GiB a few container starts timed out. An existing VM keeps
+  its size: `limactl stop pithos-docker` and `limactl edit pithos-docker --set
+  '.cpus = 8 | .memory = "8GiB"'`.
 
 ### Clipboard screenshots
 

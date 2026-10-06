@@ -605,6 +605,13 @@ fn launch(subcommand: Subcommand) -> ExitCode {
     if matches!(subcommand, Subcommand::Run { .. }) && postgres_requested(&yaml) {
         return refuse_postgres(style);
     }
+    // The project is mounted at its own path; refuse one the container owns.
+    if matches!(subcommand, Subcommand::Run { .. }) {
+        if let Err(e) = pithos::docker::workspace::target(&cwd) {
+            narrate(style, "» ERROR:", &e.to_string());
+            return ExitCode::from(2);
+        }
+    }
     let docker = matches!(subcommand, Subcommand::Run { docker: true, .. });
     let pi_daemon = match prepare_pi_daemon(docker, style) {
         Ok(daemon) => daemon,

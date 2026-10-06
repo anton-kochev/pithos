@@ -200,26 +200,57 @@ fn assemble_run_args_names_container_and_hostname_from_project_and_pid() {
 }
 
 #[test]
-fn assemble_run_args_binds_workspace_with_cached_suffix_and_sets_workdir() {
-    let args = assemble_run_args(
-        "pithos:demo",
-        "demo",
-        Path::new("/tmp/demo-ws"),
-        None,
-        None,
-        RunEnvironment::default(),
-        &[],
-    );
-    assert!(
-        args.windows(2)
-            .any(|w| w[0] == "-v" && w[1] == "/tmp/demo-ws:/workspace/demo:cached"),
-        "missing workspace bind in {args:?}"
-    );
-    assert!(
-        args.windows(2)
-            .any(|w| w[0] == "-w" && w[1] == "/workspace/demo"),
-        "missing -w /workspace/demo pair in {args:?}"
-    );
+fn assemble_run_args_mounts_the_workspace_at_its_host_path_and_works_there() {
+    // Same path inside and out: build outputs, caches and error messages that
+    // carry absolute paths stay valid on both sides of the mount.
+    for (host, mount) in [
+        (
+            "/tmp/demo-ws",
+            "type=bind,\"source=/tmp/demo-ws\",\"target=/tmp/demo-ws\"",
+        ),
+        (
+            "/Users/a b/x,y:z\"q",
+            "type=bind,\"source=/Users/a b/x,y:z\"\"q\",\"target=/Users/a b/x,y:z\"\"q\"",
+        ),
+    ] {
+        let args = assemble_run_args(
+            "pithos:demo",
+            "demo",
+            Path::new(host),
+            None,
+            None,
+            RunEnvironment::default(),
+            &[],
+        );
+        assert!(
+            args.windows(2).any(|w| w[0] == "--mount" && w[1] == mount),
+            "missing same-path workspace mount in {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w[0] == "-w" && w[1] == host),
+            "missing -w {host} in {args:?}"
+        );
+        assert!(
+            args.iter()
+                .all(|a| !a.to_string_lossy().contains("/workspace")),
+            "no fixed /workspace target may remain: {args:?}"
+        );
+        // Git refuses repositories owned by another UID; trust exactly this one.
+        for pair in [
+            ["-e", "GIT_CONFIG_COUNT=1"],
+            ["-e", "GIT_CONFIG_KEY_0=safe.directory"],
+        ] {
+            assert!(
+                args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]),
+                "{pair:?} in {args:?}"
+            );
+        }
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == format!("GIT_CONFIG_VALUE_0={host}").as_str()),
+            "missing safe.directory value in {args:?}"
+        );
+    }
 }
 
 #[test]
@@ -308,7 +339,10 @@ fn assemble_run_args_does_not_import_workspace_env_file() {
                 .filter(|pair| pair[0] == "-e" || pair[0] == "--env")
                 .map(|pair| pair[1].to_string_lossy().into_owned())
                 .collect();
-            assert_eq!(environment, ["COLORTERM=truecolor"]);
+            let workspace = td.path().to_str().unwrap();
+            let mut expected_env = vec!["COLORTERM=truecolor".to_string()];
+            expected_env.extend(crate::docker::workspace::git_safe_directory(workspace));
+            assert_eq!(environment, expected_env);
             assert!(args.iter().all(|arg| {
                 let text = arg.to_string_lossy();
                 !text.contains("PITHOS_TEST_SECRET") && !text.contains("synthetic-canary-value")

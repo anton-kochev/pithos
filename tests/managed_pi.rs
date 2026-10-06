@@ -179,7 +179,7 @@ elif a[0]=='run':
             assert '--network=bridge' not in a and opt('--network')==network and opt('--network-alias')=='pithos-app'
         else:
             assert '--network=bridge' in a and '--network' not in a
-        assert opt('--workdir')=='/workspace'
+        assert opt('--workdir')==str(root/'work,\"space')
         # A workspace-grant coordinator also mounts the broker's Pi extension.
         extension=mode('host-coordinator')
         # Its config declares pi.extensions: the entrypoint's manifest is a private read-only copy.
@@ -195,14 +195,22 @@ elif a[0]=='run':
             assert by['/run/pithos-browser/client.json']['Source']==str(root/'browser-run/client.json')
             assert by['/run/pithos-browser/skills']['Source']==str(root/'browser-run/skills')
             assert not by['/run/pithos-browser/client.json']['RW'] and not by['/run/pithos-browser/skills']['RW']
-        assert by['/workspace']['Source']==str(root/'work,\"space') and by['/workspace']['RW']
+        ws=str(root/'work,\"space')
+        assert by[ws]['Source']==ws and by[ws]['RW'] and '/workspace' not in by
         assert by['/home/pi']['Name']==home_volume() and by['/home/pi']['RW']
         assert by['/run/pithos-broker/client.json']['Source']==str(root/'credential/broker-client.json')
         assert not by['/run/pithos-broker/client.json']['RW']
         # Docker's own flags only: everything after the image belongs to Pi.
-        # The only env source Pi may get is the broker's private Postgres file.
-        allowed=['--env-file'] if mode('pg-env') else []
+        # The only env source Pi may get is one private broker file.
+        runtime=any(p.name.startswith(('connected-runtime','host-coordinator')) for p in root.iterdir())
+        allowed=['--env-file'] if mode('pg-env') or runtime else []
         assert not any(v in a[:a.index(__IMAGE__)] for v in ['--privileged','--env','-e','--env-file','--volume','-v'] if v not in allowed)
+        if runtime:
+            # Git must trust the root-owned-looking mount at its host path.
+            assert a[:a.index(__IMAGE__)].count('--env-file')==1
+            source=opt('--env-file')
+            assert r['spec']['operation']['env_source']==source
+            assert ('GIT_CONFIG_COUNT=1\nGIT_CONFIG_KEY_0=safe.directory\nGIT_CONFIG_VALUE_0='+ws+'\n') in pathlib.Path(source).read_text()
         if mode('pg-env'):
             source=str(root/'pg/pi-postgres.env')
             assert a[:a.index(__IMAGE__)].count('--env-file')==1 and opt('--env-file')==source
@@ -229,7 +237,7 @@ elif a[0]=='run':
         assert cmd[:3]==['-I','-S','-c'] and '--network=none' in a and '--read-only' in a
     cid=format(len(manifest['resources']),'064x')
     c={'id':cid,'name':'/'+r['name'],'image':__IMAGE__,
-       'config':{'Image':__IMAGE__,'User':__USER__,'Entrypoint':[entry],'Cmd':cmd,'Labels':labels,'Volumes':None,'Tty':pi,'OpenStdin':pi,'AttachStdin':pi,'AttachStdout':pi,'AttachStderr':pi,'StdinOnce':pi,'WorkingDir':'/workspace' if pi else ''},
+       'config':{'Image':__IMAGE__,'User':__USER__,'Entrypoint':[entry],'Cmd':cmd,'Labels':labels,'Volumes':None,'Tty':pi,'OpenStdin':pi,'AttachStdin':pi,'AttachStdout':pi,'AttachStderr':pi,'StdinOnce':pi,'WorkingDir':r['spec']['operation']['workspace'] if pi else ''},
        'host':{'NetworkMode':(opt('--network') if on_network() else 'bridge') if pi else 'none','ReadonlyRootfs':not pi,'Privileged':False,'AutoRemove':False,'RestartPolicy':{'Name':'no','MaximumRetryCount':0},'CapDrop':['ALL'],'SecurityOpt':['no-new-privileges'],'CapAdd':None,'GroupAdd':None,'Binds':None,'Devices':None,'PidMode':'','IpcMode':'private','UsernsMode':'','Mounts':hosts,'ExtraHosts':extra_hosts or None},
        'mounts':mounts,'state':{'Status':'running' if pi and mode('detached') else 'exited','Running':pi and mode('detached'),'ExitCode':0,'Error':'','OOMKilled':False,'Dead':False}}
     if pi and mode('engine-failed'): c['state']['ExitCode']=7

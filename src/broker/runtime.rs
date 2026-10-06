@@ -605,21 +605,27 @@ impl BrokerRuntime {
                     )
                     .map_err(failed(AdmissionStep::Postgres))?;
             }
-            // Pi's private environment: the database and the granted daemon.
+            // Pi's private environment: Git trust for the workspace, which Docker
+            // Desktop shows as root-owned at its host path, then the database
+            // and the granted daemon.
+            let workdir = crate::docker::workspace::target(&self.setup.workspace)
+                .map_err(|_| RuntimeError::State)?;
+            let git_section: String = crate::docker::workspace::git_safe_directory(workdir)
+                .iter()
+                .map(|entry| format!("{entry}\n"))
+                .collect();
             let postgres_section = self.postgres_files.as_ref().map(PostgresFiles::pi_section);
             let daemon_section = self.setup.pi_daemon.as_ref().map(PiDaemon::env_lines);
-            let sections: Vec<&str> = postgres_section
-                .iter()
+            let sections: Vec<&str> = std::iter::once(&git_section)
+                .chain(&postgres_section)
                 .chain(&daemon_section)
                 .map(String::as_str)
                 .collect();
-            if !sections.is_empty() {
-                self.pi_env_cleaned = false;
-                self.pi_env = Some(
-                    PiEnvFile::create(&self.setup.run_directory, &sections)
-                        .map_err(io_failed(AdmissionStep::PiEnv))?,
-                );
-            }
+            self.pi_env_cleaned = false;
+            self.pi_env = Some(
+                PiEnvFile::create(&self.setup.run_directory, &sections)
+                    .map_err(io_failed(AdmissionStep::PiEnv))?,
+            );
             if let (Some(browser), Some(network)) = (&self.setup.browser, &network) {
                 self.browser_files_cleaned = false;
                 let files = self.browser_files.insert(

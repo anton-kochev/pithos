@@ -109,7 +109,7 @@ find "$HOME/.pi/agent/sessions" -type f -name "*.jsonl" \
 
 Run the `stat` and `wc` checks again after a short interval.
 
-If `/session` reports a path under the mounted project, such as `/workspace/<project>/.pi/sessions`, the corresponding `.pi/sessions` path can instead be inspected directly from the host.
+If `/session` reports a path under the mounted project, such as `<project path>/.pi/sessions`, it is the same path on the host and can be inspected there directly.
 
 - A changing timestamp or line count means the agent is progressing through tool calls.
 - No change does not immediately prove a hang: Pi persists assistant messages only after a model turn completes.

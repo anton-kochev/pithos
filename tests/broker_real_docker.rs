@@ -39,10 +39,10 @@ except e.HTTPError as err:
     print('anonymous', err.code)
 print('endpoint', c['endpoint'].split(':')[1])
 import os
-print('sessions writable', os.access('/workspace/.pi/sessions', os.W_OK))
+print('sessions writable', os.access(os.path.join(os.getcwd(), '.pi/sessions'), os.W_OK))
 import subprocess
 # Docker Desktop shows the mount point as root-owned; git must still accept it.
-git = subprocess.run(['git', '-C', '/workspace', 'status', '--porcelain'], capture_output=True, text=True)
+git = subprocess.run(['git', '-C', os.getcwd(), 'status', '--porcelain'], capture_output=True, text=True)
 print('git status', git.returncode, git.stderr.strip()[:120])
 "#;
 
@@ -257,7 +257,7 @@ app.Run();
 
 // In Pi: run the app in the background, then wait until it answers.
 const PG_DOTNET_UP: &str = r#"
-cd /workspace/src/Web
+cd src/Web
 nohup dotnet run --urls http://0.0.0.0:5000 > /tmp/web.log 2>&1 &
 python3 - <<'PY'
 import time, urllib.request

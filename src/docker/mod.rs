@@ -37,6 +37,7 @@ pub use managed::{
 };
 pub use pi_daemon::{PiDaemon, PiDaemonError};
 mod pi_vm;
+pub mod workspace;
 pub use pi_vm::ensure as ensure_pi_vm;
 pub use pi_vm::{PiVmError, VmStep};
 pub use run::{RunEnvironment, RunError, RunRequest, run, run_request, tmux_wrap};

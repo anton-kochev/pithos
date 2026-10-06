@@ -341,7 +341,7 @@ fn mounts_match(r: &Resource, actual: &Value, configured: &Value) -> bool {
         } => {
             let mut expected = vec![
                 home(home_volume, false),
-                bind(workspace, "/workspace", false),
+                bind(workspace, workspace, false),
                 bind(credential_source, "/run/pithos-broker/client.json", true),
             ];
             if let Some(b) = browser {
@@ -708,8 +708,6 @@ impl ManagedDocker {
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
             "--entrypoint=/usr/local/bin/entrypoint.sh",
-            "--workdir",
-            "/workspace",
             "--user",
         ]
         .into_iter()
@@ -735,10 +733,14 @@ impl ManagedDocker {
         for (key, value) in &r.labels {
             args.extend(["--label".into(), format!("{key}={value}")]);
         }
-        let workspace_mount = crate::sessions::bind_mount(&workspace.resolved, "/workspace")
+        // Same path inside and out, so absolute paths in build outputs hold.
+        let workdir = crate::docker::workspace::target(&workspace.resolved)
             .map_err(|_| ProbeError::Workspace)?
+            .to_owned();
+        let workspace_mount = crate::docker::workspace::mount(&workdir)
             .into_string()
             .map_err(|_| ProbeError::Workspace)?;
+        args.extend(["--workdir".into(), workdir]);
         args.extend([
             "--mount".into(),
             workspace_mount,
@@ -1456,7 +1458,7 @@ impl ManagedDocker {
                     || c["AttachStderr"] != true
                     // The attached foreground `docker run -i` sets StdinOnce.
                     || c["StdinOnce"] != true
-                    || c["WorkingDir"] != "/workspace"
+                    || !matches!(&r.spec.operation, ProbeKind::Pi { workspace, .. } if c["WorkingDir"] == workspace.as_str())
                     || h["RestartPolicy"] != json!({"Name":"no","MaximumRetryCount":0})))
             || command_digest(&c["Cmd"])? != r.spec.program_digest
             || !labels_match(&r.labels, &c["Labels"])
