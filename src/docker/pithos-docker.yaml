@@ -5,8 +5,8 @@
 # vzNAT address. Verified with Lima 2.2.1 on macOS 26 (Apple silicon).
 base: template:_images/ubuntu-lts
 vmType: vz
-cpus: 4
-memory: "4GiB"
+cpus: 8
+memory: "8GiB"
 disk: "40GiB"
 mounts: []
 networks:
