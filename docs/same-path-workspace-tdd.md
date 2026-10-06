@@ -31,9 +31,16 @@ outputs or caches.
   `/run/pithos-broker`, `/run/pithos-browser`.
 - Old sessions under `--workspace-<project>--` are left as they are (user
   decision); README says how to open one with `--session`.
-- Not changed: the identity overlay's `safe.directory /workspace` line (now
-  inert; removing it would rebuild every image) and `WORKDIR /workspace` in
-  `Dockerfile.base` (always overridden).
+- Follow-up: the identity overlay's `RUN git config --system --add
+  safe.directory /workspace` was removed. Checked first in the Pi image (Git
+  2.39.5, root-owned repo, user `pi`): without trust `dubious ownership`;
+  `GIT_CONFIG_*` with the repo path → `git status` exit 0; with another path →
+  still refused. Its test now asserts no overlay carries any trust. Removing it
+  changes the overlay text, so every Pi image rebuilds once.
+  `WORKDIR /workspace` in `Dockerfile.base` stays (always overridden).
+  After removal: full serial suite 1006 passed, 0 failed, 13 ignored; in a
+  managed Pi on budgetoid the mount shows `owner=root`, no system
+  `safe.directory` exists, and `git status` succeeds.
 
 ## Red/Green chronology
 

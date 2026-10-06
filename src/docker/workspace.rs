@@ -57,7 +57,8 @@ pub fn mount(target: &str) -> OsString {
 }
 
 /// `KEY=value` entries that make Git trust exactly this repository even when
-/// the container user's UID differs from the files' owner.
+/// the container user's UID differs from the files' owner (Docker Desktop shows
+/// the mount root-owned). Git 2.39 honours this key from GIT_CONFIG_*.
 pub fn git_safe_directory(workspace: &str) -> [String; 3] {
     [
         "GIT_CONFIG_COUNT=1".into(),
