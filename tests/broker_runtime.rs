@@ -73,7 +73,6 @@ impl Fixture {
             stage_root: None,
             extensions: None,
             postgres: None,
-            pi_daemon: None,
         }
     }
 

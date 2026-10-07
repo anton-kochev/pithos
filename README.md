@@ -44,7 +44,6 @@ pithos --fork 01a0335e                      # pass Pi options through unchanged
 pithos --model openai/gpt-4o -p "Review"    # Pi options and arguments
 pithos --pi "Review this project"           # positional-first Pi arguments
 pithos run bash                             # launch another container command
-pithos --docker                             # give Pi an isolated Docker daemon (Testcontainers)
 pithos build                                # build without launching
 pithos info                                 # show project, fingerprint, image status
 pithos clean                                # remove images (--all for tagged too)
@@ -54,7 +53,7 @@ pithos version                              # print the pithos version
 ```
 
 Pithos owns `--rebuild`, `--no-build`, `--tmux`, `--browser[=interactive|headless]`
-and `--docker` (and the explicit broker grants below). Any other leading option
+(and the explicit broker grants below). Any other leading option
 starts an opaque argument tail that is forwarded verbatim to Pi, so Pithos also
 works with flags added by newer Pi versions or extensions. Put Pithos options
 before Pi options. Use `--pi` when the Pi argument list starts with a positional,
@@ -233,45 +232,6 @@ Linux is not verified yet.
   home volume `pithos-home-<project>` is shared with normal runs, one run at a
   time. If a run is killed, the next broker run clears its leftover home lock
   by itself, but only when no container still uses the volume.
-
-### Isolated Docker daemon for Pi (experimental)
-
-Integration tests built on Testcontainers need a Docker API. Pi never gets the
-host's. `--docker` hands it a separate one instead, in a Lima VM that Pithos
-manages:
-
-```sh
-brew install lima        # once; verified with Lima 2.2.1
-pithos --docker          # any run form, also with --broker=... or a command
-```
-
-- The first `--docker` run creates the `pithos-docker` VM (about 1.5 min on an
-  M3 Pro). A stopped VM is started (about 45 s). Afterwards the VM stays
-  running, so the next run adds about a second. Stop it with
-  `limactl stop pithos-docker`; remove it with `limactl delete pithos-docker`.
-- The VM mounts nothing from the host. Root inside it reaches nothing on the
-  Mac: the boundary is the hypervisor. Its disk, and so its image cache,
-  survives restarts.
-- Pi's container gets `DOCKER_HOST=tcp://<vm-ip>:2375` and
-  `TESTCONTAINERS_HOST_OVERRIDE=<vm-ip>`. Nothing else changes. The image has no
-  Docker CLI; add `docker.io` under `extras.apt` if you want one. Testcontainers
-  does not need it.
-- Pithos checks the daemon with `GET /_ping` before anything else and exits 2
-  when Lima is missing or the daemon does not answer. Only the command line
-  turns this on; `.pithos` cannot.
-- Published ports are reached on the VM's address, never on the Mac's
-  loopback: Lima's port forwarding is off.
-- Known limits. macOS only. One VM serves every project; anything on the Mac
-  that can reach its address can manage its containers, so another project's
-  test containers are fair game, the host is not. Bind mounts in tests do not
-  work: the paths live in Pi's container, not in the VM; use resource
-  mappings. A broker run with `postgres:` still gets its own database next to
-  Pi; the VM is only for what Pi starts itself.
-- The VM gets 8 vCPU and 8 GiB. On an M3 Pro, 1387 Testcontainers-backed
-  integration tests of a .NET project passed inside Pi against it in 2 m 33 s;
-  with 4 vCPU and 4 GiB a few container starts timed out. An existing VM keeps
-  its size: `limactl stop pithos-docker` and `limactl edit pithos-docker --set
-  '.cpus = 8 | .memory = "8GiB"'`.
 
 ### Clipboard screenshots
 

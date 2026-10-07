@@ -25,7 +25,7 @@ use crate::{
     browser::BrowserMode,
     docker::{
         BrowserInputs, HomeLease, HostIdentity, ImmutableImageId, ManagedDocker, PiBrowser,
-        PiDaemon, PiInputs, PreflightChildState, RunNetwork, VolumeName,
+        PiInputs, PreflightChildState, RunNetwork, VolumeName,
     },
     lifecycle::{
         InteractiveChild, InteractiveLimits, InteractivePoll, InteractiveReport, Outcome, Shutdown,
@@ -97,9 +97,6 @@ pub struct RuntimeSetup {
     pub extensions: Option<String>,
     /// Workspace runs only: a database next to Pi.
     pub postgres: Option<RuntimePostgres>,
-    /// Host-granted isolated Docker daemon handed to Pi as environment;
-    /// Pithos never uses it.
-    pub pi_daemon: Option<PiDaemon>,
 }
 
 /// Runtime lifecycle. `Ready` means the managed Pi was durably launched and is
@@ -296,7 +293,6 @@ struct RuntimeInputs {
     stage_root: Option<PathBuf>,
     extensions: Option<String>,
     postgres: Option<RuntimePostgres>,
-    pi_daemon: Option<PiDaemon>,
     browser: Option<RuntimeBrowser>,
     run_id: String,
     volume: VolumeName,
@@ -410,7 +406,6 @@ impl BrokerRuntime {
             stage_root: setup.stage_root,
             extensions: setup.extensions,
             postgres: setup.postgres,
-            pi_daemon: setup.pi_daemon,
             browser: setup.browser,
             run_id: setup.run_id.clone(),
             volume: setup.volume,
@@ -609,8 +604,7 @@ impl BrokerRuntime {
                     .map_err(failed(AdmissionStep::Postgres))?;
             }
             // Pi's private environment: Git trust for the workspace, which Docker
-            // Desktop shows as root-owned at its host path, then the database
-            // and the granted daemon.
+            // Desktop shows as root-owned at its host path, then the database.
             let workdir = crate::docker::workspace::target(&self.setup.workspace)
                 .map_err(|_| RuntimeError::State)?;
             let git_section: String = crate::docker::workspace::git_safe_directory(workdir)
@@ -618,10 +612,8 @@ impl BrokerRuntime {
                 .map(|entry| format!("{entry}\n"))
                 .collect();
             let postgres_section = self.postgres_files.as_ref().map(PostgresFiles::pi_section);
-            let daemon_section = self.setup.pi_daemon.as_ref().map(PiDaemon::env_lines);
             let sections: Vec<&str> = std::iter::once(&git_section)
                 .chain(&postgres_section)
-                .chain(&daemon_section)
                 .map(String::as_str)
                 .collect();
             self.pi_env_cleaned = false;

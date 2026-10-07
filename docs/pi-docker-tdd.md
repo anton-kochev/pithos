@@ -1,5 +1,10 @@
 # Isolated Docker daemon for Pi (`--docker`) — TDD ledger
 
+> **Removed on 2026-10-08.** The only project that needed it, budgetoid, now runs
+> its integration tests against a PostgreSQL connection string: inside Pi that is
+> the `postgres:` block's database (`PITHOS_POSTGRES_URL`), with no Docker at all.
+> `--docker`, the Lima VM and this code are gone; the ledger stays as history.
+
 Pi gets no Docker access from Pithos, so Testcontainers-based integration
 tests cannot run inside a session. Every way of giving Pi a daemon that stays
 on the host's Docker fails the threat model: a privileged Docker-in-Docker

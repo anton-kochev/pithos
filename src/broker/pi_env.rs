@@ -1,6 +1,6 @@
-//! The run's private `KEY=value` file for Pi's environment: the database (when
-//! declared) and the isolated Docker daemon (when granted). Docker reads it on
-//! the host (`--env-file`), so no value appears in any argv.
+//! The run's private `KEY=value` file for Pi's environment: Git trust for the
+//! workspace and the database (when declared). Docker reads it on the host
+//! (`--env-file`), so no value appears in any argv.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::{
