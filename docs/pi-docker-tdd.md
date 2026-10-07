@@ -134,3 +134,26 @@ error with the install command, never an automatic install.
   - VM running: same result, 1 s, no narration;
   - the guest has no host mount, and nothing listens on the Mac's
     `127.0.0.1:2375`.
+
+## Open issue: connection bursts across the host network (2026-10-07)
+
+budgetoid on v0.20.1 lost one connect in 3,372 to its shared Postgres
+(`Connection refused` in 11 ms at 138 connects/s; the cluster stayed up and
+1401/1402 tests passed). Stress tests with TCP connect plus an SSLRequest:
+
+| Path | 50 concurrent | 200 concurrent |
+|---|---|---|
+| inside the VM, container network | 0 failures | 0 failures |
+| Docker Desktop to Docker Desktop | 0 failures | 0 failures |
+| Mac to the VM over vzNAT | 0–1% | ~4% |
+| Docker Desktop container to the VM | ~0.8% | 4–8% |
+
+The failures are connect timeouts in the first milliseconds of a burst; the
+VM's TCP drop counters stay at zero, so the SYNs never reach it. Sequential
+connects are clean (p50 0.6 ms). Bypassing Docker's NAT in the VM (host
+network) does not help, and an ARP-state hypothesis did not reproduce. The
+loss is on the macOS side of vzNAT or in Docker Desktop's outbound proxy.
+
+Not fixed in Pithos. budgetoid retries a refused or timed-out connect when it
+opens its shared cluster. Next step if it shows up elsewhere: measure Lima's
+`lima:shared` (socket_vmnet) network with the same stress test.
