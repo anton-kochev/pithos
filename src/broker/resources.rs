@@ -77,6 +77,8 @@ pub(crate) enum ProbeKind {
         /// The image's `VOLUME` paths, each covered by a tmpfs.
         volumes: Vec<String>,
         env_source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_connections: Option<u32>,
     },
     /// The detached Chromium sidecar on the run network.
     Browser {
@@ -144,8 +146,10 @@ impl ProbeKind {
                 database,
                 volumes,
                 env_source,
+                max_connections,
             } => {
                 probe_name(network)
+                    && max_connections.is_none_or(|n| (20..=1000).contains(&n))
                     && !database.is_empty()
                     && volumes.len() <= 4
                     && volumes.iter().all(|v| absolute_path(v))

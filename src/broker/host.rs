@@ -435,6 +435,7 @@ impl ValidatedHostInputs {
                     Ok(image) => Some(RuntimePostgres {
                         image,
                         database: config.database.clone(),
+                        max_connections: config.max_connections,
                     }),
                     Err(error) => {
                         let error = HostError::Image(ImageKind::Postgres, error);

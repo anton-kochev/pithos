@@ -13,6 +13,21 @@ const SOCKETS: &str = "/var/run/postgresql";
 const MEMORY_BYTES: i64 = 1 << 30;
 const PIDS: i64 = 256;
 
+/// Limits for a server allowing `max_connections`. Every connection is a server
+/// process, and the data lives in tmpfs inside the same memory limit, so both
+/// grow with it: 2 MiB per connection on top of 1 GiB (rounded up to whole GiB),
+/// and 64 processes beyond the connections for Postgres' own. A suite of 1433
+/// tests at 500 connections peaked at 1021 MiB and 69 processes.
+fn limits(max_connections: Option<u32>) -> (i64, i64) {
+    match max_connections {
+        None => (MEMORY_BYTES, PIDS),
+        Some(n) => {
+            let extra_gib = (i64::from(n) * 2 + 1023) / 1024;
+            ((1 + extra_gib) << 30, i64::from(n) + 64)
+        }
+    }
+}
+
 /// Host-validated inputs for the run's database container.
 pub struct PostgresInputs<'a> {
     pub image: &'a PostgresImage,
@@ -20,6 +35,17 @@ pub struct PostgresInputs<'a> {
     pub database: &'a str,
     /// Private `KEY=value` file with the password, database and PGDATA.
     pub env_file: &'a Path,
+    /// `-c max_connections=<n>` on the server command; `None` keeps the default.
+    pub max_connections: Option<u32>,
+}
+
+/// The server command: the image default, plus a connection limit when set.
+fn server_command(max_connections: Option<u32>) -> Vec<String> {
+    let mut command = vec!["postgres".to_owned()];
+    if let Some(limit) = max_connections {
+        command.extend(["-c".into(), format!("max_connections={limit}")]);
+    }
+    command
 }
 
 /// Every tmpfs target: the image's `VOLUME`s plus the socket directory.
@@ -81,6 +107,7 @@ impl ManagedDocker {
                 database: inputs.database.to_owned(),
                 volumes: volumes.clone(),
                 env_source: env_source.clone(),
+                max_connections: inputs.max_connections,
             },
             &[],
         )?;
@@ -102,8 +129,8 @@ impl ManagedDocker {
             "--cap-drop=ALL".into(),
             "--security-opt=no-new-privileges".into(),
             "--read-only".into(),
-            "--memory=1g".into(),
-            format!("--pids-limit={PIDS}"),
+            format!("--memory={}g", limits(inputs.max_connections).0 >> 30),
+            format!("--pids-limit={}", limits(inputs.max_connections).1),
             "--tmpfs".into(),
             format!("{}:{}", TMPFS.0, TMPFS.1),
         ]);
@@ -114,6 +141,9 @@ impl ManagedDocker {
             ]);
         }
         args.extend(["--env-file".into(), env_source, r.image.clone()]);
+        if let Some(limit) = inputs.max_connections {
+            args.extend(server_command(Some(limit)));
+        }
         let stdout = self.spawn_owned(resources, &mut r, &args)?;
         let id = self.observe_created(resources, &mut r, &stdout)?;
         match self.inspect_postgres(&r, &id, &mut CleanupBudget::new())? {
@@ -133,6 +163,7 @@ impl ManagedDocker {
             network,
             database,
             volumes,
+            max_connections,
             ..
         } = &r.spec.operation
         else {
@@ -160,7 +191,7 @@ impl ManagedDocker {
             || c["Image"] != r.image
             || c["User"] != format!("{}:{}", r.spec.uid, r.spec.gid)
             || c["Entrypoint"] != json!(["docker-entrypoint.sh"])
-            || c["Cmd"] != json!(["postgres"])
+            || c["Cmd"] != json!(server_command(*max_connections))
             || !env_ok
             || c["Tty"] != false
             || c["OpenStdin"] != false
@@ -180,8 +211,8 @@ impl ManagedDocker {
             || h["PidMode"] != ""
             || h["UsernsMode"] != ""
             || h["Tmpfs"] != json!({TMPFS.0: TMPFS.1})
-            || h["Memory"] != MEMORY_BYTES
-            || h["PidsLimit"] != PIDS
+            || h["Memory"] != limits(*max_connections).0
+            || h["PidsLimit"] != limits(*max_connections).1
             || !mounts_match(r, &v["mounts"], &h["Mounts"])
             || s["Error"] != ""
             || s["Dead"] != false

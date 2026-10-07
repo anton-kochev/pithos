@@ -218,6 +218,8 @@ Linux is not verified yet.
   postgres:
     version: "17.10" # exact major.minor; a major alone is refused
     database: app
+    max_connections: 500 # optional, 20 to 1000; Postgres' default is 100;
+                         # also raises the container's memory and process limits
   ```
 
   - The broker pulls the official `postgres:<version>` image, pins its exact

@@ -70,6 +70,8 @@ pub enum StartStep {
 pub struct RuntimePostgres {
     pub image: crate::docker::PostgresImage,
     pub database: String,
+    /// The project's `postgres.max_connections`, if any.
+    pub max_connections: Option<u32>,
 }
 
 /// Trusted, host-owned selections for one run. None are read from project input.
@@ -601,6 +603,7 @@ impl BrokerRuntime {
                             network,
                             database: &postgres.database,
                             env_file: files.env_path(),
+                            max_connections: postgres.max_connections,
                         },
                     )
                     .map_err(failed(AdmissionStep::Postgres))?;

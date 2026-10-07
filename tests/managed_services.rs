@@ -734,6 +734,16 @@ fn run_pg(
     manifest: &mut ResourceManifest,
     network: &RunNetwork,
 ) -> Result<String, pithos::docker::OwnedProbeError> {
+    run_pg_with(f, docker, manifest, network, None)
+}
+
+fn run_pg_with(
+    f: &Fixture,
+    docker: &mut ManagedDocker,
+    manifest: &mut ResourceManifest,
+    network: &RunNetwork,
+    max_connections: Option<u32>,
+) -> Result<String, pithos::docker::OwnedProbeError> {
     let env = pg_env(f);
     docker.start_postgres(
         manifest,
@@ -743,6 +753,7 @@ fn run_pg(
             network,
             database: "app",
             env_file: &env,
+            max_connections,
         },
     )
 }
@@ -809,6 +820,34 @@ fn postgres_runs_hardened_on_tmpfs_and_is_removed_before_the_network() {
 }
 
 #[test]
+fn postgres_connection_limit_is_a_fixed_command_and_checked_on_inspect() {
+    let f = Fixture::new();
+    let mut docker = f.docker();
+    let mut manifest = f.manifest();
+    let network = docker
+        .create_run_network(&mut manifest, "network-1")
+        .unwrap();
+    run_pg_with(&f, &mut docker, &mut manifest, &network, Some(500)).unwrap();
+    let args = f.run_args();
+    // Every connection is a server process, and the data lives in tmpfs inside the
+    // same memory limit: both limits grow with the connection count.
+    assert!(args.contains(&"--memory=2g".to_string()), "{args:?}");
+    assert!(args.contains(&"--pids-limit=564".to_string()), "{args:?}");
+    let image = args
+        .iter()
+        .position(|a| a == pg_image().id.as_str())
+        .unwrap();
+    assert_eq!(
+        &args[image + 1..],
+        ["postgres", "-c", "max_connections=500"]
+    );
+    // The inspected Cmd matches the recorded spec, so removal is authorized.
+    docker.reconcile_resources(&mut manifest).unwrap();
+    assert!(manifest.is_settled());
+    assert_eq!(f.live(), 0);
+}
+
+#[test]
 fn tampered_postgres_is_quarantined_never_removed() {
     let f = Fixture::new();
     f.set("tampered-pg");
@@ -840,6 +879,7 @@ fn a_shared_env_file_is_refused_before_any_container() {
             network: &network,
             database: "app",
             env_file: &env,
+            max_connections: None,
         },
     );
     assert!(result.is_err());
