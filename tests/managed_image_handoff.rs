@@ -112,6 +112,7 @@ else:
             stage_root: None,
             extensions: None,
             postgres: None,
+            env: None,
         }
     }
     fn endpoint(&self) -> BrokerEndpoint {

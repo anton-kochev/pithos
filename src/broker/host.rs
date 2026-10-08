@@ -105,6 +105,7 @@ pub struct ValidatedHostInputs {
     sessions: SessionStorage,
     browser: BrowserSelection,
     postgres: Option<config::PostgresConfig>,
+    env: Option<config::EnvConfig>,
     progress: Option<Box<dyn FnMut(StartStep)>>,
 }
 
@@ -276,6 +277,7 @@ impl HostInputs {
         let sessions = config::session_storage(&yaml).map_err(|_| HostError::Config)?;
         let browser = BrowserSelection::Disabled;
         let postgres = config::postgres_config(&yaml).map_err(|_| HostError::Config)?;
+        let env = config::env_config(&yaml).map_err(|_| HostError::Config)?;
         Ok(ValidatedHostInputs {
             input: self,
             yaml,
@@ -285,6 +287,7 @@ impl HostInputs {
             sessions,
             browser,
             postgres,
+            env,
             progress: None,
         })
     }
@@ -482,6 +485,7 @@ impl ValidatedHostInputs {
             stage_root: Some(self.input.stage_root),
             extensions: Some(crate::extensions::manifest(&self.yaml)).filter(|m| !m.is_empty()),
             postgres,
+            env: self.env,
         };
         let mut runtime = match BrokerRuntime::begin_with_docker(grant, endpoint, setup, docker) {
             Ok(runtime) => runtime,

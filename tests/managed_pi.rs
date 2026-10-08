@@ -731,6 +731,7 @@ elif a[0]=='run' and 'sha256:'+'c'*64 in a:
                 stage_root: None,
                 extensions: None,
                 postgres: None,
+                env: None,
             },
         )
         .unwrap();

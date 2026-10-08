@@ -46,3 +46,33 @@ fn env_file_is_private_with_a_fresh_password_and_removed_on_cleanup() {
     let other = PostgresFiles::create(run.path(), "app", "/var/lib/postgresql/data").unwrap();
     assert_ne!(other.password(), password);
 }
+
+#[test]
+fn project_env_section_names_the_runs_database() {
+    let run = tempfile::tempdir().unwrap();
+    fs::set_permissions(run.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let files = PostgresFiles::create(run.path(), "app", "/var/lib/postgresql/data").unwrap();
+    let password = files.password().to_owned();
+    let config = pithos::config::load(
+        b"toolchains: {}\npostgres: {version: \"18.6\", database: app}\nenv:\n  \
+          APP_DB: \"${postgres.url}\"\n  \
+          ADMIN: \"Host=${postgres.host};Port=${postgres.port};Database=${postgres.database};Username=${postgres.user};Password=${postgres.password}\"\n",
+    )
+    .unwrap();
+    let env = pithos::config::env_config(&config).unwrap().unwrap();
+    assert_eq!(
+        pithos::broker::pi_env::project_section(&env, Some(&files)).unwrap(),
+        format!(
+            "APP_DB=postgresql://postgres:{password}@pithos-postgres:5432/app\n\
+             ADMIN=Host=pithos-postgres;Port=5432;Database=app;Username=postgres;Password={password}\n"
+        )
+    );
+    // A placeholder with no database to fill it is refused, never left blank.
+    assert!(pithos::broker::pi_env::project_section(&env, None).is_none());
+    let literal = pithos::config::load(b"toolchains: {}\nenv: {A: x}\n").unwrap();
+    let literal = pithos::config::env_config(&literal).unwrap().unwrap();
+    assert_eq!(
+        pithos::broker::pi_env::project_section(&literal, None).unwrap(),
+        "A=x\n"
+    );
+}

@@ -97,6 +97,8 @@ pub struct RuntimeSetup {
     pub extensions: Option<String>,
     /// Workspace runs only: a database next to Pi.
     pub postgres: Option<RuntimePostgres>,
+    /// The project's `env` block, filled from the database when it names one.
+    pub env: Option<crate::config::EnvConfig>,
 }
 
 /// Runtime lifecycle. `Ready` means the managed Pi was durably launched and is
@@ -293,6 +295,7 @@ struct RuntimeInputs {
     stage_root: Option<PathBuf>,
     extensions: Option<String>,
     postgres: Option<RuntimePostgres>,
+    env: Option<crate::config::EnvConfig>,
     browser: Option<RuntimeBrowser>,
     run_id: String,
     volume: VolumeName,
@@ -406,6 +409,7 @@ impl BrokerRuntime {
             stage_root: setup.stage_root,
             extensions: setup.extensions,
             postgres: setup.postgres,
+            env: setup.env,
             browser: setup.browser,
             run_id: setup.run_id.clone(),
             volume: setup.volume,
@@ -604,7 +608,8 @@ impl BrokerRuntime {
                     .map_err(failed(AdmissionStep::Postgres))?;
             }
             // Pi's private environment: Git trust for the workspace, which Docker
-            // Desktop shows as root-owned at its host path, then the database.
+            // Desktop shows as root-owned at its host path, then the database,
+            // then the project's own variables, which may name the database.
             let workdir = crate::docker::workspace::target(&self.setup.workspace)
                 .map_err(|_| RuntimeError::State)?;
             let git_section: String = crate::docker::workspace::git_safe_directory(workdir)
@@ -612,8 +617,17 @@ impl BrokerRuntime {
                 .map(|entry| format!("{entry}\n"))
                 .collect();
             let postgres_section = self.postgres_files.as_ref().map(PostgresFiles::pi_section);
+            let project_section = match &self.setup.env {
+                Some(env) => Some(
+                    super::pi_env::project_section(env, self.postgres_files.as_ref())
+                        .ok_or_else(|| io::Error::other("env names a database this run lacks"))
+                        .map_err(io_failed(AdmissionStep::PiEnv))?,
+                ),
+                None => None,
+            };
             let sections: Vec<&str> = std::iter::once(&git_section)
                 .chain(&postgres_section)
+                .chain(&project_section)
                 .map(String::as_str)
                 .collect();
             self.pi_env_cleaned = false;

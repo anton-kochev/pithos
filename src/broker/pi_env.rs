@@ -28,3 +28,16 @@ impl PiEnvFile {
         super::extension::remove(&self.path)
     }
 }
+
+/// The project's `env` block as `KEY=value\n` lines, filled from the run's
+/// database. `None` when a value names the database and the run has none.
+pub fn project_section(
+    env: &crate::config::EnvConfig,
+    postgres: Option<&super::postgres::PostgresFiles>,
+) -> Option<String> {
+    match postgres {
+        Some(files) => Some(env.render(&|field| files.field(field))),
+        None if env.uses_postgres() => None,
+        None => Some(env.render(&|_| String::new())),
+    }
+}

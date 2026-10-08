@@ -228,6 +228,28 @@ Linux is not verified yet.
     `_PASSWORD`, `_DATABASE` and `_URL`. The password is new every run.
   - **The data lives in memory and is wiped when the session ends.**
   - A `postgres` block without `--broker=workspace` is refused.
+- **Environment** (either broker grant). An `env` block adds variables to
+  Pi's environment, so a project reads its database under its own names
+  instead of Pithos's:
+
+  ```yaml
+  env:
+    APP_TEST_DATABASE_URL: "${postgres.url}"
+    ConnectionStrings__app: "Host=${postgres.host};Port=${postgres.port};Database=${postgres.database};Username=${postgres.user};Password=${postgres.password}"
+    ASPNETCORE_URLS: "http://0.0.0.0:5080"
+  ```
+
+  - Values are quoted strings on one line. `${postgres.host}`, `.port`,
+    `.user`, `.password`, `.database` and `.url` are filled in at start-up and
+    need a `postgres` block; `$$` is a literal `$`. Any other `${...}` is
+    refused.
+  - Names are `[A-Za-z_][A-Za-z0-9_.-]*`. `PITHOS_*` and `GIT_CONFIG_*` are
+    Pithos's own and refused. A name with `-` or `.` is not a shell
+    identifier: Pi, bash and programs started from them pass it on, but
+    `dash` (the image's `/bin/sh`) drops it.
+  - Values go into the run's private env file, like the database password,
+    never onto a command line. A plain `pithos` run with an `env` block is
+    refused.
 - **Cleanup.** Containers and the run's network are removed when Pi exits. The
   home volume `pithos-home-<project>` is shared with normal runs, one run at a
   time. If a run is killed, the next broker run clears its leftover home lock

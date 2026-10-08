@@ -1,3 +1,5 @@
+mod env;
+pub use env::{EnvConfig, PostgresField, env_config};
 mod error;
 mod extras;
 mod pi;
@@ -83,5 +85,6 @@ pub fn load(bytes: &[u8]) -> Result<YamlOwned, ConfigError> {
     }
     session_storage(&doc)?;
     postgres_config(&doc)?;
+    env_config(&doc)?;
     Ok(doc)
 }

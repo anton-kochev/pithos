@@ -284,7 +284,7 @@ fn config_cannot_grant_broker_or_docker_authority() {
         assert_eq!(
             String::from_utf8_lossy(&result.get_output().stderr),
             format!(
-                "» ERROR: .pithos: unknown top-level key `{key}`; valid keys: `toolchains`, `extras`, `pi`, `sessions`, `postgres`\n"
+                "» ERROR: .pithos: unknown top-level key `{key}`; valid keys: `toolchains`, `extras`, `pi`, `sessions`, `postgres`, `env`\n"
             )
         );
         assert_eq!(fixture.snapshot(), before);
@@ -335,6 +335,25 @@ fn postgres_is_refused_without_the_workspace_broker() {
         assert_eq!(
             String::from_utf8_lossy(&result.get_output().stderr),
             "» ERROR: .pithos postgres: needs `pithos --broker=workspace`\n",
+            "{args:?}"
+        );
+        assert_eq!(fixture.snapshot(), before, "{args:?}");
+    }
+}
+
+/// Only a broker run writes Pi's private env file; a plain run would have
+/// to put the values on Docker's command line, so it refuses instead.
+#[test]
+fn env_is_refused_without_a_broker() {
+    let config = "toolchains: {}\nenv: {APP_MODE: \"dev\"}\n";
+    for args in [vec![], vec!["run"], vec!["run", "--no-build"]] {
+        let fixture = Fixture::new(Some(config));
+        let before = fixture.snapshot();
+        let result = fixture.command().args(&args).assert().code(2);
+        assert!(result.get_output().stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&result.get_output().stderr),
+            "» ERROR: .pithos env: needs `pithos --broker=status` or `--broker=workspace`\n",
             "{args:?}"
         );
         assert_eq!(fixture.snapshot(), before, "{args:?}");

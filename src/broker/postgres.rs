@@ -56,6 +56,23 @@ impl PostgresFiles {
              PITHOS_POSTGRES_URL=postgresql://{USER}:{password}@{HOST}:{PORT}/{database}\n"
         )
     }
+    /// One of the database's coordinates, for the project's `env` block.
+    pub fn field(&self, field: crate::config::PostgresField) -> String {
+        use crate::config::PostgresField;
+        let Self {
+            database, password, ..
+        } = self;
+        match field {
+            PostgresField::Host => HOST.into(),
+            PostgresField::Port => PORT.to_string(),
+            PostgresField::User => USER.into(),
+            PostgresField::Password => password.clone(),
+            PostgresField::Database => database.clone(),
+            PostgresField::Url => {
+                format!("postgresql://{USER}:{password}@{HOST}:{PORT}/{database}")
+            }
+        }
+    }
     /// Remove the file; absent is success.
     pub fn cleanup(&mut self) -> io::Result<()> {
         super::extension::remove(&self.env)
