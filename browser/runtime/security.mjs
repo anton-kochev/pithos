@@ -28,6 +28,8 @@ export function sandboxVerified(diagnostics) {
 // `localhost` resolves to the dev container (`pithos-app`), so an app the dev
 // container serves keeps its own localhost origins: a secure context, and the
 // origin its configuration already names. 127.0.0.1 is still this sidecar.
+// The browser does not announce automation (no --enable-automation,
+// navigator.webdriver false): sign-in pages such as Google's refuse one that does.
 export function launchOptions(mode) {
-  return { host:'127.0.0.1', port:0, wsPath:'pithos-private-rpc', channel:'chromium', headless:mode === 'headless', chromiumSandbox:true, timeout:20000, ignoreDefaultArgs:['--disable-dev-shm-usage'], args:['--host-resolver-rules=MAP localhost pithos-app'] };
+  return { host:'127.0.0.1', port:0, wsPath:'pithos-private-rpc', channel:'chromium', headless:mode === 'headless', chromiumSandbox:true, timeout:20000, ignoreDefaultArgs:['--disable-dev-shm-usage','--enable-automation'], args:['--host-resolver-rules=MAP localhost pithos-app','--disable-blink-features=AutomationControlled'] };
 }

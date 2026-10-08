@@ -17,7 +17,10 @@ test('sandbox evidence is required, not merely launch flags or a nonroot UID',()
     assert.equal(JSON.stringify(options).includes('--no-sandbox'),false);
     // Browser localhost is the dev container: an app's own localhost origins
     // stay secure contexts and match what its configuration already names.
-    assert.deepEqual(options.args,['--host-resolver-rules=MAP localhost pithos-app']);
+    // Sign-in pages such as Google's refuse a browser that announces it is
+    // automated: no --enable-automation, and navigator.webdriver stays false.
+    assert.deepEqual(options.args,['--host-resolver-rules=MAP localhost pithos-app','--disable-blink-features=AutomationControlled']);
+    assert.deepEqual(options.ignoreDefaultArgs,['--disable-dev-shm-usage','--enable-automation']);
   }
 });
 const chromium153Diagnostics = `Sandbox Status

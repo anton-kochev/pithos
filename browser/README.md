@@ -122,6 +122,11 @@ prompt, a passkey created in one tab is available in the others, and all of them
 vanish when the session ends. Your own passkeys stay on your devices and are not
 reachable from the sidecar; register a new one in the session instead.
 
+The browser does not announce automation (`navigator.webdriver` is false), so
+sign-in pages such as Google's accept it. Whatever account you sign in to there
+is a session Pi can drive for the rest of the run; use a test account if that
+matters.
+
 Legacy launches discover the owned `browser-automation` skill automatically using
 native `~/.agents/skills` discovery. Pi >= **0.84.4** is required; its discovery/opt-out
 implementation was inspected in the versioned npm source. The legacy launcher never

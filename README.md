@@ -213,7 +213,9 @@ Linux is not verified yet.
   browser at `http://pithos-app:<port>/`, and at `http://localhost:<port>/`:
   the browser resolves `localhost` to Pi, so an app configured for its own
   localhost origins works unchanged. Every browser tab also has a virtual
-  passkey authenticator, so passkey sign-in works within the session.
+  passkey authenticator, so passkey sign-in works within the session, and the
+  browser does not announce automation, so Google sign-in accepts it. Pi can
+  drive any account signed in there for the rest of the run.
 - **Database** (`--broker=workspace` only):
 
   ```yaml
