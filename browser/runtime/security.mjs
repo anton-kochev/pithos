@@ -25,6 +25,9 @@ export function sandboxVerified(diagnostics) {
   const { namespaceOrSuid, seccomp } = sandboxEvidence(diagnostics);
   return namespaceOrSuid && seccomp;
 }
+// `localhost` resolves to the dev container (`pithos-app`), so an app the dev
+// container serves keeps its own localhost origins: a secure context, and the
+// origin its configuration already names. 127.0.0.1 is still this sidecar.
 export function launchOptions(mode) {
-  return { host:'127.0.0.1', port:0, wsPath:'pithos-private-rpc', channel:'chromium', headless:mode === 'headless', chromiumSandbox:true, timeout:20000, ignoreDefaultArgs:['--disable-dev-shm-usage'] };
+  return { host:'127.0.0.1', port:0, wsPath:'pithos-private-rpc', channel:'chromium', headless:mode === 'headless', chromiumSandbox:true, timeout:20000, ignoreDefaultArgs:['--disable-dev-shm-usage'], args:['--host-resolver-rules=MAP localhost pithos-app'] };
 }

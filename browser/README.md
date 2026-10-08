@@ -109,10 +109,18 @@ viewer is still headed mode; there is no live headless-to-headed promotion.
 ## Local applications, CLI and screenshots
 
 Start an app **inside the dev container**, bound to `0.0.0.0:<port>`. Chromium
-reaches it at `http://pithos-app:<port>` over the run's dedicated Docker network. Do not
-publish the app to the Mac just for this connection. Browser `localhost` is the
-sidecar, not the app or host. The bridge permits Internet and other services on
-that network; it is not comprehensive egress/SSRF filtering.
+reaches it at `http://pithos-app:<port>` over the run's dedicated Docker network,
+and at `http://localhost:<port>` too: the browser resolves `localhost` to the dev
+container. So an app configured for its own `localhost` origins (CORS, OAuth
+redirects, WebAuthn) works unchanged, and `localhost` stays a secure context.
+`127.0.0.1` is still the sidecar itself. Do not publish the app to the Mac just
+for this connection. The bridge permits Internet and other services on that
+network; it is not comprehensive egress/SSRF filtering.
+
+Every tab has a virtual passkey authenticator. It verifies the user without a
+prompt, a passkey created in one tab is available in the others, and all of them
+vanish when the session ends. Your own passkeys stay on your devices and are not
+reachable from the sidecar; register a new one in the session instead.
 
 Legacy launches discover the owned `browser-automation` skill automatically using
 native `~/.agents/skills` discovery. Pi >= **0.84.4** is required; its discovery/opt-out

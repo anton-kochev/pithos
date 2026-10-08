@@ -210,7 +210,10 @@ Linux is not verified yet.
   - Pi and the browser reach it at `http://pithos-app-<hash>:<port>/`.
 - **Services Pi runs itself.** Anything Pi starts inside its own container
   (for example `dotnet run --urls http://0.0.0.0:5000`) is reachable from the
-  browser at `http://pithos-app:<port>/`.
+  browser at `http://pithos-app:<port>/`, and at `http://localhost:<port>/`:
+  the browser resolves `localhost` to Pi, so an app configured for its own
+  localhost origins works unchanged. Every browser tab also has a virtual
+  passkey authenticator, so passkey sign-in works within the session.
 - **Database** (`--broker=workspace` only):
 
   ```yaml

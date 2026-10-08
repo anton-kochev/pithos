@@ -6,6 +6,7 @@ import { WebSocket } from 'ws';
 import { validateSettings, sandboxVerified, launchOptions } from './security.mjs';
 import { createViewer } from './viewer.mjs';
 import { createRpcGateway } from './rpc.mjs';
+import { armAuthenticators } from './authenticator.mjs';
 
 delete process.env.DEBUG;
 delete process.env.PWDEBUG;
@@ -13,6 +14,7 @@ process.umask(0o077);
 const { chromium } = await import('playwright');
 const children = [];
 let browserServer;
+let supervisor;
 let viewer;
 let rpc;
 let stopping = false;
@@ -26,6 +28,7 @@ async function stop(code) {
   for (const child of children) child.kill('SIGTERM');
   viewer?.close();
   await rpc?.close();
+  await supervisor?.close().catch(()=>{});
   await browserServer?.close().catch(()=>{});
   clearTimeout(deadline);
   process.exit(code);
@@ -92,6 +95,12 @@ try {
   await page.goto('chrome://sandbox',{timeout:10000});
   if(!sandboxVerified(await page.locator('body').innerText({timeout:5000}))) throw new Error('Effective sandbox unavailable');
   await browser.close();
+  // Arm every tab with a virtual passkey authenticator; see authenticator.mjs.
+  // This connection stays on loopback, behind no capability, for the run.
+  stage='authenticator';
+  supervisor=await chromium.connect(browserServer.wsEndpoint(),{timeout:10000});
+  supervisor.on('disconnected',()=>{if(!stopping){console.error('Browser authenticator connection lost');void stop(1);}});
+  await armAuthenticators(await supervisor.newBrowserCDPSession());
   stage='rpc authentication';
   const wrong=(settings.capability === '0'.repeat(64) ? '1' : '0').repeat(64);
   if(!await rejectsRpc(wrong) || !await rejectsRpc(settings.capability,{Origin:'https://invalid.example'})) throw new Error('RPC authentication failed');

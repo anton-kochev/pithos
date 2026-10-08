@@ -15,6 +15,9 @@ test('sandbox evidence is required, not merely launch flags or a nonroot UID',()
     assert.equal(options.chromiumSandbox,true);
     assert.equal(options.channel,'chromium');
     assert.equal(JSON.stringify(options).includes('--no-sandbox'),false);
+    // Browser localhost is the dev container: an app's own localhost origins
+    // stay secure contexts and match what its configuration already names.
+    assert.deepEqual(options.args,['--host-resolver-rules=MAP localhost pithos-app']);
   }
 });
 const chromium153Diagnostics = `Sandbox Status

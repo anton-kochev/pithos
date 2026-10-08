@@ -36,6 +36,10 @@ pub const FILES: &[(&str, &[u8])] = &[
         include_bytes!("../../browser/runtime/rpc.mjs"),
     ),
     (
+        "runtime/authenticator.mjs",
+        include_bytes!("../../browser/runtime/authenticator.mjs"),
+    ),
+    (
         "runtime/security.mjs",
         include_bytes!("../../browser/runtime/security.mjs"),
     ),
@@ -151,5 +155,22 @@ mod tests {
         }
         assert_eq!(fingerprint().len(), 64);
         assert!(!context.path().join("pi-config").exists());
+    }
+
+    /// The sidecar runs only what is embedded here; a runtime module left out
+    /// fails at its first import inside the container, not at build time.
+    #[test]
+    fn every_runtime_module_is_embedded() {
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("browser/runtime");
+        for entry in fs::read_dir(runtime).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            if name.ends_with(".mjs") {
+                let embedded = format!("runtime/{name}");
+                assert!(
+                    FILES.iter().any(|(file, _)| *file == embedded),
+                    "{embedded} is not in browser::assets::FILES"
+                );
+            }
+        }
     }
 }

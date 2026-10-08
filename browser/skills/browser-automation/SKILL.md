@@ -42,8 +42,14 @@ pithos-browser screenshot --filename=page.png
 
 Bind an application in the dev container to `0.0.0.0`, not `127.0.0.1`.
 `http://pithos-app:<port>` reaches that container through the run's dedicated Docker
-network. Browser localhost is the browser container, not the app or Mac. Do not
-publish an app port or enable host networking just to make browser access work.
+network, and so does `http://localhost:<port>`: the browser resolves `localhost` to
+the dev container. Prefer `localhost` when the app's configuration names it (CORS,
+OAuth redirects, passkeys); it is also a secure context. Do not publish an app port
+or enable host networking just to make browser access work.
+
+Passkeys work: every tab has a virtual authenticator that approves without a
+prompt. Register a passkey in the app, then sign in with it; it lasts until the
+session ends. The user's own passkeys are not available here.
 This network is not comprehensive egress/SSRF filtering; the browser has Internet
 access and can reach other services on its network.
 
