@@ -41,19 +41,28 @@ const patches = [
 				].join("\n"),
 			},
 			{
+				label: "pass displayText through the run trigger",
+				oldText: [
+					"        await this._startRun({ messageType: \"user\", prompt: expandedText, images: currentImages }, () => preflightResult?.(\"started\"));",
+				].join("\n"),
+				newText: [
+					"        await this._startRun({ messageType: \"user\", prompt: expandedText, images: currentImages, displayText }, () => preflightResult?.(\"started\"));",
+				].join("\n"),
+			},
+			{
 				label: "persist displayText on user messages",
 				oldText: [
 					"            messages.push({",
 					"                role: \"user\",",
-					"                content: userContent,",
+					"                content: [{ type: \"text\", text }, ...normalized.images],",
 					"                timestamp: Date.now(),",
 					"            });",
 				].join("\n"),
 				newText: [
 					"            messages.push({",
 					"                role: \"user\",",
-					"                content: userContent,",
-					"                ...(displayText ? { displayText } : {}),",
+					"                content: [{ type: \"text\", text }, ...normalized.images],",
+					"                ...(trigger.displayText ? { displayText: trigger.displayText } : {}),",
 					"                timestamp: Date.now(),",
 					"            });",
 				].join("\n"),
@@ -181,10 +190,9 @@ const patches = [
 	},
 ];
 
-// Pi releases re-nest the same code at different depths (0.84.x indents the
-// prompt() body by 12 spaces, 0.99.x by 8), so blocks are matched by their
-// relative shape, not their absolute indentation. Every width is tried because
-// the HTML export template mixes 2- and 4-space nesting.
+// Pi releases re-nest the same code at different depths, so blocks are matched
+// by their relative shape, not their absolute indentation. Every width is tried
+// because the HTML export template mixes 2- and 4-space nesting.
 const MAX_INDENT = 48;
 
 function dedent(text) {

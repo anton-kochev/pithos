@@ -863,7 +863,7 @@ fn docker_desktop_cli_workspace_run_shows_viewer_and_settles_when_pi_quits() {
     let _home = HomeVolume::absent();
     // A pi.extensions package, installed by the image entrypoint as in legacy runs.
     let (_parent, workspace, _) = project(
-        b"toolchains: {}\npi:\n  version: \"0.84.4\"\n  extensions:\n    \"@pithos-kit/themes\": npm:0.1.0\n",
+        b"toolchains: {}\npi:\n  version: \"1.2.0\"\n  extensions:\n    \"@pithos-kit/themes\": npm:0.1.0\n",
     );
     let mut command = Command::new(env!("CARGO_BIN_EXE_pithos"));
     command

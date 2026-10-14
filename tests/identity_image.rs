@@ -38,7 +38,7 @@ fn browser_overlay_provisions_python_before_running_helper() {
 #[test]
 fn pi_identity_emitter_is_strictly_late_and_legacy_is_unchanged() {
     let yaml = pithos::config::load(
-        b"toolchains:\n  rust: \"1.85.0\"\n  node: \"22\"\npi:\n  version: \"0.84.4\"\n" as &[u8],
+        b"toolchains:\n  rust: \"1.85.0\"\n  node: \"22\"\npi:\n  version: \"1.2.0\"\n" as &[u8],
     )
     .unwrap();
     let identity = HostIdentity::new(12345, 23456).unwrap();
@@ -202,7 +202,7 @@ fn real_docker_identity_images() {
     );
     let host = HostIdentity::effective().expect("non-root Linux/macOS host");
     let yaml = pithos::config::load(
-        b"toolchains:\n  rust: \"1.85.0\"\npi:\n  version: \"0.84.4\"\n" as &[u8],
+        b"toolchains:\n  rust: \"1.85.0\"\npi:\n  version: \"1.2.0\"\n" as &[u8],
     )
     .unwrap();
 

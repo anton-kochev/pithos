@@ -33,7 +33,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HOST_CONFIG: &[u8] = b"toolchains: {}\nsessions: {storage: volume}\npi: {version: '0.84.4', extensions: {x: 'npm:1.0'}}\n";
+const HOST_CONFIG: &[u8] = b"toolchains: {}\nsessions: {storage: volume}\npi: {version: '1.2.0', extensions: {x: 'npm:1.0'}}\n";
 
 fn image() -> ImmutableImageId {
     ImmutableImageId::new(&format!("sha256:{}", "a".repeat(64))).unwrap()
