@@ -54,7 +54,7 @@ def check():
             return False
         if (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino):
             return False
-        if metadata.st_uid != owner or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o600:
+        if metadata.st_uid not in (owner, uid) or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o600:
             return False
         if not os.fstatvfs(stream.fileno()).f_flag & os.ST_RDONLY:
             return False
@@ -271,8 +271,9 @@ impl RunCredential {
             CONTAINER_PATH.into(),
             identity.uid().to_string().into(),
             identity.gid().to_string().into(),
-            // Docker Desktop presents shared host files as root-owned in its VM
-            // and does not enforce in-VM ownership; the host file stays 0600.
+            // Docker Desktop shows shared host files as root-owned (before 4.96)
+            // or owned by the container user (4.96+), and does not enforce
+            // in-VM ownership; the host file stays 0600.
             if cfg!(target_os = "macos") {
                 "0".to_string()
             } else {

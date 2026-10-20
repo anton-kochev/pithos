@@ -293,6 +293,11 @@ fn probe_reads_full_json_and_checks_actual_metadata_without_echoing_data() {
         "readable valid fixture was rejected"
     );
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    // Docker Desktop 4.96+ shows the file as the container user's, not root's.
+    assert!(
+        run_probe(script, &path, identity, 0, true).status.success(),
+        "user-owned file was rejected when root ownership is expected"
+    );
     let mut boundary = good.clone();
     boundary.resize(512, b' ');
     fs::write(&path, &boundary).unwrap();
@@ -378,9 +383,6 @@ fn probe_reads_full_json_and_checks_actual_metadata_without_echoing_data() {
         assert!(!output.status.success(), "identity mismatch admitted");
         assert!(output.stdout.is_empty() && output.stderr.is_empty());
     }
-    let output = run_probe(script, &path, identity, 0, true);
-    assert!(!output.status.success(), "unexpected file owner admitted");
-    assert!(output.stdout.is_empty() && output.stderr.is_empty());
     fs::hard_link(&path, parent.path().join("alias")).unwrap();
     assert!(
         !run_probe(script, &path, identity, identity.uid(), true)
@@ -424,7 +426,7 @@ fn probe_argv_binds_only_checked_file_effective_identity_and_immutable_image() {
         ]
     );
     assert_eq!(&argv[13..16], &["-I", "-S", "-c"]);
-    // Docker Desktop presents shared host files as root-owned in its VM.
+    // Docker Desktop may present shared host files as root-owned in its VM.
     let file_owner = if cfg!(target_os = "macos") {
         "0".to_string()
     } else {
