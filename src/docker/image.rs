@@ -210,7 +210,9 @@ fn trim_inspect_id(stdout: &str) -> &str {
 }
 
 fn is_missing_image_error(stderr: &str) -> bool {
-    stderr.contains("No such image") || stderr.contains("No such object")
+    // Docker CLI casing varies by version ("No such object" vs "no such object").
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("no such image") || stderr.contains("no such object")
 }
 
 #[derive(Debug, PartialEq, Eq)]

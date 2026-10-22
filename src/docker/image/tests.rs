@@ -93,6 +93,40 @@ exit 2"#,
 
 #[cfg(unix)]
 #[test]
+fn inspect_missing_base_image_pulls_on_lowercase_docker_error() {
+    let (_tempdir, docker) = fake_docker(
+        r#"printf '%s\n' "$*" >> "$0.log"
+if [ "$1" = "inspect" ]; then
+  if [ ! -f "$0.seen" ]; then
+    touch "$0.seen"
+    printf 'error: no such object: %s\n' "$4" >&2
+    exit 1
+  fi
+  printf 'sha256:base123\n'
+  exit 0
+fi
+if [ "$1" = "pull" ]; then
+  exit 0
+fi
+exit 2"#,
+    );
+
+    let id = inspect_image_id_with(BASE_IMAGE_REF, &docker).unwrap();
+
+    assert_eq!(id, "sha256:base123");
+    let calls = std::fs::read_to_string(docker.with_extension("log")).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        [
+            format!("inspect --format {{{{.Id}}}} {BASE_IMAGE_REF}"),
+            format!("pull {BASE_IMAGE_REF}"),
+            format!("inspect --format {{{{.Id}}}} {BASE_IMAGE_REF}"),
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn fingerprint_lookup_prefers_image_with_version_labels() {
     let (_tempdir, docker) = fake_docker(
         r#"printf '%s\n' "$*" >> "$0.log"
