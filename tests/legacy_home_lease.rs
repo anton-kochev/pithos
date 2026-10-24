@@ -653,3 +653,72 @@ sys.exit(0)
         "home consumer started without durable outstanding-use evidence"
     );
 }
+
+#[test]
+fn settlement_warnings_explain_evidence_and_host_action() {
+    for (variable, value, reason) in [
+        (
+            "QUERY_MODE",
+            "running",
+            "The container still exists (running or stopped). Pithos kept its home-use safety marker.",
+        ),
+        (
+            "QUERY_MODE",
+            "stopped",
+            "The container still exists (running or stopped). Pithos kept its home-use safety marker.",
+        ),
+        (
+            "QUERY_MODE",
+            "malformed",
+            "Pithos could not verify that the container was removed. Its persistent home volume may still be in use; the home-use safety marker was kept.",
+        ),
+        (
+            "QUERY_MODE",
+            "error",
+            "Pithos could not verify that the container was removed. Its persistent home volume may still be in use; the home-use safety marker was kept.",
+        ),
+        (
+            "DOCKER_CONTEXT",
+            "mutable",
+            "Pithos could not verify that the container was removed. Its persistent home volume may still be in use; the home-use safety marker was kept.",
+        ),
+        (
+            "REPLACE_MARKER",
+            "1",
+            "The container was verified absent, but Pithos could not finish clearing its home-use safety marker. The marker may still remain.",
+        ),
+        (
+            "FAULT_CODE",
+            "125",
+            "Docker exited unexpectedly, so Pithos did not verify whether the container was removed.",
+        ),
+    ] {
+        let home = fixture();
+        let output = child(home.path(), "request")
+            .env("FAULT_STAGE", "dev")
+            .env("FAULT_CODE", "0")
+            .env(variable, value)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let warning = String::from_utf8_lossy(&output.stderr);
+        let expected = format!(
+            "Warning: Pithos could not confirm that the home-use safety marker was cleared.\n{reason}\nThis may block a later broker run; your persistent home volume has not been deleted.\nOn the host, use the original Docker endpoint/context and run `docker container ls --all` to inspect containers. Do not clear safety markers until you have confirmed that no container or Pithos process is using the home volume.\n"
+        );
+        assert_eq!(warning, expected, "{variable}={value}");
+        assert!(!warning.contains("untrusted engine warning"));
+        assert_eq!(
+            fs::read_to_string(home.path().join("result")).unwrap(),
+            if variable == "FAULT_CODE" {
+                "Ok(125)"
+            } else {
+                "Ok(0)"
+            }
+        );
+    }
+    let home = fixture();
+    let output = child(home.path(), "request").output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+    assert!(outstanding(home.path()).is_empty());
+}

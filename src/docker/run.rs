@@ -164,18 +164,62 @@ fn finish_home_use(
     args: &[OsString],
     completion: HomeCompletion,
 ) {
-    // Detaching returns zero while the container still uses home. Even an
-    // ordinary application exit is insufficient without engine-confirmed absence.
-    // Docker errors, signals and unknown outcomes remain conservative debt.
-    if status.code().is_some_and(|code| (0..125).contains(&code))
-        && completion.absent(args)
-        && home_use.finish().is_ok()
-    {
-        return;
+    // A normal client exit (including detach) alone never proves absence.
+    // Docker errors and signals still retain debt without querying the engine.
+    let outcome = if !status.code().is_some_and(|code| (0..125).contains(&code)) {
+        HomeSettlement::AbnormalExit
+    } else {
+        match completion.verify(args) {
+            ContainerEvidence::Present => HomeSettlement::Present,
+            ContainerEvidence::Unverified => HomeSettlement::Unverified,
+            ContainerEvidence::Absent => match home_use.finish() {
+                Ok(()) => HomeSettlement::Settled,
+                Err(_) => HomeSettlement::MarkerCleanupFailed,
+            },
+        }
+    };
+    if let Some(reason) = outcome.warning() {
+        // Never expose daemon/error text or suggest deletion. In particular,
+        // finish can fail after unlinking, so marker retention is not certain.
+        eprintln!(
+            "Warning: Pithos could not confirm that the home-use safety marker was cleared.\n{reason}\nThis may block a later broker run; your persistent home volume has not been deleted.\nOn the host, use the original Docker endpoint/context and run `docker container ls --all` to inspect containers. Do not clear safety markers until you have confirmed that no container or Pithos process is using the home volume."
+        );
     }
-    // Settlement failures must not replace the interactive exit status or expose
-    // untrusted daemon output. No marker or foreign resource is repaired/removed.
-    eprintln!("home use remains outstanding; explicit host recovery required");
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerEvidence {
+    Absent,
+    Present,
+    Unverified,
+}
+
+enum HomeSettlement {
+    Settled,
+    AbnormalExit,
+    Present,
+    Unverified,
+    MarkerCleanupFailed,
+}
+
+impl HomeSettlement {
+    fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Settled => None,
+            Self::AbnormalExit => Some(
+                "Docker exited unexpectedly, so Pithos did not verify whether the container was removed.",
+            ),
+            Self::Present => Some(
+                "The container still exists (running or stopped). Pithos kept its home-use safety marker.",
+            ),
+            Self::Unverified => Some(
+                "Pithos could not verify that the container was removed. Its persistent home volume may still be in use; the home-use safety marker was kept.",
+            ),
+            Self::MarkerCleanupFailed => Some(
+                "The container was verified absent, but Pithos could not finish clearing its home-use safety marker. The marker may still remain.",
+            ),
+        }
+    }
 }
 
 struct HomeCompletion {
@@ -191,16 +235,18 @@ impl HomeCompletion {
         }
     }
 
-    fn absent(self, args: &[OsString]) -> bool {
+    fn verify(self, args: &[OsString]) -> ContainerEvidence {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.selection
-                .is_some_and(|selection| selection.absent(args))
+                .map_or(ContainerEvidence::Unverified, |selection| {
+                    selection.verify(args)
+                })
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = args;
-            false
+            ContainerEvidence::Unverified
         }
     }
 }
@@ -258,9 +304,9 @@ mod home_completion {
             })
         }
 
-        pub(super) fn absent(self, args: &[OsString]) -> bool {
+        pub(super) fn verify(self, args: &[OsString]) -> ContainerEvidence {
             if Self::capture().as_ref().ok() != Some(&self) {
-                return false;
+                return ContainerEvidence::Unverified;
             }
             // Read the FINAL argv, after BrowserRun has replaced the generated
             // project/PID name. Never derive a different name for reconciliation.
@@ -277,7 +323,7 @@ mod home_completion {
                             .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
                 })
             else {
-                return false;
+                return ContainerEvidence::Unverified;
             };
             let mut query = Command::new("docker");
             query
@@ -287,7 +333,12 @@ mod home_completion {
                 .args(["container", "ls", "--all", "--no-trunc", "--filter"])
                 .arg(format!("name=^/{}$", name.replace('.', r"\.")))
                 .args(["--format", "{{.ID}}"]);
-            bounded_empty_query(query) && Self::capture().as_ref().ok() == Some(&self)
+            let evidence = bounded_query(query);
+            if Self::capture().as_ref().ok() == Some(&self) {
+                evidence
+            } else {
+                ContainerEvidence::Unverified
+            }
         }
     }
 
@@ -337,7 +388,24 @@ mod home_completion {
         Ok(Some(hash.finalize().into()))
     }
 
-    fn bounded_empty_query(mut command: Command) -> bool {
+    // `--all --no-trunc --format {{.ID}}` establishes presence, not running
+    // state or ownership. Malformed output must never be presented as evidence.
+    fn query_evidence(bytes: &[u8]) -> ContainerEvidence {
+        if bytes.is_empty() {
+            return ContainerEvidence::Absent;
+        }
+        let ids = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+        if ids
+            .split(|byte| *byte == b'\n')
+            .all(|id| id.len() == 64 && id.iter().all(u8::is_ascii_hexdigit))
+        {
+            ContainerEvidence::Present
+        } else {
+            ContainerEvidence::Unverified
+        }
+    }
+
+    fn bounded_query(mut command: Command) -> ContainerEvidence {
         let shutdown = Shutdown::new();
         let worker_shutdown = shutdown.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -354,19 +422,23 @@ mod home_completion {
                     ..Limits::default()
                 };
                 let Ok(mut supervisor) = Supervisor::new(limits, worker_shutdown) else {
-                    let _ = sender.send(false);
+                    let _ = sender.send(ContainerEvidence::Unverified);
                     return;
                 };
-                let absent = supervisor.execute(&mut command).is_ok_and(|report| {
-                    matches!(report.outcome, Outcome::Exited(status) if status.success())
-                        && !report.signal_error
-                        && !report.wait_error
-                        && report.stdout.is_complete()
-                        && report.stdout.raw_bytes().is_empty()
-                        && report.stderr.is_complete()
-                        && report.stderr.raw_bytes().is_empty()
-                });
-                let _ = sender.send(absent);
+                let evidence = match supervisor.execute(&mut command) {
+                    Ok(report)
+                        if matches!(report.outcome, Outcome::Exited(status) if status.success())
+                            && !report.signal_error
+                            && !report.wait_error
+                            && report.stdout.is_complete()
+                            && report.stderr.is_complete()
+                            && report.stderr.raw_bytes().is_empty() =>
+                    {
+                        query_evidence(report.stdout.raw_bytes())
+                    }
+                    _ => ContainerEvidence::Unverified,
+                };
+                let _ = sender.send(evidence);
                 // Also settle a setup error: execute may fail after spawning. No
                 // blocking wait, abandoned Child, or guessed absence on these paths.
                 while supervisor.is_in_flight() {
@@ -375,13 +447,13 @@ mod home_completion {
                 }
             });
         if worker.is_err() {
-            return false;
+            return ContainerEvidence::Unverified;
         }
         match receiver.recv_timeout(Duration::from_secs(5)) {
-            Ok(absent) => absent,
+            Ok(evidence) => evidence,
             Err(_) => {
                 shutdown.request(ShutdownReason::Requested);
-                false
+                ContainerEvidence::Unverified
             }
         }
     }
