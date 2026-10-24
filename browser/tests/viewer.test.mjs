@@ -20,6 +20,7 @@ test('viewer login protects resources and enforces Host/Origin without URL token
   const origin=`http://127.0.0.1:${port}`;
   try {
     assert.equal((await call(port,'GET','/viewer.js')).status,401);
+    assert.equal((await call(port,'GET','/viewer-clipboard.mjs')).status,401);
     assert.equal((await call(port,'GET','/',{Host:'evil.example'})).status,403);
     assert.equal((await call(port,'POST','/login',{Origin:'https://evil.example'},password)).status,403);
     assert.equal((await call(port,'POST','/login',{Origin:origin},'password=wrong')).status,401);
@@ -29,7 +30,19 @@ test('viewer login protects resources and enforces Host/Origin without URL token
     assert.equal(login.text.includes(password),false);
     const cookie=login.headers['set-cookie'][0];
     assert.match(cookie,/HttpOnly/); assert.match(cookie,/SameSite=Strict/);
-    assert.equal((await call(port,'GET','/viewer.js',{Cookie:cookie})).status,200);
+    const client = await call(port,'GET','/viewer.js',{Cookie:cookie});
+    assert.equal(client.status,200);
+    assert.match(client.text, /installClipboard/);
+    const clipboard = await call(port,'GET','/viewer-clipboard.mjs',{Cookie:cookie});
+    assert.equal(clipboard.status,200);
+    assert.match(clipboard.text, /export function installClipboard/);
+    assert.equal((await call(port,'GET','/viewer-clipboard.mjs',{Cookie:cookie,Origin:'https://evil.example'})).status,403);
+    const page = await call(port,'GET','/',{Cookie:cookie});
+    assert.match(page.text, /textarea/);
+    assert.match(page.text, /role="status"/);
+    assert.match(page.text, /remote clipboard.*Ctrl\+V/);
+    assert.match(page.text, /Latin-1/);
+    assert.doesNotMatch(page.text, /Text is typed/);
     assert.equal((await call(port,'GET','/novnc/..%2f..%2fpackage.json',{Cookie:cookie})).status,404);
     assert.equal((await call(port,'GET','/novnc/core/rfb.js',{Cookie:cookie})).status,200);
     assert.equal((await call(port,'GET','/websockify?token=x',{Cookie:cookie})).status,404);
@@ -95,4 +108,10 @@ test('login page referrer policy leaves the browser Origin intact', async () => 
     assert.equal((await call(port,'POST','/login',{Origin:'null'},`password=${password}`)).status,403);
     assert.equal((await call(port,'POST','/login',{},`password=${password}`)).status,403);
   } finally { server.closeAllConnections(); await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('clipboard client is embedded in the Rust fingerprinted asset bundle', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const assets = await readFile(new URL('../../src/browser/assets.rs', import.meta.url), 'utf8');
+  assert.match(assets, /include_bytes!\("\.\.\/\.\.\/browser\/runtime\/viewer-clipboard\.mjs"\)/);
 });

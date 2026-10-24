@@ -6,9 +6,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer, createWebSocketStream } from 'ws';
 
-const page = `<!doctype html><meta charset="utf-8"><title>Pithos browser</title><div id="screen" style="height:95vh"></div><script type="module" src="/viewer.js"></script>`;
+const page = `<!doctype html><meta charset="utf-8"><title>Pithos browser</title><div id="screen" style="height:80vh"></div><p>Cmd+V transfers text to the remote clipboard and requests Ctrl+V at remote focus. Legacy clipboard supports Latin-1 only; other characters may become ?. Unicode requires extended clipboard support.</p><label>Paste text below <textarea id="paste-text" autocomplete="off" spellcheck="false"></textarea></label><button id="send-text" disabled>Send text</button><p id="paste-status" role="status" aria-live="polite"></p><script type="module" src="/viewer.js"></script>`;
 const login = `<!doctype html><meta charset="utf-8"><title>Pithos browser login</title><h1>Pithos browser</h1><form method="post" action="/login"><label>Run password <input type="password" name="password" autocomplete="off" required></label><button>Connect</button></form>`;
-const script = `import RFB from '/novnc/core/rfb.js'; const rfb = new RFB(document.getElementById('screen'), 'ws://' + location.host + '/websockify'); rfb.scaleViewport = true; rfb.resizeSession = false; rfb.addEventListener('disconnect', () => { document.getElementById('screen').textContent = 'Disconnected. Reload to reconnect to this run.'; });`;
+const script = `import RFB from '/novnc/core/rfb.js'; import { installClipboard } from '/viewer-clipboard.mjs'; const rfb = new RFB(document.getElementById('screen'), 'ws://' + location.host + '/websockify'); installClipboard({ document, screen: document.getElementById('screen'), rfb, clipboard: navigator.clipboard, input: document.getElementById('paste-text'), button: document.getElementById('send-text'), status: document.getElementById('paste-status') }); rfb.scaleViewport = true; rfb.resizeSession = false; rfb.addEventListener('disconnect', () => { document.getElementById('screen').textContent = 'Disconnected. Reload to reconnect to this run.'; });`;
 const equal = (a,b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const validHost = host => typeof host === 'string' && /^127\.0\.0\.1:[0-9]{1,5}$/.test(host) && +host.split(':')[1] > 0 && +host.split(':')[1] <= 65535;
 
@@ -42,6 +42,7 @@ export function createViewer({password, runId, vncPort = 5900}) {
       if (request.url === '/') return send(200, authenticated(request) ? page : login);
       if (!authenticated(request)) return send(401);
       if (request.url === '/viewer.js') return send(200,script,'text/javascript; charset=utf-8');
+      if (request.url === '/viewer-clipboard.mjs') return send(200,await readFile(new URL('./viewer-clipboard.mjs',import.meta.url)),'text/javascript; charset=utf-8');
       if (/^\/novnc\/(core|vendor)\/[a-zA-Z0-9_./-]+\.js$/.test(request.url) && !request.url.split('/').includes('..')) {
         const file = path.join(fileURLToPath(new URL('../node_modules/@novnc/novnc/',import.meta.url)),request.url.slice(7));
         return send(200,await readFile(file),'text/javascript; charset=utf-8');

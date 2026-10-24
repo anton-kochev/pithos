@@ -48,6 +48,10 @@ pub const FILES: &[(&str, &[u8])] = &[
         include_bytes!("../../browser/runtime/viewer.mjs"),
     ),
     (
+        "runtime/viewer-clipboard.mjs",
+        include_bytes!("../../browser/runtime/viewer-clipboard.mjs"),
+    ),
+    (
         "runtime/health.mjs",
         include_bytes!("../../browser/runtime/health.mjs"),
     ),

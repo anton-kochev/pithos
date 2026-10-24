@@ -472,6 +472,65 @@ If these steps pass, you have independently exercised:
 - The Mac viewer.
 - Chromium’s sandbox diagnostics.
 
+### 7.1 Host text insertion (new; real Mac/x11vnc acceptance NOT RUN)
+
+The viewer now intercepts Cmd+V over the remote screen and reads plain text only
+on that gesture. If browser clipboard permission is unavailable, paste into the
+labelled local text area and click **Send text**. Local controls retain ordinary
+paste behavior. Text is cleared after sending and on disconnect; no background
+clipboard polling, storage, or reverse clipboard sync is added.
+
+**Protocol and readiness limitations:** text is passed unchanged to noVNC
+`clipboardPasteFrom(text)`, followed by a remote Ctrl+V chord, not character
+keystrokes. Return and Tab are never synthesized from the text. Held remote
+modifiers are released before the chord; V and Control are released afterwards,
+including on send failure. Empty text does not trigger a stale-clipboard paste.
+
+Source evidence in pinned noVNC 1.7.0 (`core/rfb.js`):
+
+- `clipboardPasteFrom` sends legacy `ClientCutText` immediately unless the server
+  advertises extended text/Notify. `clientCutText` flushes on the same socket as
+  key events. The viewer proxy (`runtime/viewer.mjs`) pipes that WebSocket stream
+  to a single TCP connection. This orders legacy clipboard bytes before Ctrl+V;
+  it is not proof that the X selection or remote application has become ready.
+- Extended mode stores text and sends Notify; a later server Request causes
+  Provide. Provide uses UTF-8, NUL termination, CRLF normalization and compression.
+  Thus the API call precedes Ctrl+V, but the extended text payload may follow it.
+  There is no public clipboard-ready acknowledgement. No sleep is used or claimed
+  to guarantee readiness; real-server behavior still needs acceptance testing.
+- Legacy mode encodes ISO-8859-1 and replaces code points above U+00FF with `?`.
+  The viewer does not transliterate or substitute typing for unsupported Unicode.
+  The UI warns of this limit. Full Unicode requires negotiated extended support;
+  passing Unicode unchanged to the API does not prove it arrives unchanged.
+
+`runtime/server.mjs` launches x11vnc without extended-clipboard configuration.
+Legacy ClientCutText is the expected path, not an observed negotiation result.
+Actual x11vnc negotiation, X selection timing, and Unicode delivery remain
+unverified. Rapid extended pastes may replace noVNC's pending clipboard text
+before a server request; this public API provides no completion barrier.
+
+Before claiming acceptance, record the host browser/version and test with
+non-sensitive disposable text:
+
+1. Copy `https://example.com/`, click the remote Chromium address bar and select
+   its contents, then press Cmd+V. Verify the exact value once, with no Alt/Meta
+   shortcut or duplicate characters. Repeat with a different URL.
+2. In a disposable form, test ASCII, `café 😀`, empty text, and repeated pastes.
+   Test multiline and tab-containing text in a textarea: require one paste, no
+   form submission or focus movement. Record Unicode loss as a protocol
+   limitation, not a passing Unicode test. Verify no stale previous text.
+3. Deny clipboard permission and repeat: require actionable feedback. Paste in
+   the local fallback, click Send text, and verify the remote focus receives it
+   once and the local text clears. Paste in local UI must not send remotely.
+4. Disconnect while a permission prompt is open: accepting it afterwards must
+   not send text. Check the disconnected feedback and disabled Send text button.
+5. Recheck unauthenticated `/viewer-clipboard.mjs` returns 401. Existing Host,
+   Origin, and WebSocket restrictions must remain unchanged.
+
+Automated Node tests cover event/controller behavior with an RFB test double and
+HTTP/WebSocket authentication. They do not establish native Mac event delivery,
+x11vnc Unicode support, remote focus behavior, or real paste equivalence.
+
 ### Exit this first run
 
 In the development-container shell:
