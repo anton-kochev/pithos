@@ -3,6 +3,7 @@ mod selection;
 pub use selection::{BrowserClientLayer, BrowserMode, BrowserSelection};
 pub mod assets;
 mod process;
+pub mod viewer;
 
 use crate::output::{Style, narrate};
 use fs2::FileExt;
@@ -391,6 +392,16 @@ impl BrowserRun {
             }
             run.viewer_url = Some(format!("http://{address}/"));
         }
+        let password_path = run.password_path();
+        let metadata =
+            viewer::metadata(run.viewer_url().map(|url| (url, password_path.as_path())))?;
+        private_file(
+            &run.owned
+                .root
+                .join("browser/skills")
+                .join(viewer::METADATA_FILE),
+            &metadata,
+        )?;
         Ok(run)
     }
     fn sidecar_args(owned: &OwnedRun, mode: BrowserMode, image: &str) -> Result<Vec<OsString>> {

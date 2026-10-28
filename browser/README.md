@@ -90,6 +90,22 @@ the password yourself. Do not paste it into chat, command arguments, a viewer
 URL, or setup screenshots. The password file is not mounted in the dev container.
 The URL contains no credentials. Raw RPC, VNC and X11 are not host-published.
 
+If that startup message scrolls away, type **`/browser`** inside Pi to show the
+current run's viewer URL and **host password-file path** again. It is a local UI
+notification, not a model request; it never reads or displays the password.
+Read the file on your host, not inside the container. The command works in both
+legacy and broker-managed Pi launches, including `--tmux`. It reports no viewer
+for a headless run; restart with `pithos --browser` if you need one.
+
+The bundled command is explicitly loaded for browser-enabled Pi launches, so
+Pi's `--no-extensions`/`-ne` (which disables discovered extensions) and
+`--no-skills` do not disable it. Browser-disabled launches and explicit container
+commands such as `pithos run --browser bash` do not automatically load it.
+`/reload` or switching Pi conversations retains the current invocation's
+connection details; a new Pithos invocation uses its own details. The command
+cannot retrieve a finished run or be added retroactively to an already-running
+Pi process launched by an older Pithos binary.
+
 The viewer uses a password form, run-specific HttpOnly/SameSite=Strict cookie,
 exact Origin-to-Host checks, and an IPv4-loopback Host allowlist. Each run has a
 separate cookie name and random credentials. Viewer transport is plain HTTP on

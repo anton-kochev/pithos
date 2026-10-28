@@ -65,7 +65,20 @@ impl Fixture {
     elif args[0] == 'run' and '--label' not in args:
         if '--name' in args: data['dev_args'] = args
     elif args[0] == 'test-set-fault':"#,
-        ).replace("    elif args[0] == 'run':", "    elif args[0] == 'run':\n        if '-it' in args: data['dev_args'] = args");
+        ).replace("    elif args[0] == 'run':", r#"    elif args[0] == 'run':
+        if '-it' in args:
+            data['dev_args'] = args
+            import csv
+            for i, a in enumerate(args):
+                if a != '--mount': continue
+                mount = dict(p.split('=', 1) for p in next(csv.reader([args[i+1]])) if '=' in p)
+                if mount.get('target') == '/home/pi/.agents/skills/pithos-browser':
+                    assert 'readonly' in args[i+1]
+                    metadata = os.path.join(mount['source'], 'viewer.json')
+                    data['viewer_metadata'] = json.load(open(metadata))
+                    data['viewer_metadata_mode'] = os.stat(metadata).st_mode & 0o777
+                    assert os.path.isfile(os.path.join(mount['source'], 'viewer.mjs'))
+"#);
         fs::write(bin.join("docker"), script).unwrap();
         fs::set_permissions(bin.join("docker"), fs::Permissions::from_mode(0o755)).unwrap();
         let f = Self { root, project, bin };
@@ -86,6 +99,65 @@ impl Fixture {
             .env("PATH", &self.bin)
             .env("BROWSER_FAKE_STATE", self.root.path().join("state.json"));
         c
+    }
+}
+
+#[test]
+fn enabled_pi_retrieval_has_metadata_and_hint_before_start_even_with_tmux_and_opaque_tail() {
+    for mode in ["interactive", "headless"] {
+        for tmux in [false, true] {
+            let f = Fixture::new();
+            let flag = format!("--browser={mode}");
+            let mut command = f.command();
+            command.args([&flag, "--no-build"]);
+            if tmux {
+                command.arg("--tmux");
+            }
+            let tail = [
+                "-ne",
+                "--no-skills",
+                "--",
+                "--extension",
+                "prompt-not-a-path",
+            ];
+            command.arg("--pi").args(tail);
+            let output = command.assert().success().get_output().clone();
+            let state = f.state();
+            let dev = state["dev_args"].as_array().unwrap();
+            let image = dev.iter().position(|a| a == &json!(id('d'))).unwrap();
+            let mut expected: Vec<Value> = Vec::new();
+            if tmux {
+                expected.extend(["tmux", "new-session", "-A", "-s", "pithos"].map(|s| json!(s)));
+            }
+            expected.extend(pithos::dockerfile::PI_LAUNCH_ARGV.map(|s| json!(s)));
+            expected.extend([
+                json!("--extension"),
+                json!(pithos::browser::viewer::LEGACY_EXTENSION),
+            ]);
+            expected.extend(tail.map(|s| json!(s)));
+            assert_eq!(&dev[image + 1..], expected);
+            let metadata = &state["viewer_metadata"];
+            let expected = if mode == "interactive" {
+                let path = metadata["passwordPath"].as_str().unwrap();
+                assert!(
+                    std::path::Path::new(path)
+                        .starts_with(f.root.path().join(".pithos-browser-runs"))
+                );
+                json!({"version":1, "mode":mode, "url":"http://127.0.0.1:49152/", "passwordPath":path})
+            } else {
+                json!({"version":1, "mode":mode})
+            };
+            assert_eq!(metadata, &expected);
+            assert_eq!(state["viewer_metadata_mode"], 0o600);
+            assert!(String::from_utf8_lossy(&output.stderr).contains("use /browser"));
+            assert!(state["resources"].as_object().unwrap().is_empty());
+            assert_eq!(
+                fs::read_dir(f.root.path().join(".pithos-browser-runs"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
     }
 }
 
@@ -117,6 +189,11 @@ fn selected_legacy_run_starts_the_requested_mode_with_client_image() {
             "command suffix"
         );
         let stderr = String::from_utf8_lossy(&result.get_output().stderr);
+        assert!(
+            !stderr.contains("use /browser"),
+            "no injected extension for explicit commands"
+        );
+        assert!(!dev.contains(&json!(pithos::browser::viewer::LEGACY_EXTENSION)));
         assert_eq!(
             stderr.contains("viewer: http://127.0.0.1:"),
             mode == BrowserMode::Interactive

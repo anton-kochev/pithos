@@ -31,6 +31,32 @@ If a gate fails, stop and fix the runtime/compatibility issue. Do not weaken the
 sandbox, publish extra ports, switch to host networking, or proceed with public
 websites before safety gates pass.
 
+## Recall viewer details in Pi
+
+1. In an interactive browser-enabled Pi run, scroll the startup message out of
+   view and type `/browser`. Require the same loopback URL and host password-file
+   path, plus the reminder not to share the password. Read the file on the host
+   and log in manually; do not paste the password into Pi. Repeating the command
+   must not start a model turn or add a conversation message.
+2. Exercise `/reload`, `/new`, `/resume` and `/fork` within the same Pithos run,
+   then repeat `/browser`: details must still refer to the current invocation,
+   not the resumed transcript. Check regular/fullscreen modes, narrow windows and
+   long host paths. Repeat with the minimum supported Pi and default image version.
+3. Repeat with `--tmux`, `--broker=status` and `--broker=workspace`. Explicit
+   `--no-extensions`/`-ne` disables discovery, not this explicitly loaded command;
+   `--no-skills` must not prevent `/browser`. Browser-disabled launches and
+   explicit shell commands must not automatically load the viewer extension.
+4. In a headless Pi run, `/browser` must explain that there is no viewer and
+   suggest an interactive relaunch. It must not invent a URL or password path.
+5. Run two invocations concurrently and recall each viewer: distinct URLs and
+   paths, with neither borrowing the other's state. Exit one, then confirm the
+   other's `/browser` still works. A later launch must report its own details;
+   shutdown must remove the old per-run metadata along with existing owned state.
+
+These UI checks do not grant exclusive browser control: pause Pi's browser actions
+before intervening, as in the handoff below. Do not record passwords or RPC
+capabilities in test logs or screenshots.
+
 ## Pi → viewer → Pi local fixture
 
 In the source checkout's dev container, ask Pi (with ordinary bash permission) to

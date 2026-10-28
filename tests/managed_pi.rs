@@ -111,9 +111,11 @@ elif a[:2]==['network','ls']:
 elif a[:2]==['network','inspect'] and a[-1]=='e'*64:
     n=json.loads((root/'network.json').read_text())
     c=json.loads((root/'container.json').read_text()) if (root/'container.json').exists() else None
-    emit(dict(n,containers={c['id']:{}} if c and c['host']['NetworkMode']==n['name'] else {}))
+    attached={c['id']:{}} if c and c['host']['NetworkMode']==n['name'] else {}
+    if (root/'browser-container.json').exists(): attached['b'*64]={}
+    emit(dict(n,containers=attached))
 elif a[:2]==['network','rm']:
-    assert a[-1]=='e'*64 and not (root/'container.json').exists(), 'network in use'
+    assert a[-1]=='e'*64 and not (root/'container.json').exists() and not (root/'browser-container.json').exists(), 'network in use'
     (root/'network.json').unlink()
 elif a[:2]==['image','ls'] and mode('host-coordinator'):
     assert '--no-trunc' in a and opt('--filter')=='label=io.pithos.broker.identity-fingerprint='+__FINGERPRINT__
@@ -181,9 +183,9 @@ elif a[0]=='run':
             assert '--network=bridge' in a and '--network' not in a
         assert opt('--workdir')==str(root/'work,\"space')
         # A workspace-grant coordinator also mounts the broker's Pi extension.
-        extension=mode('host-coordinator')
+        extension=mode('host-coordinator') or mode('viewer-workspace')
         # Its config declares pi.extensions: the entrypoint's manifest is a private read-only copy.
-        assert len(mounts)==3+(2 if mode('browser') else 0)+(2 if extension else 0)
+        assert len(mounts)==3+(2 if mode('browser') or mode('viewer-runtime') else 0)+(2 if extension else 0)
         by={m['Destination']:m for m in mounts}
         if extension:
             assert by['/run/pithos-broker/extension.mjs']['Source']==str(root/'credential/pithos-broker.mjs')
@@ -195,6 +197,23 @@ elif a[0]=='run':
             assert by['/run/pithos-browser/client.json']['Source']==str(root/'browser-run/client.json')
             assert by['/run/pithos-browser/skills']['Source']==str(root/'browser-run/skills')
             assert not by['/run/pithos-browser/client.json']['RW'] and not by['/run/pithos-browser/skills']['RW']
+        if mode('viewer-runtime'):
+            skills=root/'credential/browser/skills'
+            assert by['/run/pithos-browser/skills']['Source']==str(skills)
+            assert by['/run/pithos-browser/client.json']['Source']==str(skills.parent/'client.json')
+            assert not by['/run/pithos-browser/skills']['RW'] and not by['/run/pithos-browser/client.json']['RW']
+            assert (skills/'viewer.mjs').is_file() and (skills/'browser-automation/SKILL.md').is_file()
+            assert not (skills/'server.json').exists() and not (skills/'viewer-password').exists()
+            metadata=json.loads((skills/'viewer.json').read_text())
+            expected={'version':1,'mode':'headless'} if mode('viewer-headless') else {
+                'version':1,'mode':'interactive','url':'http://127.0.0.1:'+(root/'viewer-port').read_text()+'/',
+                'passwordPath':str(skills.parent/'viewer-password')}
+            assert metadata==expected, metadata
+            server=json.loads((skills.parent/'server.json').read_text())
+            assert server['capability'] not in json.dumps(metadata)
+            assert server.get('password','no-password-canary') not in json.dumps(metadata)
+            assert all(m['Source'] not in [str(skills.parent/'server.json'),str(skills.parent/'viewer-password')] for m in mounts)
+            (root/'metadata-observed.json').write_text(json.dumps(metadata))
         ws=str(root/'work,\"space')
         assert by[ws]['Source']==ws and by[ws]['RW'] and '/workspace' not in by
         assert by['/home/pi']['Name']==home_volume() and by['/home/pi']['RW']
@@ -202,7 +221,7 @@ elif a[0]=='run':
         assert not by['/run/pithos-broker/client.json']['RW']
         # Docker's own flags only: everything after the image belongs to Pi.
         # The only env source Pi may get is one private broker file.
-        runtime=any(p.name.startswith(('connected-runtime','host-coordinator')) for p in root.iterdir())
+        runtime=any(p.name.startswith(('connected-runtime','host-coordinator','viewer-runtime')) for p in root.iterdir())
         allowed=['--env-file'] if mode('pg-env') or runtime else []
         assert not any(v in a[:a.index(__IMAGE__)] for v in ['--privileged','--env','-e','--env-file','--volume','-v'] if v not in allowed)
         if runtime:
@@ -224,7 +243,11 @@ elif a[0]=='run':
         assert all(i<a.index(__IMAGE__) for i in extra_host_indices)
         assert not any(k.startswith('DOCKER_') or k.startswith('PITHOS_') for k in os.environ)
         if mode('host-coordinator'): assert (set(os.environ) - set(('__CF_USER_TEXT_ENCODING','SDKROOT','CPATH','LIBRARY_PATH','MANPATH'))).issubset({'LC_CTYPE'})
-        assert cmd==(__PI_LAUNCH_ARGV__+['--extension','/run/pithos-broker/extension.mjs'] if mode('host-coordinator') else ['pi','private-host-prompt'] if mode('explicit') else ['pi','--skill','/run/pithos-browser/skills/browser-automation'] if mode('browser') else ['pi','--session-dir','/home/pi/.pi/agent/sessions'])
+        expected_cmd=(__PI_LAUNCH_ARGV__+['--extension','/run/pithos-broker/extension.mjs'] if mode('host-coordinator') else ['pi','private-host-prompt'] if mode('explicit') else ['pi','--skill','/run/pithos-browser/skills/browser-automation'] if mode('browser') else ['pi','--session-dir','/home/pi/.pi/agent/sessions'])
+        if mode('viewer-runtime') and not mode('viewer-empty-command'): expected_cmd=__PI_LAUNCH_ARGV__
+        if mode('viewer-workspace'): expected_cmd+=['--extension','/run/pithos-broker/extension.mjs']
+        if mode('viewer-runtime'): expected_cmd+=['--extension','/run/pithos-browser/skills/viewer.mjs']
+        assert cmd==expected_cmd, cmd
         credential=json.loads((root/'credential/broker-client.json').read_text())
         token=credential['token']; endpoint=credential['endpoint']
         environment=json.dumps(dict(os.environ))
@@ -282,6 +305,8 @@ elif a[:2]==['container','rm']:
     c=json.loads((root/'container.json').read_text()); assert a==['container','rm','--force',c['id']]
     r=json.loads((root/'run/resources.json').read_text())['resources'][-1]
     assert r['local_reaped'] and r['observed_id']==c['id']
+    if mode('viewer-runtime') and c['config']['Tty']:
+        assert (root/'credential/browser/skills/viewer.json').exists(), 'files must outlive Pi'
     (root/'container.json').unlink()
 else: sys.exit(99)
 "#
@@ -383,6 +408,10 @@ fn pi_fixture() {
         return;
     };
     let f = Fixture::new();
+    if mode.starts_with("viewer-runtime") {
+        viewer_runtime_fixture(&f, &mode);
+        return;
+    }
     if mode.starts_with("host-coordinator") {
         f.mode("host-coordinator");
         let browser = if mode.contains("interactive") {
@@ -1811,5 +1840,193 @@ fn selected_host_coordinator_propagates_image_mode_files_and_fatal_cleanup() {
         for grant in ["status", "workspace"] {
             run_fixture(&format!("host-coordinator-{mode}-{grant}"));
         }
+    }
+}
+
+fn viewer_runtime_fixture(f: &Fixture, mode: &str) {
+    use pithos::{
+        broker::runtime::{AdmissionStep, RuntimeBrowser, RuntimeError},
+        browser::BrowserMode,
+    };
+
+    f.mode("viewer-runtime");
+    f.mode("network");
+    let headless = mode.contains("headless");
+    let workspace = mode.contains("workspace");
+    let empty_command = mode.contains("empty-command") || mode.contains("empty-image-command");
+    let command_failure = mode.contains("empty-image-command");
+    if command_failure {
+        f.mode("empty-cmd");
+    }
+    if empty_command {
+        f.mode("viewer-empty-command");
+    }
+    if headless {
+        f.mode("viewer-headless");
+    }
+    if workspace {
+        f.mode("viewer-workspace");
+    }
+    if mode.contains("write-file") {
+        f.mode("viewer-write-file");
+    }
+    if mode.contains("write-symlink") {
+        f.mode("viewer-write-symlink");
+    }
+    fs::write(f.root.path().join("viewer-port"), "49153").unwrap();
+    fs::write(f.root.path().join("metadata-canary"), "must not overwrite").unwrap();
+    let executable = f.root.path().join("docker");
+    let extra = include_str!("fixtures/broker-viewer-docker.py")
+        .replace(
+            "__USER__",
+            &serde_json::to_string(&identity().docker_user()).unwrap(),
+        )
+        .replace(
+            "__BROWSER_HASH__",
+            &serde_json::to_string(&pithos::browser::assets::fingerprint_with_identity(
+                identity(),
+            ))
+            .unwrap(),
+        );
+    let script = fs::read_to_string(&executable).unwrap()
+        .replace("def emit(v):", "import traceback\nsys.excepthook=lambda *e: (root/'docker-error').write_text(''.join(traceback.format_exception(*e)))\ndef emit(v):")
+        .replace("elif a[:2]==['image','inspect']:", &format!("{extra}elif a[:2]==['image','inspect']:"));
+    fs::write(&executable, script).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut runtime = BrokerRuntime::begin(
+        if workspace {
+            HostGrant::workspace()
+        } else {
+            HostGrant::managed_pi_run()
+        },
+        BrokerEndpoint::offline(listener).unwrap(),
+        RuntimeSetup {
+            executable,
+            socket: f.root.path().join("socket"),
+            config: f.root.path().join("config"),
+            run_directory: f.root.path().join("credential"),
+            manifest_directory: f.root.path().join("run"),
+            lease_root: f.root.path().join("leases"),
+            run_id: "viewer-run".into(),
+            volume: VolumeName::new("pi-home").unwrap(),
+            image: image(),
+            identity: identity(),
+            workspace: f.workspace(),
+            command: if empty_command {
+                Vec::new()
+            } else {
+                PI_LAUNCH_ARGV.iter().map(|arg| (*arg).into()).collect()
+            },
+            interactive_limits: InteractiveLimits::default(),
+            browser: Some(RuntimeBrowser {
+                mode: if headless {
+                    BrowserMode::Headless
+                } else {
+                    BrowserMode::Interactive
+                },
+                image: ImmutableImageId::new(&format!("sha256:{}", "c".repeat(64))).unwrap(),
+            }),
+            stage_root: None,
+            extensions: workspace.then(|| "x\tnpm:1.0\n".into()),
+            postgres: None,
+            env: None,
+        },
+    )
+    .unwrap();
+    let result = runtime.admit_and_start_pi();
+    if let Ok(error) = fs::read_to_string(f.root.path().join("docker-error")) {
+        panic!("fake Docker failed: {error}");
+    }
+    let write_failure = mode.contains("write-");
+    if write_failure || command_failure {
+        let step = if command_failure {
+            AdmissionStep::Pi
+        } else {
+            AdmissionStep::BrowserFiles
+        };
+        assert!(
+            matches!(&result, Err(RuntimeError::Admission(failure)) if failure.step == step),
+            "{result:?}"
+        );
+        assert!(!f.root.path().join("pi-ran").exists());
+        let cleanup = runtime.run_until_terminal(Duration::from_millis(2));
+        assert_eq!(
+            cleanup,
+            RuntimePoll::Complete,
+            "{}; {}",
+            fs::read_to_string(f.root.path().join("docker-error")).unwrap_or_default(),
+            f.snapshot()
+        );
+    } else {
+        result.unwrap();
+        assert_eq!(runtime.browser_viewer().is_none(), headless);
+        let cleanup = runtime.run_until_terminal(Duration::from_millis(2));
+        let error = fs::read_to_string(f.root.path().join("docker-error")).unwrap_or_default();
+        assert!(error.is_empty(), "fake Docker contract: {error}");
+        assert_eq!(cleanup, RuntimePoll::Complete);
+        assert_eq!(runtime.terminal_exit_code(), Some(0));
+        assert!(f.root.path().join("pi-ran").exists());
+        let metadata: Value = serde_json::from_slice(
+            &fs::read(f.root.path().join("metadata-observed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            metadata["mode"],
+            if headless { "headless" } else { "interactive" }
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(f.root.path().join("metadata-canary")).unwrap(),
+        "must not overwrite"
+    );
+    assert!(!f.root.path().join("credential/browser").exists());
+    assert!(!f.root.path().join("credential/broker-client.json").exists());
+    assert!(!f.root.path().join("credential/pithos-broker.mjs").exists());
+    assert!(!f.root.path().join("browser-container.json").exists());
+    assert!(!f.root.path().join("network.json").exists());
+    drop(runtime);
+    let manifest = ResourceManifest::open(&f.root.path().join("run"), "viewer-run").unwrap();
+    assert!(manifest.is_settled());
+    HomeLease::broker(
+        &f.root.path().join("leases"),
+        &VolumeName::new("pi-home").unwrap(),
+    )
+    .unwrap()
+    .finish()
+    .unwrap();
+}
+
+#[test]
+fn broker_browser_metadata_write_failure_uses_normal_cleanup() {
+    run_fixture("viewer-runtime-headless-write-file");
+    run_fixture("viewer-runtime-interactive-write-symlink");
+}
+
+#[test]
+fn broker_browser_empty_image_command_is_rejected_before_pi_start() {
+    run_fixture("viewer-runtime-headless-status-empty-image-command");
+}
+
+#[test]
+fn broker_browser_empty_command_keeps_the_immutable_image_default() {
+    for mode in [
+        "viewer-runtime-headless-status-empty-command",
+        "viewer-runtime-interactive-status-empty-command",
+        "viewer-runtime-headless-workspace-empty-command",
+        "viewer-runtime-interactive-workspace-empty-command",
+    ] {
+        run_fixture(mode);
+    }
+}
+
+#[test]
+fn broker_browser_viewer_is_ready_before_pi_start() {
+    for mode in [
+        "viewer-runtime-headless-status",
+        "viewer-runtime-interactive-status",
+        "viewer-runtime-headless-workspace",
+        "viewer-runtime-interactive-workspace",
+    ] {
+        run_fixture(mode);
     }
 }

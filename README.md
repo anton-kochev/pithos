@@ -162,6 +162,8 @@ Without a browser flag, runs and builds are browser-disabled. First use prepares
 an isolated Chromium sidecar image and optional client layer; matching caches are
 reused, and interactive/headless modes share those images. An interactive run
 reports an authenticated loopback viewer; headless starts no display or viewer.
+Inside Pi, `/browser` re-displays the current run's viewer URL and host
+password-file path without reading or revealing the password.
 `--no-build` never fetches missing browser assets. No pithos-kit package or
 second-terminal helper is required. `pithos info` assesses the browser-disabled
 image, not live browser availability or a saved mode.

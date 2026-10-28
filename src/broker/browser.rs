@@ -1,7 +1,7 @@
 //! Private per-run files for the Chromium sidecar and Pi's browser client.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use crate::browser::BrowserMode;
+use crate::browser::{BrowserMode, viewer};
 use std::{
     fs,
     io::{self, Write},
@@ -99,6 +99,10 @@ impl BrowserFiles {
         private_file(
             &self.skills().join("browser-automation/SKILL.md"),
             bundled("skills/browser-automation/SKILL.md")?,
+        )?;
+        private_file(
+            &self.skills().join("viewer.mjs"),
+            bundled(viewer::EXTENSION_ASSET)?,
         )
     }
 
@@ -117,6 +121,20 @@ impl BrowserFiles {
     /// The interactive viewer password, if any.
     pub fn password(&self) -> Option<PathBuf> {
         self.password.then(|| self.root.join("viewer-password"))
+    }
+
+    /// Publish display metadata after viewer resolution, before Pi starts.
+    pub fn write_viewer_metadata(&self, url: Option<&str>) -> io::Result<()> {
+        // A missing interactive URL is a startup error, not a headless run.
+        if self.password != url.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "browser mode and resolved viewer URL do not match",
+            ));
+        }
+        let password = self.password();
+        let bytes = viewer::metadata(url.zip(password.as_deref()))?;
+        private_file(&self.skills().join(viewer::METADATA_FILE), &bytes)
     }
 
     /// Remove every file this owner wrote; absent is success.

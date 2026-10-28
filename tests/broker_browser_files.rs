@@ -106,3 +106,106 @@ fn existing_state_is_never_adopted() {
     assert!(BrowserFiles::create(shared.path(), BrowserMode::Headless).is_err());
     assert_eq!(fs::read_dir(shared.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn viewer_extension_is_bundled_beside_the_browser_skill() {
+    for mode in [BrowserMode::Headless, BrowserMode::Interactive] {
+        let run = run_dir();
+        let mut files = BrowserFiles::create(run.path(), mode).unwrap();
+        assert_eq!(
+            fs::read(files.skills().join("viewer.mjs")).unwrap(),
+            bundled("skills/viewer.mjs")
+        );
+        assert!(!files.skills().join("viewer.json").exists());
+        private_tree(&files.skills());
+        files.cleanup().unwrap();
+        assert!(!files.skills().exists());
+    }
+}
+
+#[test]
+fn viewer_metadata_contains_only_current_run_display_fields() {
+    for mode in [BrowserMode::Headless, BrowserMode::Interactive] {
+        let run = run_dir();
+        let mut files = BrowserFiles::create(run.path(), mode).unwrap();
+        let url = (mode == BrowserMode::Interactive).then_some("http://127.0.0.1:49123/");
+        let password = files.password();
+        // Metadata needs only the host path, not access to any credential file.
+        fs::remove_file(files.server()).unwrap();
+        fs::remove_file(files.client()).unwrap();
+        if let Some(path) = &password {
+            fs::remove_file(path).unwrap();
+        }
+        files.write_viewer_metadata(url).unwrap();
+        let metadata = files.skills().join("viewer.json");
+        let value: Value = serde_json::from_slice(&fs::read(&metadata).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            match url {
+                Some(url) => serde_json::json!({"version":1, "mode":"interactive", "url":url,
+                "passwordPath": password.unwrap()}),
+                None => serde_json::json!({"version":1, "mode":"headless"}),
+            }
+        );
+        private_tree(&files.skills());
+        files.cleanup().unwrap();
+        assert!(!metadata.exists());
+    }
+}
+
+#[test]
+fn viewer_metadata_rejects_mode_url_mismatch_without_publishing() {
+    for (mode, url) in [
+        (BrowserMode::Interactive, None),
+        (BrowserMode::Headless, Some("http://127.0.0.1:49123/")),
+    ] {
+        let run = run_dir();
+        let mut files = BrowserFiles::create(run.path(), mode).unwrap();
+        assert_eq!(
+            files.write_viewer_metadata(url).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert!(!files.skills().join("viewer.json").exists());
+        files.cleanup().unwrap();
+    }
+}
+
+#[test]
+fn simultaneous_viewer_metadata_stays_with_its_owner_until_cleanup() {
+    let first = run_dir();
+    let second = run_dir();
+    let create = |root: &Path, url: &str| {
+        let files = BrowserFiles::create(root, BrowserMode::Interactive).unwrap();
+        files.write_viewer_metadata(Some(url)).unwrap();
+        files
+    };
+    let (mut a, mut b) = std::thread::scope(|scope| {
+        let a = scope.spawn(|| create(first.path(), "http://127.0.0.1:49153/"));
+        let b = scope.spawn(|| create(second.path(), "http://127.0.0.1:49154/"));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    let metadata = |files: &BrowserFiles| -> Value {
+        serde_json::from_slice(&fs::read(files.skills().join("viewer.json")).unwrap()).unwrap()
+    };
+    assert_eq!(metadata(&a)["url"], "http://127.0.0.1:49153/");
+    assert_eq!(metadata(&b)["url"], "http://127.0.0.1:49154/");
+    assert_eq!(
+        metadata(&a)["passwordPath"],
+        a.password().unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        metadata(&b)["passwordPath"],
+        b.password().unwrap().to_str().unwrap()
+    );
+    assert_ne!(metadata(&a)["passwordPath"], metadata(&b)["passwordPath"]);
+    assert!(BrowserFiles::create(first.path(), BrowserMode::Interactive).is_err());
+    assert!(
+        a.write_viewer_metadata(Some("http://127.0.0.1:49999/"))
+            .is_err()
+    );
+    assert_eq!(metadata(&a)["url"], "http://127.0.0.1:49153/");
+    a.cleanup().unwrap();
+    assert_eq!(metadata(&b)["url"], "http://127.0.0.1:49154/");
+    b.cleanup().unwrap();
+    assert!(!a.skills().exists() && !b.skills().exists());
+}

@@ -477,6 +477,43 @@ impl CleanupBudget {
 }
 
 impl ManagedDocker {
+    /// Resolve the immutable image default before adding host-owned Pi options.
+    pub(crate) fn resolve_pi_command(
+        &mut self,
+        image: &ImmutableImageId,
+        command: &[String],
+    ) -> Result<Vec<String>, ProbeError> {
+        let program = if command.is_empty() {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct ImageCommand {
+                id: String,
+                cmd: Vec<String>,
+            }
+            let bytes = self.query(&["image", "inspect", "--format", IMAGE_CMD, image.as_str()])?;
+            let config: ImageCommand =
+                serde_json::from_slice(&bytes).map_err(|_| PreflightError::InvalidResponse)?;
+            if config.id != image.as_str() {
+                return Err(PreflightError::Changed.into());
+            }
+            config.cmd
+        } else {
+            command.to_vec()
+        };
+        if program.is_empty()
+            || program.len() > 256
+            || program[0].is_empty()
+            || program.iter().any(|s| s.contains('\0'))
+            || program
+                .iter()
+                .try_fold(0usize, |n, s| n.checked_add(s.len()))
+                .is_none_or(|n| n > 65536)
+        {
+            return Err(PreflightError::InvalidInput.into());
+        }
+        Ok(program)
+    }
+
     /// Start a fixed managed Pi container through the caller's interactive owner.
     /// Requires successful matching probes in this manifest, and an existing
     /// unused home. Caller MUST hold the exclusive HomeLease through cleanup.
@@ -607,40 +644,7 @@ impl ManagedDocker {
         let extensions_list_source = private_source(inputs.extensions_list)?;
         let env_source = private_source(inputs.env_file)?;
         self.probe_image(inputs.image, inputs.identity)?;
-        let program = if inputs.command.is_empty() {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct ImageCommand {
-                id: String,
-                cmd: Vec<String>,
-            }
-            let bytes = self.query(&[
-                "image",
-                "inspect",
-                "--format",
-                IMAGE_CMD,
-                inputs.image.as_str(),
-            ])?;
-            let config: ImageCommand =
-                serde_json::from_slice(&bytes).map_err(|_| PreflightError::InvalidResponse)?;
-            if config.id != inputs.image.as_str() {
-                return Err(PreflightError::Changed.into());
-            }
-            config.cmd
-        } else {
-            inputs.command.to_vec()
-        };
-        if program.is_empty()
-            || program.len() > 256
-            || program[0].is_empty()
-            || program.iter().any(|s| s.contains('\0'))
-            || program
-                .iter()
-                .try_fold(0usize, |n, s| n.checked_add(s.len()))
-                .is_none_or(|n| n > 65536)
-        {
-            return Err(PreflightError::InvalidInput.into());
-        }
+        let program = self.resolve_pi_command(inputs.image, inputs.command)?;
         let pi = PiSpec {
             resource: spec(
                 inputs.image,

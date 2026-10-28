@@ -68,6 +68,10 @@ pub const FILES: &[(&str, &[u8])] = &[
         include_bytes!("../../browser/runtime/PROVENANCE.md"),
     ),
     (
+        "skills/viewer.mjs",
+        include_bytes!("../../browser/skills/viewer.mjs"),
+    ),
+    (
         "skills/browser-automation/SKILL.md",
         include_bytes!("../../browser/skills/browser-automation/SKILL.md"),
     ),

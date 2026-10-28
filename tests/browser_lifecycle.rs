@@ -31,6 +31,35 @@ fn lifecycle_child() {
     let run = result.unwrap();
     run.prepare_skill_mount("dev-image", "project").unwrap();
     assert_eq!(run.viewer_url().is_some(), mode == BrowserMode::Interactive);
+    let password = run.password_path();
+    let root = password.parent().unwrap();
+    let skills = root.join("browser/skills");
+    assert_eq!(
+        fs::read(skills.join("viewer.mjs")).unwrap(),
+        include_bytes!("../browser/skills/viewer.mjs")
+    );
+    let metadata_path = skills.join("viewer.json");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    let expected = match run.viewer_url() {
+        Some(url) => {
+            serde_json::json!({"version": 1, "mode": "interactive", "url": url, "passwordPath": password})
+        }
+        None => serde_json::json!({"version": 1, "mode": "headless"}),
+    };
+    assert_eq!(metadata, expected);
+    assert_eq!(
+        fs::metadata(&metadata_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let server: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("server.json")).unwrap()).unwrap();
+    for secret in [server["capability"].as_str(), server["password"].as_str()]
+        .into_iter()
+        .flatten()
+    {
+        assert!(!metadata.to_string().contains(secret));
+    }
     let mut args = vec![
         "run".into(),
         "--name".into(),

@@ -664,9 +664,17 @@ impl BrokerRuntime {
                             .map_err(failed(AdmissionStep::BrowserViewer))?,
                     );
                 }
+                files
+                    .write_viewer_metadata(self.viewer.as_deref())
+                    .map_err(io_failed(AdmissionStep::BrowserFiles))?;
             }
             // The workspace grant gives Pi the broker's app tools.
             let mut command = self.setup.command.clone();
+            if self.browser_files.is_some() && command.is_empty() {
+                command = docker
+                    .resolve_pi_command(&self.setup.image, &command)
+                    .map_err(failed(AdmissionStep::Pi))?;
+            }
             if self.grant.permits(Action::Build) {
                 self.extension_cleaned = false;
                 self.extension = Some(
@@ -676,6 +684,12 @@ impl BrokerRuntime {
                 command.extend([
                     "--extension".to_owned(),
                     crate::docker::PI_EXTENSION.to_owned(),
+                ]);
+            }
+            if self.browser_files.is_some() {
+                command.extend([
+                    "--extension".to_owned(),
+                    crate::browser::viewer::BROKER_EXTENSION.to_owned(),
                 ]);
             }
             if let Some(manifest) = &self.setup.extensions {

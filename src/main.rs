@@ -463,6 +463,13 @@ fn run_broker(grant: HostGrant, browser: BrowserSelection, style: Style) -> Exit
             ),
         );
     }
+    if browser.mode().is_some() {
+        narrate(
+            style,
+            "» browser:",
+            "in Pi, use /browser to show this run's viewer information again",
+        );
+    }
     let settled = coordinator.run_until_terminal(Duration::from_millis(20));
     let _ = coordinator.close_signals();
     match coordinator.terminal_exit_code() {
@@ -753,8 +760,18 @@ fn pi_argv(args: &[String]) -> Vec<String> {
 }
 
 /// Pick the argv `docker run` appends after the image tag.
-fn effective_command(target: &RunTarget) -> Vec<String> {
+fn effective_command(target: &RunTarget, browser: BrowserSelection) -> Vec<String> {
     match target {
+        RunTarget::Pi(args) if browser.mode().is_some() => {
+            // Explicit extension options precede the opaque tail: a user's `--`
+            // must not turn our option into prompt text. Materialize even bare Pi.
+            let mut tail = vec![
+                "--extension".to_owned(),
+                pithos::browser::viewer::LEGACY_EXTENSION.to_owned(),
+            ];
+            tail.extend_from_slice(args);
+            pi_argv(&tail)
+        }
         RunTarget::Pi(args) => pi_argv(args),
         RunTarget::Command(cmd) => cmd.clone(),
     }
@@ -1272,6 +1289,13 @@ fn run_run(
                         "true headless Chromium ready; no viewer",
                     );
                 }
+                if matches!(target, RunTarget::Pi(_)) {
+                    narrate(
+                        style,
+                        "» browser:",
+                        "in Pi, use /browser to show this run's viewer information again",
+                    );
+                }
                 Some(run)
             }
             Err(e) => {
@@ -1317,7 +1341,7 @@ fn run_run(
         .as_ref()
         .map(pithos::clipboard_bridge::ClipboardBridge::container_url);
 
-    let command = effective_command(target);
+    let command = effective_command(target, inputs.browser);
 
     // When --tmux is set, run the effective command inside a named tmux
     // session so a second terminal can attach and co-drive it. The wrapper
@@ -2532,6 +2556,41 @@ mod tests {
     }
 
     #[test]
+    fn browser_pi_command_loads_extension_before_opaque_tail_and_tmux() {
+        for mode in [BrowserMode::Interactive, BrowserMode::Headless] {
+            for tail in [
+                args(&[]),
+                args(&["--continue", "--no-extensions", "--no-skills"]),
+                args(&["-ne", "--", "--extension", "this is prompt text"]),
+            ] {
+                let target = RunTarget::Pi(tail.clone());
+                let command = effective_command(&target, BrowserSelection::Enabled(mode));
+                let mut expected: Vec<String> = pithos::dockerfile::PI_LAUNCH_ARGV
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                expected.extend(args(&[
+                    "--extension",
+                    pithos::browser::viewer::LEGACY_EXTENSION,
+                ]));
+                expected.extend(tail);
+                assert_eq!(command, expected);
+                let wrapped = pithos::docker::tmux_wrap(&command);
+                assert_eq!(&wrapped[5..], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn browser_does_not_change_explicit_container_commands() {
+        let target = RunTarget::Command(args(&["bash", "-lc", "echo hi"]));
+        assert_eq!(
+            effective_command(&target, BrowserSelection::Enabled(BrowserMode::Interactive)),
+            args(&["bash", "-lc", "echo hi"])
+        );
+    }
+
+    #[test]
     fn pi_argv_empty_falls_through_to_image_cmd() {
         assert!(pi_argv(&[]).is_empty());
     }
@@ -2555,7 +2614,7 @@ mod tests {
     fn effective_command_materializes_pi_target() {
         let target = RunTarget::Pi(vec!["--continue".to_string()]);
 
-        let command = effective_command(&target);
+        let command = effective_command(&target, BrowserSelection::Disabled);
 
         assert_eq!(command.last().unwrap(), "--continue");
         assert_eq!(
@@ -2573,7 +2632,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            effective_command(&target),
+            effective_command(&target, BrowserSelection::Disabled),
             vec!["bash".to_string(), "-lc".to_string(), "echo hi".to_string(),]
         );
     }
@@ -2581,7 +2640,7 @@ mod tests {
     #[test]
     fn pi_arguments_survive_tmux_wrapper() {
         let target = RunTarget::Pi(vec!["--fork".to_string(), "01a0335e".to_string()]);
-        let command = effective_command(&target);
+        let command = effective_command(&target, BrowserSelection::Disabled);
 
         let wrapped = pithos::docker::tmux_wrap(&command);
 
