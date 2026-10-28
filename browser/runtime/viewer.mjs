@@ -6,9 +6,90 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer, createWebSocketStream } from 'ws';
 
-const page = `<!doctype html><meta charset="utf-8"><title>Pithos browser</title><div id="screen" style="height:80vh"></div><p>Cmd+V transfers text to the remote clipboard and requests Ctrl+V at remote focus. Legacy clipboard supports Latin-1 only; other characters may become ?. Unicode requires extended clipboard support.</p><label>Paste text below <textarea id="paste-text" autocomplete="off" spellcheck="false"></textarea></label><button id="send-text" disabled>Send text</button><p id="paste-status" role="status" aria-live="polite"></p><script type="module" src="/viewer.js"></script>`;
+const page = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Pithos browser</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #090d14; color: #e7edf7; font-synthesis: none; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(ellipse at 50% -20%, #1c2a40 0, #0c1320 45%, #090d14 78%); }
+    .workspace { width: min(100% - 48px, 1440px); margin: 0 auto; padding: 26px 0 36px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
+    .brand { display: flex; align-items: center; gap: 13px; }
+    .brand-mark { display: grid; place-items: center; width: 42px; height: 42px; border: 1px solid #34445d; border-radius: 13px; color: #9bc4ff; background: linear-gradient(145deg, #1b2a40, #111a28); font-size: 20px; font-weight: 750; }
+    h1 { margin: 0; font-size: 19px; letter-spacing: -.025em; }
+    .eyebrow { margin: 4px 0 0; color: #91a0b5; font-size: 12px; }
+    .connection { display: inline-flex; align-items: center; gap: 9px; padding: 9px 12px; border: 1px solid #29384b; border-radius: 999px; color: #c5d2e3; background: #111a27; font-size: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #f0b85b; box-shadow: 0 0 12px #f0b85b66; }
+    main { display: grid; gap: 16px; }
+    .display-card, .clipboard-card { overflow: hidden; border: 1px solid #263449; border-radius: 17px; background: #101722; box-shadow: 0 18px 55px #0005; }
+    .card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px; padding: 0 17px; border-bottom: 1px solid #243145; }
+    .card-heading h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: .01em; }
+    .hint { color: #8292a8; font-size: 11px; }
+    #screen { height: min(900px, calc(100vh - 230px)); min-height: 390px; display: grid; place-items: center; overflow: hidden; background: #0a0f18; }
+    #screen canvas { display: block; max-width: 100%; }
+    .clipboard-card { padding: 17px; }
+    .clipboard-top { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 12px; }
+    .clipboard-top h2 { margin: 0; font-size: 14px; }
+    .clipboard-top p { margin: 0; color: #8d9bb0; font-size: 12px; }
+    .clipboard-form { display: flex; align-items: stretch; gap: 10px; }
+    label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    textarea { flex: 1; min-width: 0; min-height: 46px; max-height: 160px; resize: vertical; padding: 12px 13px; border: 1px solid #34445c; border-radius: 10px; outline: none; color: #e7edf7; background: #0a111c; font: inherit; font-size: 13px; }
+    textarea::placeholder { color: #74849a; }
+    textarea:focus-visible, button:focus-visible { outline: 2px solid #75aaff; outline-offset: 2px; }
+    button { padding: 0 18px; border: 1px solid #5593e8; border-radius: 10px; color: #071322; background: #83b5ff; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+    button:hover:not(:disabled) { background: #a1c8ff; }
+    button:disabled { border-color: #354358; color: #7e8ca1; background: #202b3b; cursor: not-allowed; }
+    #paste-status { min-height: 18px; margin: 9px 0 0; color: #a8bbd4; font-size: 12px; }
+    .guidance { display: flex; gap: 10px; margin: 12px 0 0; padding: 11px 12px; border: 1px solid #29384b; border-radius: 10px; color: #9cacc1; background: #0d1521; font-size: 11px; line-height: 1.55; }
+    .guidance strong { color: #d6e2f1; }
+    @media (max-width: 640px) {
+      .workspace { width: min(100% - 28px, 1440px); padding: 16px 0 24px; }
+      header { align-items: flex-start; margin-bottom: 15px; }
+      .brand-mark { width: 38px; height: 38px; }
+      h1 { font-size: 17px; }
+      .connection { padding: 8px 9px; font-size: 11px; }
+      .hint { display: none; }
+      #screen { height: min(68vh, 680px); min-height: 300px; }
+      .clipboard-top { display: block; }
+      .clipboard-top p { margin-top: 5px; line-height: 1.45; }
+      .clipboard-form { flex-direction: column; }
+      button { min-height: 44px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="workspace">
+    <header>
+      <div class="brand"><div class="brand-mark" aria-hidden="true">P</div><div><h1>Pithos browser</h1><p class="eyebrow">Secure remote workspace</p></div></div>
+      <div class="connection" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="connection-status">Connecting to your run…</span></div>
+    </header>
+    <main>
+      <section class="display-card" aria-label="Remote desktop">
+        <div class="card-heading"><h2>Remote display</h2><span class="hint">Your interactive session</span></div>
+        <div id="screen" role="region" aria-label="Remote display"></div>
+      </section>
+      <section class="clipboard-card" aria-labelledby="clipboard-title">
+        <div class="clipboard-top"><h2 id="clipboard-title">Clipboard</h2><p>Paste text into your remote session without sharing files.</p></div>
+        <form class="clipboard-form" onsubmit="return false">
+          <label for="paste-text">Text to send to the remote clipboard</label>
+          <textarea id="paste-text" autocomplete="off" spellcheck="false" placeholder="Type or paste text here…"></textarea>
+          <button id="send-text" type="button" disabled>Send to remote</button>
+        </form>
+        <p id="paste-status" role="status" aria-live="polite"></p>
+        <p class="guidance"><span aria-hidden="true">ⓘ</span><span><strong>Clipboard tips:</strong> Press Cmd+V on Mac or Ctrl+V elsewhere to transfer text and paste into the remote app. Legacy clipboard supports Latin-1 only, so other characters may become ?. Unicode requires extended clipboard support. You can also enter text above and send it explicitly.</span></p>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="/viewer.js"></script>
+</body>
+</html>`;
 const login = `<!doctype html><meta charset="utf-8"><title>Pithos browser login</title><h1>Pithos browser</h1><form method="post" action="/login"><label>Run password <input type="password" name="password" autocomplete="off" required></label><button>Connect</button></form>`;
-const script = `import RFB from '/novnc/core/rfb.js'; import { installClipboard } from '/viewer-clipboard.mjs'; const rfb = new RFB(document.getElementById('screen'), 'ws://' + location.host + '/websockify'); installClipboard({ document, screen: document.getElementById('screen'), rfb, clipboard: navigator.clipboard, input: document.getElementById('paste-text'), button: document.getElementById('send-text'), status: document.getElementById('paste-status') }); rfb.scaleViewport = true; rfb.resizeSession = false; rfb.addEventListener('disconnect', () => { document.getElementById('screen').textContent = 'Disconnected. Reload to reconnect to this run.'; });`;
+const script = `import RFB from '/novnc/core/rfb.js'; import { installClipboard } from '/viewer-clipboard.mjs'; const screen = document.getElementById('screen'); const connectionStatus = document.getElementById('connection-status'); const rfb = new RFB(screen, 'ws://' + location.host + '/websockify'); installClipboard({ document, screen, rfb, clipboard: navigator.clipboard, input: document.getElementById('paste-text'), button: document.getElementById('send-text'), status: document.getElementById('paste-status') }); rfb.scaleViewport = true; rfb.resizeSession = false; rfb.addEventListener('connect', () => { connectionStatus.textContent = 'Connected'; }); rfb.addEventListener('disconnect', () => { connectionStatus.textContent = 'Disconnected'; screen.textContent = 'Disconnected. Reload to reconnect to this run.'; });`;
 const equal = (a,b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const validHost = host => typeof host === 'string' && /^127\.0\.0\.1:[0-9]{1,5}$/.test(host) && +host.split(':')[1] > 0 && +host.split(':')[1] <= 65535;
 

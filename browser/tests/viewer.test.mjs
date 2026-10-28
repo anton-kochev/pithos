@@ -40,7 +40,14 @@ test('viewer login protects resources and enforces Host/Origin without URL token
     const page = await call(port,'GET','/',{Cookie:cookie});
     assert.match(page.text, /textarea/);
     assert.match(page.text, /role="status"/);
-    assert.match(page.text, /remote clipboard.*Ctrl\+V/);
+    assert.match(page.text, /Cmd\+V.*Ctrl\+V/, 'clipboard guidance explains the local shortcut and remote paste');
+    assert.match(page.text, /<header[\s>]/, 'viewer has an application header');
+    assert.match(page.text, /<main[\s>]/, 'viewer content has a main landmark');
+    assert.match(page.text, /id="connection-status"/, 'connection status is visible');
+    assert.match(page.text, /aria-label="Remote display"/, 'remote display is named');
+    assert.match(page.text, /@media/, 'workspace adapts to narrow viewports');
+    assert.match(page.text, /min\(.*vh/, 'display sizing accounts for available viewport height');
+    assert.match(page.text, /for="paste-text"/, 'clipboard entry has an explicit label');
     assert.match(page.text, /Latin-1/);
     assert.doesNotMatch(page.text, /Text is typed/);
     assert.equal((await call(port,'GET','/novnc/..%2f..%2fpackage.json',{Cookie:cookie})).status,404);
