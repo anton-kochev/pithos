@@ -17,7 +17,7 @@ const page = `<!doctype html>
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #090d14; color: #e7edf7; font-synthesis: none; }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; background: radial-gradient(ellipse at 50% -20%, #1c2a40 0, #0c1320 45%, #090d14 78%); }
-    .workspace { width: min(100% - 48px, 1440px); margin: 0 auto; padding: 26px 0 36px; }
+    .workspace { width: calc(100% - 48px); margin: 0 auto; padding: 26px 0 36px; }
     header { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
     .brand { display: flex; align-items: center; gap: 13px; }
     .brand-mark { display: grid; place-items: center; width: 42px; height: 42px; border: 1px solid #34445d; border-radius: 13px; color: #9bc4ff; background: linear-gradient(145deg, #1b2a40, #111a28); font-size: 20px; font-weight: 750; }
@@ -30,7 +30,7 @@ const page = `<!doctype html>
     .card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px; padding: 0 17px; border-bottom: 1px solid #243145; }
     .card-heading h2 { margin: 0; font-size: 13px; font-weight: 650; letter-spacing: .01em; }
     .hint { color: #8292a8; font-size: 11px; }
-    #screen { height: min(900px, calc(100vh - 230px)); min-height: 390px; display: grid; place-items: center; overflow: hidden; background: #0a0f18; }
+    #screen { height: 100vh; display: grid; place-items: center; overflow: hidden; background: #0a0f18; }
     #screen canvas { display: block; max-width: 100%; }
     .clipboard-card { padding: 17px; }
     .clipboard-top { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 12px; }
@@ -48,13 +48,12 @@ const page = `<!doctype html>
     .guidance { display: flex; gap: 10px; margin: 12px 0 0; padding: 11px 12px; border: 1px solid #29384b; border-radius: 10px; color: #9cacc1; background: #0d1521; font-size: 11px; line-height: 1.55; }
     .guidance strong { color: #d6e2f1; }
     @media (max-width: 640px) {
-      .workspace { width: min(100% - 28px, 1440px); padding: 16px 0 24px; }
+      .workspace { width: calc(100% - 28px); padding: 16px 0 24px; }
       header { align-items: flex-start; margin-bottom: 15px; }
       .brand-mark { width: 38px; height: 38px; }
       h1 { font-size: 17px; }
       .connection { padding: 8px 9px; font-size: 11px; }
       .hint { display: none; }
-      #screen { height: min(68vh, 680px); min-height: 300px; }
       .clipboard-top { display: block; }
       .clipboard-top p { margin-top: 5px; line-height: 1.45; }
       .clipboard-form { flex-direction: column; }

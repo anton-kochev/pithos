@@ -83,6 +83,13 @@ before startup, not a toggle on a running coordinator.
 
 ## Interactive viewer and human handoff
 
+The viewer's remote display frame and clipboard panel use the available window
+width without a fixed maximum-width cap. Gutters are 24px on each side, or 14px
+at viewport widths of 640px or less. The remote display area is `100vh` with no
+maximum-height cap on desktop and mobile. This height applies to the display area
+itself, not the entire page: headings remain above it, and the clipboard panel
+sits below the display card, reachable by scrolling.
+
 Interactive Chromium runs headed on a virtual display in a separate container.
 The launcher reports a URL such as `http://127.0.0.1:49152/` and a **host file
 path** containing the per-run viewer password. Read that file locally and enter

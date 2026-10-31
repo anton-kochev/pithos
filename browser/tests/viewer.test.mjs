@@ -46,7 +46,11 @@ test('viewer login protects resources and enforces Host/Origin without URL token
     assert.match(page.text, /id="connection-status"/, 'connection status is visible');
     assert.match(page.text, /aria-label="Remote display"/, 'remote display is named');
     assert.match(page.text, /@media/, 'workspace adapts to narrow viewports');
-    assert.match(page.text, /min\(.*vh/, 'display sizing accounts for available viewport height');
+    assert.match(page.text, /\.workspace \{ width: calc\(100% - 48px\);/, 'desktop workspace uses the full width with edge gutters');
+    assert.match(page.text, /\.workspace \{ width: calc\(100% - 28px\);/, 'mobile workspace keeps smaller edge gutters');
+    assert.doesNotMatch(page.text, /1440px/, 'workspace has no fixed desktop width cap');
+    assert.match(page.text, /#screen \{ height: 100vh;/, 'remote display fills the viewport height');
+    assert.equal((page.text.match(/#screen \{/g) ?? []).length, 1, 'mobile does not override the full-height display');
     assert.match(page.text, /for="paste-text"/, 'clipboard entry has an explicit label');
     assert.match(page.text, /Latin-1/);
     assert.doesNotMatch(page.text, /Text is typed/);
