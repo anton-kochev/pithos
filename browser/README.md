@@ -90,6 +90,28 @@ maximum-height cap on desktop and mobile. This height applies to the display are
 itself, not the entire page: headings remain above it, and the clipboard panel
 sits below the display card, reachable by scrolling.
 
+Clipboard transfer is explicit by default in both directions. Cmd+V (or Ctrl+V) over the
+remote display reads host text only for that paste gesture and sends it to the
+remote session. To move text copied in remote Chromium to the host, select/copy
+it remotely, then click **Copy remote text** in the clipboard panel. The button
+is available only while connected and after non-empty remote text arrives; the
+host browser may require clipboard permission or a secure context. A denied or
+unavailable write is reported without displaying the clipboard contents. Remote
+text stays in page memory only and is cleared on disconnect or window blur; the
+viewer never polls the host clipboard or uses a host native bridge.
+
+Optionally enable **Automatically copy remote text to host (best-effort)**.
+This unchecked-by-default option is held only in page memory (never persisted)
+and resets on disconnect. While enabled, each connected, non-empty remote
+clipboard event attempts a host write and may overwrite your host clipboard.
+Events can include selection updates, not only context-menu Copy actions.
+Enabling does not copy previously received text. Automatic writes may be blocked
+by browser permissions, secure-context rules, focus, or user-activation requirements;
+no permission/read API is requested for this feature. Use **Copy remote text**
+as the explicit fallback. Pending writes cannot be cancelled on disable or
+disconnect, and rapid events are not guaranteed to complete in order; stale
+completions do not replace newer status feedback.
+
 Interactive Chromium runs headed on a virtual display in a separate container.
 The launcher reports a URL such as `http://127.0.0.1:49152/` and a **host file
 path** containing the per-run viewer password. Read that file locally and enter

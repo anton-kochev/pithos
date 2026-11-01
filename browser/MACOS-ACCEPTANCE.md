@@ -472,13 +472,30 @@ If these steps pass, you have independently exercised:
 - The Mac viewer.
 - Chromium’s sandbox diagnostics.
 
-### 7.1 Host text insertion (new; real Mac/x11vnc acceptance NOT RUN)
+### 7.1 Clipboard transfer (real Mac/x11vnc acceptance NOT RUN)
 
-The viewer now intercepts Cmd+V over the remote screen and reads plain text only
-on that gesture. If browser clipboard permission is unavailable, paste into the
-labelled local text area and click **Send text**. Local controls retain ordinary
-paste behavior. Text is cleared after sending and on disconnect; no background
-clipboard polling, storage, or reverse clipboard sync is added.
+The viewer intercepts Cmd+V over the remote screen and reads plain text only on
+that gesture. If browser clipboard permission is unavailable, paste into the
+labelled local text area and click **Send to remote**. Local controls retain
+ordinary paste behavior. Text is cleared after sending and on disconnect.
+
+For remote-to-host transfer, copy text in remote Chromium, then click the
+explicit **Copy remote text** button in the clipboard panel. It is enabled only
+when connected and non-empty remote text has arrived. The click calls the host
+browser clipboard API directly as the user gesture; the browser may require
+clipboard permission or a secure context. Denial/unavailability is reported
+without exposing clipboard contents. Remote text remains in page memory only
+and is cleared on disconnect or window blur. The unchecked-by-default
+**Automatically copy remote text to host (best-effort)** checkbox opts into
+writes on subsequent connected, non-empty remote clipboard events. It is held
+only in page memory, never persisted, and resets on disconnect. While enabled,
+remote updates may overwrite the host clipboard; these can include selection
+updates, not just context-menu Copy. No polling, host native bridge, or automatic
+permission/read API requests are used. Browser permission, secure context, focus,
+and user-activation restrictions may block automatic writes; the explicit button
+remains the fallback. Already-started writes cannot be cancelled on disable or
+disconnect, and rapid events may complete out of order. Stale completions are
+prevented from replacing newer status feedback, not from affecting the clipboard.
 
 **Protocol and readiness limitations:** text is passed unchanged to noVNC
 `clipboardPasteFrom(text)`, followed by a remote Ctrl+V chord, not character
@@ -522,9 +539,21 @@ non-sensitive disposable text:
 3. Deny clipboard permission and repeat: require actionable feedback. Paste in
    the local fallback, click Send text, and verify the remote focus receives it
    once and the local text clears. Paste in local UI must not send remotely.
-4. Disconnect while a permission prompt is open: accepting it afterwards must
-   not send text. Check the disconnected feedback and disabled Send text button.
-5. Recheck unauthenticated `/viewer-clipboard.mjs` returns 401. Existing Host,
+4. Copy text in remote Chromium and click **Copy remote text**. Verify it appears
+   on the host clipboard only after the click with automatic copying off. Deny clipboard permission and
+   repeat; require clear failure feedback without text in the status. Verify the
+   button stays disabled with no received text, after empty remote text, on
+   disconnect, and after window blur.
+   Enable automatic copying and generate a remote clipboard update: where the
+   browser permits it, verify a host write without clicking the button. Test
+   selection updates as well as Copy, denied/unavailable writes and button
+   fallback. Disable it and verify subsequent events do not write. Check empty
+   events do not write, disconnect resets the checkbox, and reload starts off.
+   Rapid updates and late success/denial must not overwrite newer status or
+   disconnected feedback; an already-started write may still affect the clipboard.
+5. Disconnect while a local-to-remote paste permission prompt is open: accepting it afterwards must
+   not send text. Check disconnected feedback and disabled clipboard controls.
+6. Recheck unauthenticated `/viewer-clipboard.mjs` returns 401. Existing Host,
    Origin, and WebSocket restrictions must remain unchanged.
 
 Automated Node tests cover event/controller behavior with an RFB test double and

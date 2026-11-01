@@ -2,22 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { installClipboard } from '../runtime/viewer-clipboard.mjs';
 
-function fixture(readText = async () => 'https://example.com/') {
+function fixture(readText = async () => 'https://example.com/', writeText = async () => {}) {
   const listeners = new Map();
   const element = () => ({ value: '', textContent: '', disabled: false, addEventListener(name, fn) { this[name] = fn; } });
   const screen = { contains: target => target === screen };
   const window = new EventTarget();
   const document = { defaultView: window, addEventListener(name, fn) { listeners.set(name, fn); } };
-  const input = element(), button = element(), status = element();
+  const input = element(), button = element(), status = element(), remoteButton = element(), autoSync = element();
   const keys = [], events = new Map();
   const rfb = { clipboardPasteFrom: text => keys.push(['clipboard', text]), sendKey: (...args) => keys.push(args), focus() {}, addEventListener: (name, fn) => events.set(name, fn) };
-  installClipboard({ document, screen, input, button, status, rfb, clipboard: { readText } });
+  const clipboard = { readText, writeText };
+  installClipboard({ document, screen, input, button, remoteButton, autoSync, status, rfb, clipboard });
   const fire = (name, props = {}) => {
     const event = { target: screen, preventDefault() { this.prevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...props };
     listeners.get(name)(event);
     return event;
   };
-  return { fire, keys, events, input, button, status, screen, rfb, window };
+  return { fire, keys, events, input, button, remoteButton, autoSync, status, screen, rfb, window, document, clipboard };
 }
 const paste = text => [
   ['clipboard', text],
@@ -28,6 +29,58 @@ const paste = text => [
   [0x76, 'KeyV', false], [0xffe3, 'ControlLeft', false]
 ];
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('remote clipboard text is copied to host only by explicit button gesture', async () => {
+  const writes = [];
+  const f = fixture(undefined, async text => writes.push(text));
+  f.events.get('connect')();
+  f.events.get('clipboard')({ detail: { text: 'private remote text' } });
+  assert.equal(f.remoteButton.disabled, false);
+  assert.deepEqual(writes, []);
+  await f.remoteButton.click();
+  assert.deepEqual(writes, ['private remote text']);
+  assert.doesNotMatch(f.status.textContent, /private remote text/);
+});
+
+test('remote clipboard copy reports unavailable host writing without leaking text', async () => {
+  const f = fixture();
+  delete f.clipboard.writeText;
+  f.events.get('connect')();
+  f.events.get('clipboard')({ detail: { text: 'secret' } });
+  await f.remoteButton.click();
+  assert.match(f.status.textContent, /unavailable/i);
+  assert.doesNotMatch(f.status.textContent, /secret/);
+});
+
+test('remote clipboard copy reports denied writes without leaking text', async () => {
+  const f = fixture(undefined, async () => { throw new Error('private diagnostic'); });
+  f.events.get('connect')();
+  f.events.get('clipboard')({ detail: { text: 'secret' } });
+  await f.remoteButton.click();
+  assert.match(f.status.textContent, /unavailable|permission|failed/i);
+  assert.doesNotMatch(f.status.textContent, /secret|private diagnostic/);
+});
+
+test('remote text is not copyable without connection/data and clears on disconnect or blur', async () => {
+  const writes = [];
+  const f = fixture(undefined, async text => writes.push(text));
+  f.events.get('clipboard')({ detail: { text: 'disconnected' } });
+  assert.equal(f.remoteButton.disabled, true);
+  await f.remoteButton.click();
+  f.events.get('connect')();
+  f.events.get('clipboard')({ detail: { text: '' } });
+  assert.equal(f.remoteButton.disabled, true);
+  await f.remoteButton.click();
+  f.events.get('clipboard')({ detail: { text: 'disconnect me' } });
+  f.events.get('disconnect')();
+  assert.equal(f.remoteButton.disabled, true);
+  f.events.get('connect')();
+  f.events.get('clipboard')({ detail: { text: 'blur me' } });
+  f.window.dispatchEvent(new Event('blur'));
+  assert.equal(f.remoteButton.disabled, true);
+  await f.remoteButton.click();
+  assert.deepEqual(writes, []);
+});
 
 test('Cmd+V reads only on intent, consumes Command and inserts text once without Meta+V', async () => {
   let reads = 0;
@@ -175,4 +228,115 @@ test('window blur clears gesture suppression and invalidates pending reads', asy
   pending[2].reject(new Error('stale denial'));
   await tick();
   assert.equal(f.status.textContent, status);
+});
+
+test('automatic remote copy is opt-in, guards events and resets on disconnect', async () => {
+  const writes = [];
+  const f = fixture(undefined, async text => writes.push(text));
+  const remote = text => f.events.get('clipboard')({ detail: { text } });
+  assert.equal(f.autoSync.checked, false);
+  f.events.get('connect')();
+  remote('default');
+  assert.deepEqual(writes, []);
+  f.autoSync.checked = true;
+  f.autoSync.change();
+  assert.deepEqual(writes, [], 'enabling waits for a new event');
+  remote('enabled');
+  await tick();
+  assert.deepEqual(writes, ['enabled']);
+  assert.match(f.status.textContent, /copied/i);
+  for (const text of ['', undefined, 42]) remote(text);
+  assert.deepEqual(writes, ['enabled']);
+  f.autoSync.checked = false;
+  f.autoSync.change();
+  remote('disabled');
+  await f.remoteButton.click();
+  assert.deepEqual(writes, ['enabled', 'disabled']);
+  f.autoSync.checked = true;
+  f.autoSync.change();
+  f.events.get('disconnect')();
+  assert.equal(f.autoSync.checked, false);
+  remote('disconnected');
+  f.events.get('connect')();
+  remote('reconnected');
+  assert.deepEqual(writes, ['enabled', 'disabled']);
+});
+
+test('automatic denial and unavailable writes retain explicit fallback and safe feedback', async () => {
+  for (const unavailable of [false, true]) {
+    const f = fixture(undefined, async () => { throw new Error('secret diagnostic'); });
+    if (unavailable) delete f.clipboard.writeText;
+    f.events.get('connect')();
+    f.autoSync.checked = true;
+    f.autoSync.change();
+    f.events.get('clipboard')({ detail: { text: 'secret text' } });
+    await tick();
+    assert.match(f.status.textContent, /Copy remote text/);
+    assert.doesNotMatch(f.status.textContent, /secret/);
+    assert.equal(f.remoteButton.disabled, false);
+    const writes = [];
+    f.clipboard.writeText = async text => writes.push(text);
+    await f.remoteButton.click();
+    assert.deepEqual(writes, ['secret text']);
+  }
+});
+
+test('pending remote writes cannot replace disconnect, newer operation or reset status', async () => {
+  for (const action of ['disconnect', 'disable', 'blur', 'empty', 'new-write', 'send', 'read']) {
+    for (const reject of [false, true]) {
+      const pending = [];
+      const f = fixture(async () => 'local', () => new Promise((resolve, reject) => pending.push({ resolve, reject })));
+      f.events.get('connect')();
+      f.autoSync.checked = true;
+      f.autoSync.change();
+      f.events.get('clipboard')({ detail: { text: 'first' } });
+      if (action === 'disconnect') { f.events.get('disconnect')(); f.events.get('connect')(); }
+      if (action === 'disable') { f.autoSync.checked = false; f.autoSync.change(); }
+      if (action === 'blur') f.window.dispatchEvent(new Event('blur'));
+      if (action === 'empty') f.events.get('clipboard')({ detail: { text: '' } });
+      if (action === 'new-write') {
+        f.events.get('clipboard')({ detail: { text: 'second' } });
+        pending[1].resolve();
+      }
+      if (action === 'send') { f.input.value = 'local'; f.button.click(); }
+      if (action === 'read') f.fire('keydown', { code: 'KeyV', metaKey: true });
+      await tick();
+      const status = f.status.textContent;
+      if (reject) pending[0].reject(new Error('private'));
+      else pending[0].resolve();
+      await tick();
+      assert.equal(f.status.textContent, status, `${action}, reject=${reject}`);
+    }
+  }
+});
+
+test('pending explicit copy also cannot replace disconnect status', async () => {
+  let resolve;
+  const f = fixture(undefined, () => new Promise(done => { resolve = done; }));
+  f.events.get('connect')();
+  f.events.get('clipboard')({ detail: { text: 'remote' } });
+  const copy = f.remoteButton.click();
+  f.events.get('disconnect')();
+  resolve();
+  await copy;
+  assert.match(f.status.textContent, /Disconnected/);
+});
+
+test('older local clipboard read completion preserves newer remote write feedback', async () => {
+  for (const denied of [false, true]) {
+    let resolve, reject;
+    const f = fixture(() => new Promise((done, fail) => { resolve = done; reject = fail; }));
+    f.events.get('connect')();
+    f.fire('keydown', { code: 'KeyV', metaKey: true });
+    f.autoSync.checked = true;
+    f.autoSync.change();
+    f.events.get('clipboard')({ detail: { text: 'remote' } });
+    await tick();
+    const status = f.status.textContent;
+    if (denied) reject(new Error('private'));
+    else resolve('local');
+    await tick();
+    assert.equal(f.status.textContent, status);
+    assert.deepEqual(f.keys, denied ? [] : paste('local'));
+  }
 });

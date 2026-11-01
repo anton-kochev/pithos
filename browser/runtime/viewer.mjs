@@ -38,9 +38,10 @@ const page = `<!doctype html>
     .clipboard-top p { margin: 0; color: #8d9bb0; font-size: 12px; }
     .clipboard-form { display: flex; align-items: stretch; gap: 10px; }
     label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    .auto-sync-label { position: static; display: block; width: auto; height: auto; margin: 12px 0 0; overflow: visible; clip: auto; white-space: normal; font-size: 12px; }
     textarea { flex: 1; min-width: 0; min-height: 46px; max-height: 160px; resize: vertical; padding: 12px 13px; border: 1px solid #34445c; border-radius: 10px; outline: none; color: #e7edf7; background: #0a111c; font: inherit; font-size: 13px; }
     textarea::placeholder { color: #74849a; }
-    textarea:focus-visible, button:focus-visible { outline: 2px solid #75aaff; outline-offset: 2px; }
+    textarea:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid #75aaff; outline-offset: 2px; }
     button { padding: 0 18px; border: 1px solid #5593e8; border-radius: 10px; color: #071322; background: #83b5ff; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
     button:hover:not(:disabled) { background: #a1c8ff; }
     button:disabled { border-color: #354358; color: #7e8ca1; background: #202b3b; cursor: not-allowed; }
@@ -79,8 +80,10 @@ const page = `<!doctype html>
           <textarea id="paste-text" autocomplete="off" spellcheck="false" placeholder="Type or paste text here…"></textarea>
           <button id="send-text" type="button" disabled>Send to remote</button>
         </form>
+        <div class="clipboard-form remote-copy"><button id="copy-remote-text" type="button" disabled>Copy remote text</button></div>
+        <label class="auto-sync-label" for="auto-sync-remote"><input id="auto-sync-remote" type="checkbox" autocomplete="off"> Automatically copy remote text to host (best-effort). While enabled, remote clipboard updates may overwrite your host clipboard.</label>
         <p id="paste-status" role="status" aria-live="polite"></p>
-        <p class="guidance"><span aria-hidden="true">ⓘ</span><span><strong>Clipboard tips:</strong> Press Cmd+V on Mac or Ctrl+V elsewhere to transfer text and paste into the remote app. Legacy clipboard supports Latin-1 only, so other characters may become ?. Unicode requires extended clipboard support. You can also enter text above and send it explicitly.</span></p>
+        <p class="guidance"><span aria-hidden="true">ⓘ</span><span><strong>Clipboard tips:</strong> Press Cmd+V on Mac or Ctrl+V elsewhere to transfer text and paste into the remote app. To copy text selected in the remote app to your host, click <strong>Copy remote text</strong>; your browser may require clipboard permission. Automatic copying is off by default and resets on disconnect. Best-effort automatic writes may be blocked by your browser; use Copy remote text as a fallback. Remote updates may include selection changes, not just Copy actions. Legacy clipboard supports Latin-1 only, so other characters may become ?. Unicode requires extended clipboard support. You can also enter text above and send it explicitly.</span></p>
       </section>
     </main>
   </div>
@@ -88,7 +91,7 @@ const page = `<!doctype html>
 </body>
 </html>`;
 const login = `<!doctype html><meta charset="utf-8"><title>Pithos browser login</title><h1>Pithos browser</h1><form method="post" action="/login"><label>Run password <input type="password" name="password" autocomplete="off" required></label><button>Connect</button></form>`;
-const script = `import RFB from '/novnc/core/rfb.js'; import { installClipboard } from '/viewer-clipboard.mjs'; const screen = document.getElementById('screen'); const connectionStatus = document.getElementById('connection-status'); const rfb = new RFB(screen, 'ws://' + location.host + '/websockify'); installClipboard({ document, screen, rfb, clipboard: navigator.clipboard, input: document.getElementById('paste-text'), button: document.getElementById('send-text'), status: document.getElementById('paste-status') }); rfb.scaleViewport = true; rfb.resizeSession = false; rfb.addEventListener('connect', () => { connectionStatus.textContent = 'Connected'; }); rfb.addEventListener('disconnect', () => { connectionStatus.textContent = 'Disconnected'; screen.textContent = 'Disconnected. Reload to reconnect to this run.'; });`;
+const script = `import RFB from '/novnc/core/rfb.js'; import { installClipboard } from '/viewer-clipboard.mjs'; const screen = document.getElementById('screen'); const connectionStatus = document.getElementById('connection-status'); const rfb = new RFB(screen, 'ws://' + location.host + '/websockify'); installClipboard({ document, screen, rfb, clipboard: navigator.clipboard, input: document.getElementById('paste-text'), button: document.getElementById('send-text'), remoteButton: document.getElementById('copy-remote-text'), autoSync: document.getElementById('auto-sync-remote'), status: document.getElementById('paste-status') }); rfb.scaleViewport = true; rfb.resizeSession = false; rfb.addEventListener('connect', () => { connectionStatus.textContent = 'Connected'; }); rfb.addEventListener('disconnect', () => { connectionStatus.textContent = 'Disconnected'; screen.textContent = 'Disconnected. Reload to reconnect to this run.'; });`;
 const equal = (a,b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const validHost = host => typeof host === 'string' && /^127\.0\.0\.1:[0-9]{1,5}$/.test(host) && +host.split(':')[1] > 0 && +host.split(':')[1] <= 65535;
 

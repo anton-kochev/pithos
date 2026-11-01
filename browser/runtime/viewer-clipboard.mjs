@@ -1,26 +1,68 @@
-export function installClipboard({ document, screen, rfb, clipboard, input, button, status }) {
+export function installClipboard({ document, screen, rfb, clipboard, input, button, remoteButton, autoSync, status }) {
+  autoSync.checked = false;
+  let statusGeneration = 0;
+  autoSync.addEventListener('change', () => { statusGeneration++; });
   let connected = false;
   let busy = false;
   let shortcutHeld = false;
+  let remoteText;
   let readGeneration = 0;
+  const reportFor = generation => message => {
+    if (connected && generation === statusGeneration) status.textContent = message;
+  };
   document.defaultView.addEventListener('blur', () => {
+    statusGeneration++;
     shortcutHeld = false;
     busy = false;
+    remoteText = undefined;
+    remoteButton.disabled = true;
     // Clipboard promises cannot be cancelled; discard results from before blur.
     readGeneration++;
   });
   button.disabled = true;
+  remoteButton.disabled = true;
   rfb.addEventListener('connect', () => { connected = true; button.disabled = false; });
+  rfb.addEventListener('clipboard', event => {
+    if (!connected) return;
+    statusGeneration++;
+    remoteText = typeof event.detail?.text === 'string' && event.detail.text.length > 0 ? event.detail.text : undefined;
+    remoteButton.disabled = remoteText === undefined;
+    if (autoSync.checked) void copyRemote();
+  });
+  const copyRemote = async () => {
+    if (!connected || remoteText === undefined) return;
+    const generation = ++statusGeneration;
+    // Writes cannot be cancelled or ordered by us once handed to the browser.
+    // Only the latest operation may publish feedback, even after reconnect.
+    const report = reportFor(generation);
+    if (typeof clipboard?.writeText !== 'function') {
+      report('Host clipboard writing is unavailable in this browser. Try Copy remote text in a supported browser.');
+      return;
+    }
+    try {
+      await clipboard.writeText(remoteText);
+      report('Remote text copied to the host clipboard.');
+    } catch {
+      report('Host clipboard access was denied or failed. Check browser permission and try Copy remote text.');
+    }
+  };
+  remoteButton.addEventListener('click', copyRemote);
   rfb.addEventListener('disconnect', () => {
+    autoSync.checked = false;
+    statusGeneration++;
+    readGeneration++;
+    busy = false;
     connected = false;
     shortcutHeld = false;
+    remoteText = undefined;
+    remoteButton.disabled = true;
     button.disabled = true;
     input.value = '';
     status.textContent = 'Disconnected. Reload to reconnect.';
   });
-  const transfer = text => {
+  const transfer = (text, report) => {
     if (!connected) return;
-    if (!text) { status.textContent = 'No text to send.'; return; }
+    if (!text) { report('No text to send.'); return; }
     // Legacy ClientCutText is flushed before key events on the same connection.
     // Extended clipboard instead advertises text for a later server request;
     // neither path exposes a remote application readiness acknowledgement.
@@ -38,12 +80,13 @@ export function installClipboard({ document, screen, rfb, clipboard, input, butt
       try { rfb.sendKey(0x76, 'KeyV', false); }
       finally { rfb.sendKey(0xffe3, 'ControlLeft', false); }
     }
-    status.textContent = 'Paste requested. Unicode support depends on the remote clipboard protocol.';
+    report('Paste requested. Unicode support depends on the remote clipboard protocol.');
   };
-  const insert = text => {
-    try { transfer(text); return true; }
+  const insert = (text, generation = ++statusGeneration) => {
+    const report = reportFor(generation);
+    try { transfer(text, report); return true; }
     catch {
-      if (connected) status.textContent = 'Paste failed. Check the connection before retrying.';
+      report('Paste failed. Check the connection before retrying.');
       return false;
     }
   };
@@ -83,13 +126,14 @@ export function installClipboard({ document, screen, rfb, clipboard, input, butt
     // starts a fresh gesture, but native paste must not duplicate that gesture.
     shortcutHeld = true;
     busy = true;
+    const feedbackGeneration = ++statusGeneration;
     const generation = readGeneration;
     try {
       const text = await clipboard.readText();
-      if (generation === readGeneration) insert(text);
+      if (generation === readGeneration) insert(text, feedbackGeneration);
     }
     catch {
-      if (connected && generation === readGeneration) status.textContent = 'Clipboard access unavailable. Paste text below, then select Send text.';
+      if (generation === readGeneration) reportFor(feedbackGeneration)('Clipboard access unavailable. Paste text below, then select Send text.');
     }
     finally { if (generation === readGeneration) busy = false; }
   }, true);

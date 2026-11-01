@@ -52,6 +52,17 @@ test('viewer login protects resources and enforces Host/Origin without URL token
     assert.match(page.text, /#screen \{ height: 100vh;/, 'remote display fills the viewport height');
     assert.equal((page.text.match(/#screen \{/g) ?? []).length, 1, 'mobile does not override the full-height display');
     assert.match(page.text, /for="paste-text"/, 'clipboard entry has an explicit label');
+    assert.match(page.text, /id="copy-remote-text" type="button" disabled>Copy remote text/, 'remote-to-host copy requires an explicit enabled control');
+    assert.match(client.text, /navigator\.clipboard/);
+    assert.match(client.text, /copy-remote-text/);
+    const toggle = page.text.match(/<input[^>]*id="auto-sync-remote"[^>]*>/)?.[0];
+    assert.ok(toggle);
+    assert.match(toggle, /type="checkbox"/);
+    assert.doesNotMatch(toggle, /checked/);
+    assert.match(page.text, /class="auto-sync-label" for="auto-sync-remote"/);
+    assert.match(page.text, /may overwrite (?:your |the )?host clipboard/);
+    assert.match(page.text, /Best-effort/);
+    assert.match(client.text, /autoSync: document.getElementById\('auto-sync-remote'\)/);
     assert.match(page.text, /Latin-1/);
     assert.doesNotMatch(page.text, /Text is typed/);
     assert.equal((await call(port,'GET','/novnc/..%2f..%2fpackage.json',{Cookie:cookie})).status,404);
