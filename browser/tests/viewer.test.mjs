@@ -102,6 +102,24 @@ test('WebSocket rejects unauthenticated/cross-origin control and proxies only af
   }
 });
 
+test('login page follows the system color scheme without authenticated assets or scripts', async () => {
+  const server = createViewer({password:'a'.repeat(64),runId:'b'.repeat(32)});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try {
+    const page = await call(server.address().port,'GET','/');
+    assert.equal(page.status,200);
+    assert.match(page.text, /<meta name="color-scheme" content="light dark">/);
+    assert.match(page.text, /color-scheme:\s*light dark;/);
+    assert.match(page.text, /background:\s*Canvas;/);
+    assert.match(page.text, /color:\s*CanvasText;/);
+    assert.match(page.text, /<meta name="viewport" content="width=device-width, initial-scale=1">/);
+    assert.doesNotMatch(page.text, /<(?:script|link)\b/i);
+    assert.match(page.text, /<form method="post" action="\/login">/);
+    assert.match(page.text, /<input[^>]*type="password"[^>]*name="password"[^>]*autocomplete="off"[^>]*required/);
+    assert.match(page.text, /<button type="submit">Connect<\/button>/);
+  } finally { server.closeAllConnections(); await new Promise(resolve=>server.close(resolve)); }
+});
+
 // Regression guard for a defect that made viewer login impossible in every real
 // browser while every test above still passed.
 //

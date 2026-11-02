@@ -90,7 +90,33 @@ const page = `<!doctype html>
   <script type="module" src="/viewer.js"></script>
 </body>
 </html>`;
-const login = `<!doctype html><meta charset="utf-8"><title>Pithos browser login</title><h1>Pithos browser</h1><form method="post" action="/login"><label>Run password <input type="password" name="password" autocomplete="off" required></label><button>Connect</button></form>`;
+const login = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Pithos browser login</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; background: Canvas; color: CanvasText; }
+    body { margin: 0; padding: 24px; }
+    main { max-width: 28rem; margin: 8vh auto; }
+    h1 { margin: 0 0 24px; }
+    form { display: grid; gap: 12px; }
+    input, button { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; font: inherit; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Pithos browser</h1>
+    <form method="post" action="/login">
+      <label for="run-password">Run password</label>
+      <input id="run-password" type="password" name="password" autocomplete="off" required>
+      <button type="submit">Connect</button>
+    </form>
+  </main>
+</body>
+</html>`;
 const script = `import RFB from '/novnc/core/rfb.js'; import { installClipboard } from '/viewer-clipboard.mjs'; const screen = document.getElementById('screen'); const connectionStatus = document.getElementById('connection-status'); const rfb = new RFB(screen, 'ws://' + location.host + '/websockify'); installClipboard({ document, screen, rfb, clipboard: navigator.clipboard, input: document.getElementById('paste-text'), button: document.getElementById('send-text'), remoteButton: document.getElementById('copy-remote-text'), autoSync: document.getElementById('auto-sync-remote'), status: document.getElementById('paste-status') }); rfb.scaleViewport = true; rfb.resizeSession = false; rfb.addEventListener('connect', () => { connectionStatus.textContent = 'Connected'; }); rfb.addEventListener('disconnect', () => { connectionStatus.textContent = 'Disconnected'; screen.textContent = 'Disconnected. Reload to reconnect to this run.'; });`;
 const equal = (a,b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const validHost = host => typeof host === 'string' && /^127\.0\.0\.1:[0-9]{1,5}$/.test(host) && +host.split(':')[1] > 0 && +host.split(':')[1] <= 65535;
