@@ -3,7 +3,7 @@
 #
 # Jobs (in order):
 #   1. Seed pi-config defaults from /opt/pi-defaults/ into ~/.pi/agent/
-#      (no-clobber, so bind mounts and existing files win)
+#      (no-clobber except the image-owned pithos-instructions.ts extension)
 #   2. Set git identity from GIT_USER_NAME / GIT_USER_EMAIL env vars
 #   3. exec the command passed to docker run (default: `sleep infinity`)
 #
@@ -30,6 +30,13 @@ pi_manage() (
   exec /usr/bin/node /opt/pi-npm/bin/pi "$@"
 )
 
+# Refuse redirected directories before seeding or refreshing managed files.
+# A file symlink is safe: the atomic rename below replaces the link itself.
+if [[ -L "$PI_AGENT_DIR" || -L "$PI_AGENT_DIR/extensions" ]]; then
+  echo "pithos: cannot refresh pithos-instructions.ts through a symlinked agent/extensions directory" >&2
+  exit 1
+fi
+
 # Ensure the directory structure exists.
 mkdir -p "$PI_AGENT_DIR/sessions"
 
@@ -39,6 +46,23 @@ mkdir -p "$PI_AGENT_DIR/sessions"
 # their defaults populated from the image-baked /opt/pi-defaults/.
 if [[ -d "$DEFAULTS_DIR" ]]; then
   cp -rn "$DEFAULTS_DIR"/. "$PI_AGENT_DIR"/ 2>/dev/null || true
+fi
+
+# This one extension is image-owned, unlike user extensions and config.
+# Stage beside the destination so rename publishes a complete file atomically.
+refresh_instructions() (
+  local extensions="$PI_AGENT_DIR/extensions"
+  local staged
+  mkdir -p "$extensions" || return 1
+  staged=$(mktemp "$extensions/.pithos-instructions.XXXXXX") || return 1
+  trap 'rm -f -- "$staged"' EXIT
+  cp "$DEFAULTS_DIR/extensions/pithos-instructions.ts" "$staged" || return 1
+  chmod 0644 "$staged" || return 1
+  mv -fT -- "$staged" "$extensions/pithos-instructions.ts"
+)
+if ! refresh_instructions; then
+  echo "pithos: failed to refresh managed pithos-instructions.ts" >&2
+  exit 1
 fi
 
 # ─── Job 1a: apply baked pi settings ─────────────────────────────────
