@@ -221,6 +221,8 @@ pub struct ManagedDocker {
     config_file: Option<ConfigFile>,
     supervisor: Supervisor,
     probe_supervisor: Supervisor,
+    refresh_supervisor: Supervisor,
+    refresh_stage: Option<tempfile::TempDir>,
     build_supervisor: Supervisor,
     build_stage: Option<tempfile::TempDir>,
     control_supervisor: Supervisor,
@@ -696,6 +698,11 @@ impl Drop for ManagedDocker {
     fn drop(&mut self) {
         // An unresolved CLI may still access its context. Deliberately leak it
         // rather than remove files underneath the child; callers must poll first.
+        if self.refresh_supervisor.is_in_flight() {
+            if let Some(stage) = self.refresh_stage.take() {
+                std::mem::forget(stage);
+            }
+        }
         if self.build_supervisor.is_in_flight() {
             if let Some(stage) = self.build_stage.take() {
                 std::mem::forget(stage);
@@ -821,6 +828,15 @@ impl ManagedDocker {
                 shutdown.clone(),
             )
             .map_err(|_| PreflightError::InvalidLimits)?,
+            refresh_supervisor: Supervisor::new(
+                Limits {
+                    runtime: Duration::from_secs(30),
+                    ..limits
+                },
+                shutdown.clone(),
+            )
+            .map_err(|_| PreflightError::InvalidLimits)?,
+            refresh_stage: None,
             build_stage: None,
             control_supervisor: Supervisor::new(limits, Shutdown::new())
                 .map_err(|_| PreflightError::InvalidLimits)?,
@@ -842,6 +858,7 @@ impl ManagedDocker {
         self.supervisor.is_in_flight()
             || self.probe_supervisor.is_in_flight()
             || self.build_supervisor.is_in_flight()
+            || self.refresh_supervisor.is_in_flight()
             || self.control_supervisor.is_in_flight()
     }
 
@@ -853,6 +870,7 @@ impl ManagedDocker {
             self.supervisor.poll(),
             self.probe_supervisor.poll(),
             self.build_supervisor.poll(),
+            self.refresh_supervisor.poll(),
             self.control_supervisor.poll(),
         ] {
             match poll {
@@ -865,6 +883,9 @@ impl ManagedDocker {
                 }
                 _ => {}
             }
+        }
+        if !self.refresh_supervisor.is_in_flight() {
+            self.refresh_stage = None;
         }
         if !self.build_supervisor.is_in_flight() {
             self.build_stage = None;

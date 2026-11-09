@@ -18,8 +18,8 @@ pub use home_admission::{HomeInspectionError, inspection_args};
 pub use identity::{HostIdentity, IdentityError, ImageRole, identity_overlay};
 pub use image::{
     BASE_IMAGE_REF, ImageInfo, PithosImage, find_image_by_fingerprint, inspect_image,
-    inspect_image_id, list_dangling_pithos_images, list_tagged_pithos_images, remove_image,
-    tag_image,
+    inspect_image_id, inspect_local_image_id, list_dangling_pithos_images,
+    list_tagged_pithos_images, refresh_base_image, remove_image, tag_image,
 };
 pub use managed::image_cache as managed_image_cache;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

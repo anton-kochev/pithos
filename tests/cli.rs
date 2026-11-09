@@ -1176,6 +1176,32 @@ fn cli_clean_does_not_create_pithos_d() {
     );
 }
 
+// Prompt acceptance should not depend on a host Docker installation or daemon.
+#[cfg(unix)]
+fn info_with_fake_docker(root: &std::path::Path) -> Command {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let docker = bin.join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+case "$1 $2" in
+"inspect --format") echo sha256:base ;;
+"image inspect") echo 'Error: No such image' >&2; exit 1 ;;
+*) exit 99 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = Command::cargo_bin("pithos").unwrap();
+    command.env_clear().env("PATH", bin).env("HOME", root);
+    command
+}
+
+#[cfg(unix)]
 #[test]
 fn cli_creates_pithos_on_empty_input() {
     // User hits Enter at the [Y/n] prompt → yes-default → file written and
@@ -1188,8 +1214,7 @@ fn cli_creates_pithos_on_empty_input() {
     let td = tempdir().unwrap();
     let proj = td.path().join("proj");
     fs::create_dir(&proj).unwrap();
-    let assert = Command::cargo_bin("pithos")
-        .unwrap()
+    let assert = info_with_fake_docker(td.path())
         .arg("info")
         .current_dir(&proj)
         .write_stdin("\n")
@@ -1205,6 +1230,7 @@ fn cli_creates_pithos_on_empty_input() {
     assert_eq!(content, "toolchains: {}\n");
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_creates_pithos_on_y_input() {
     // Explicit `y` is also yes — locks the typed-accept branch independently
@@ -1212,8 +1238,7 @@ fn cli_creates_pithos_on_y_input() {
     let td = tempdir().unwrap();
     let proj = td.path().join("proj");
     fs::create_dir(&proj).unwrap();
-    Command::cargo_bin("pithos")
-        .unwrap()
+    info_with_fake_docker(td.path())
         .arg("info")
         .current_dir(&proj)
         .write_stdin("y\n")

@@ -913,8 +913,10 @@ fn ensure_image(
     let cache_only_browser = mode == RunMode::NoBuild && browser.mode().is_some();
     let base_lookup = if cache_only_browser {
         pithos::browser::cached_base_id()
+    } else if mode == RunMode::NoBuild {
+        pithos::docker::inspect_local_image_id(pithos::docker::BASE_IMAGE_REF)
     } else {
-        pithos::docker::inspect_image_id(pithos::docker::BASE_IMAGE_REF)
+        pithos::docker::refresh_base_image()
     };
     let base_image_id = match base_lookup {
         Ok(id) => id,
@@ -1517,7 +1519,8 @@ fn run_info(
         };
         installers.insert(name, bytes.to_vec());
     }
-    let base_image_id = match pithos::docker::inspect_image_id(pithos::docker::BASE_IMAGE_REF) {
+    let base_image_id = match pithos::docker::inspect_local_image_id(pithos::docker::BASE_IMAGE_REF)
+    {
         Ok(id) => id,
         Err(e) => {
             narrate(style, "» ERROR:", &format!("{e}"));

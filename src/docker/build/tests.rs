@@ -54,7 +54,7 @@ fn assemble_build_args_emits_fingerprint_label_when_extras_empty() {
 fn assemble_build_args_includes_core_flags_and_positionals() {
     let args = assemble_build_args(build_request(&BTreeMap::new()));
     assert_eq!(args.first(), Some(&OsString::from("build")));
-    assert!(args.contains(&OsString::from("--pull")));
+    assert!(args.contains(&OsString::from("--pull=false")));
     assert!(args.contains(&OsString::from("--progress=plain")));
     assert!(
         args.windows(2)
@@ -90,14 +90,11 @@ fn assemble_base_build_args_uses_dockerfile_base_and_base_tag() {
 }
 
 #[test]
-fn assemble_base_build_args_emits_no_labels() {
-    // No `--label` on the command line: the base image's own labels are
-    // `LABEL` instructions in Dockerfile.base. Per-project fingerprint and
-    // version labels are the other builder's job.
+fn assemble_base_build_args_marks_local_provenance() {
     let args = assemble_base_build_args(Path::new("/srv/pithos"));
     assert!(
-        !args.contains(&OsString::from("--label")),
-        "base build should not emit --label, got {args:?}"
+        args.windows(2)
+            .any(|w| w[0] == "--label" && w[1] == "dev.pithos.local-base=true")
     );
 }
 

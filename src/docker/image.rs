@@ -129,6 +129,11 @@ pub fn inspect_image_id(image_ref: &str) -> std::io::Result<String> {
     inspect_image_id_with(image_ref, Path::new("docker"))
 }
 
+/// Inspect without bootstrap pulls, for cache-only launches and reporting.
+pub fn inspect_local_image_id(image_ref: &str) -> std::io::Result<String> {
+    inspect_image_id_once_with(image_ref, Path::new("docker")).map_err(|failure| failure.error)
+}
+
 fn inspect_image_id_with(image_ref: &str, docker: &Path) -> std::io::Result<String> {
     match inspect_image_id_once_with(image_ref, docker) {
         Ok(id) => Ok(id),
@@ -158,6 +163,105 @@ fn inspect_image_id_with(image_ref: &str, docker: &Path) -> std::io::Result<Stri
                 ))
             })
         }
+    }
+}
+
+/// Metadata is queried separately so read-only image resolution stays pull-free.
+pub(crate) const BASE_PROVENANCE: &str = r#"{"local":{{if eq (index .Config.Labels "dev.pithos.local-base") "true"}}true{{else}}false{{end}},"digests":{{json .RepoDigests}}}"#;
+
+#[derive(serde::Deserialize)]
+pub(crate) struct BaseProvenance {
+    local: bool,
+    digests: Option<Vec<String>>,
+}
+
+impl BaseProvenance {
+    pub(crate) fn is_local(&self) -> bool {
+        // Older rebuild-base images have no label, but also no registry digest.
+        self.local || self.digests.as_ref().is_none_or(Vec::is_empty)
+    }
+}
+
+/// Refresh a published base before fingerprinting. Local rebuilds are never pulled
+/// over; an offline registry is tolerable only when the base is already usable.
+pub fn refresh_base_image() -> std::io::Result<String> {
+    refresh_base_image_with(Path::new("docker"))
+}
+
+fn refresh_base_image_with(docker: &Path) -> std::io::Result<String> {
+    let existing = match inspect_image_id_once_with(BASE_IMAGE_REF, docker) {
+        Ok(id) => Some(id),
+        Err(error) if error.image_missing => None,
+        Err(error) => return Err(error.error),
+    };
+    if let Some(id) = &existing {
+        let output = Command::new(docker)
+            .args([
+                "image",
+                "inspect",
+                "--format",
+                BASE_PROVENANCE,
+                BASE_IMAGE_REF,
+            ])
+            .output()?;
+        let provenance = serde_json::from_slice::<BaseProvenance>(&output.stdout);
+        match provenance {
+            Ok(info) if output.status.success() => {
+                if info.is_local() {
+                    return Ok(id.clone());
+                }
+            }
+            _ => {
+                // Unknown provenance must not authorize overwriting a local build.
+                eprintln!("warning: cannot determine base-image provenance; preserving local base");
+                return Ok(id.clone());
+            }
+        }
+    }
+    match pull_base_with(docker) {
+        Ok(()) => inspect_image_id_once_with(BASE_IMAGE_REF, docker).map_err(|e| e.error),
+        Err(error) => match existing {
+            Some(id) => {
+                eprintln!("warning: base-image refresh failed; using cached base: {error}");
+                Ok(id)
+            }
+            None => Err(std::io::Error::other(format!(
+                "{error}; check network/auth for ghcr.io or run `pithos rebuild-base`"
+            ))),
+        },
+    }
+}
+
+fn pull_base_with(docker: &Path) -> std::io::Result<()> {
+    use std::time::{Duration, Instant};
+    // A file avoids pipe backpressure and reader threads that could outlive timeout.
+    let errors = tempfile::tempfile()?;
+    let mut child = Command::new(docker)
+        .args(["pull", BASE_IMAGE_REF])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(errors))
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(std::io::Error::other(format!(
+                    "docker pull {BASE_IMAGE_REF} failed ({status})"
+                )))
+            };
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("docker pull {BASE_IMAGE_REF} exceeded 30 seconds"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 

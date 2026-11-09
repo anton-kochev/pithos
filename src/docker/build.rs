@@ -161,6 +161,8 @@ fn assemble_base_build_args(context: &Path) -> Vec<OsString> {
         "Dockerfile.base".into(),
         "-t".into(),
         BASE_IMAGE_REF.into(),
+        "--label".into(),
+        "dev.pithos.local-base=true".into(),
         context.into(),
     ]
 }
@@ -177,10 +179,8 @@ fn assemble_build_args(request: BuildRequest<'_>) -> Vec<OsString> {
     let fingerprint_label = fingerprint::label(request.fingerprint);
     let mut args: Vec<OsString> = vec![
         "build".into(),
-        // Always check the registry for a newer `pithos:base` — without this,
-        // a locally cached base tag is used forever and base-image updates
-        // (new runtimes, CMD contract changes) never reach existing machines.
-        "--pull".into(),
+        // Refresh happens before fingerprinting, not after choosing the cache key.
+        "--pull=false".into(),
         "--progress=plain".into(),
         "-f".into(),
         request.dockerfile.into(),

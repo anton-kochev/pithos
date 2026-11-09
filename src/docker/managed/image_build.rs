@@ -111,6 +111,7 @@ pub(super) fn ensure(
     if docker.work_shutdown.is_requested() {
         return Err(PreflightError::Unavailable);
     }
+    refresh_base(docker, root)?;
     let (cached, base) = image_cache::resolve_with_base(docker, yaml, pithos, identity, client)?;
     if let Some(id) = cached {
         return Ok(id);
@@ -197,6 +198,102 @@ pub(super) fn ensure_browser(
         |_| Ok(()),
         |docker, built| image_cache::verify_browser_candidate(docker, built, identity, &hash),
     )
+}
+
+/// Refresh only in build preparation, never in the read-only cache resolver.
+fn refresh_base(docker: &mut ManagedDocker, root: &Path) -> Result<(), PreflightError> {
+    use crate::docker::image::{BASE_IMAGE_REF, BASE_PROVENANCE, BaseProvenance};
+    // Only a successful bounded listing can establish absence. Inspect/query
+    // failures also include daemon and timeout errors, not just missing tags.
+    let listed = docker.query(&[
+        "image",
+        "ls",
+        "--filter",
+        &format!("reference={BASE_IMAGE_REF}"),
+        "--format",
+        "{{json .ID}}",
+        "--no-trunc",
+    ])?;
+    let existing = if listed.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        Some(image_cache::inspect_base(docker)?)
+    };
+    if existing.is_some() {
+        let bytes = match docker.query(&[
+            "image",
+            "inspect",
+            "--format",
+            BASE_PROVENANCE,
+            BASE_IMAGE_REF,
+        ]) {
+            Ok(bytes) => bytes,
+            Err(PreflightError::Unavailable)
+                if !docker.has_child() && !docker.work_shutdown.is_requested() =>
+            {
+                eprintln!("warning: cannot determine base-image provenance; preserving local base");
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        match serde_json::from_slice::<BaseProvenance>(&bytes) {
+            Ok(info) if !info.is_local() => {}
+            Ok(_) => return Ok(()),
+            Err(_) => {
+                eprintln!("warning: cannot determine base-image provenance; preserving local base");
+                return Ok(());
+            }
+        }
+    }
+    if docker.has_child() {
+        return Err(PreflightError::ChildPending);
+    }
+    let stage = Stage::new(root)?;
+    match fs::read(docker.config.resolved.join("config.json")) {
+        Ok(bytes) => fs::write(stage.config.join("config.json"), bytes)
+            .map_err(|_| PreflightError::Unavailable)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(PreflightError::Unavailable),
+    }
+    docker.check_selection()?;
+    let mut command = Command::new(&docker.executable.resolved);
+    command
+        .env_clear()
+        .env("DOCKER_CLI_TELEMETRY_OPTOUT", "1")
+        .current_dir(&stage.config)
+        .arg("--host")
+        .arg(&docker.endpoint)
+        .arg("--config")
+        .arg(&stage.config)
+        .args(["pull", "--quiet", BASE_IMAGE_REF]);
+    docker.refresh_stage = Some(stage.dir);
+    let report = docker.refresh_supervisor.execute(&mut command);
+    if !docker.refresh_supervisor.is_in_flight() {
+        docker.refresh_stage = None;
+    }
+    // Cancellation, retained ownership and changed selection cannot be converted
+    // into an offline cache hit. The caller must still settle any owned child.
+    docker.check_selection()?;
+    if docker.has_child() || docker.work_shutdown.is_requested() {
+        return Err(PreflightError::Unavailable);
+    }
+    let success = report.is_ok_and(|report| {
+        matches!(report.outcome, Outcome::Exited(status) if status.success())
+            && !report.signal_error
+            && !report.wait_error
+    });
+    if !success {
+        if existing.is_none() {
+            eprintln!(
+                "base-image pull failed; check network/auth for ghcr.io or run `pithos rebuild-base`"
+            );
+            return Err(PreflightError::Unavailable);
+        }
+        eprintln!("warning: base-image refresh failed; using cached base");
+    }
+    // Re-observe through the frozen daemon before hashing, even on fallback.
+    image_cache::inspect_base(docker)?;
+    Ok(())
 }
 
 /// Resolve or pull `postgres:<major.minor>`. The pull runs through the frozen

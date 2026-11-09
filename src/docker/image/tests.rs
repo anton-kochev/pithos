@@ -345,3 +345,102 @@ fn parse_pithos_image_lines_skips_blank_and_malformed_lines() {
     assert_eq!(imgs[0].id, "sha256:a");
     assert_eq!(imgs[1].id, "sha256:b");
 }
+
+#[cfg(unix)]
+#[test]
+fn refresh_published_base_before_resolving_id() {
+    let (_dir, docker) = fake_docker(
+        r#"
+case "$1" in
+image) echo '{"local":false,"digests":["example@sha256:abc"]}' ;;
+pull) touch "$0.pulled" ;;
+inspect) if [ -f "$0.pulled" ]; then echo sha256:new; else echo sha256:old; fi ;;
+esac
+"#,
+    );
+    assert_eq!(refresh_base_image_with(&docker).unwrap(), "sha256:new");
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_preserves_local_and_offline_bases_and_bootstraps_missing_base() {
+    for (provenance, missing, offline, pulls, succeeds) in [
+        (
+            r#"{"local":true,"digests":["registry@sha256:old"]}"#,
+            false,
+            false,
+            false,
+            true,
+        ),
+        (r#"{"local":false,"digests":[]}"#, false, false, false, true),
+        ("invalid", false, false, false, true),
+        (
+            r#"{"local":false,"digests":["registry@sha256:old"]}"#,
+            false,
+            true,
+            true,
+            true,
+        ),
+        ("invalid", true, false, true, true),
+        ("invalid", true, true, true, false),
+    ] {
+        let script = format!(
+            r#"
+case "$1" in
+image) echo '{provenance}' ;;
+pull) touch "$0.pulled"; exit {exit} ;;
+inspect) if [ {missing} = true ] && [ ! -f "$0.pulled" ]; then
+    echo 'Error: No such image' >&2; exit 1
+    else echo sha256:base; fi ;;
+esac
+"#,
+            exit = if offline { 1 } else { 0 }
+        );
+        let (_dir, docker) = fake_docker(&script);
+        assert_eq!(
+            refresh_base_image_with(&docker).is_ok(),
+            succeeds,
+            "{script}"
+        );
+        assert_eq!(
+            std::path::PathBuf::from(format!("{}.pulled", docker.display())).exists(),
+            pulls,
+            "{script}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_timeout_uses_cached_base() {
+    let (_dir, docker) = fake_docker(
+        r#"
+case "$1" in
+image) echo '{"local":false,"digests":["registry@sha256:old"]}' ;;
+pull) exec sleep 60 ;;
+inspect) echo sha256:old ;;
+esac
+"#,
+    );
+    let start = std::time::Instant::now();
+    assert_eq!(refresh_base_image_with(&docker).unwrap(), "sha256:old");
+    assert!(start.elapsed() >= std::time::Duration::from_secs(30));
+    assert!(start.elapsed() < std::time::Duration::from_secs(40));
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_inspection_failure_never_pulls() {
+    let (_dir, docker) = fake_docker(
+        r#"
+case "$1" in
+pull) touch "$0.pulled" ;;
+inspect) if [ -f "$0.pulled" ]; then echo sha256:new; else
+    echo 'daemon temporarily unavailable' >&2; exit 1; fi ;;
+esac
+"#,
+    );
+    let result = refresh_base_image_with(&docker);
+    assert!(!std::path::PathBuf::from(format!("{}.pulled", docker.display())).exists());
+    assert!(result.is_err());
+}

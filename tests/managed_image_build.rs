@@ -54,7 +54,22 @@ with (root/'calls').open('a') as f:
 if a[:2] == ['info','--format']:
     key = 'info'
 elif a[:2] == ['image','inspect'] and a[-1] == '__BASE__':
-    key = 'base'
+    key = 'provenance' if 'RepoDigests' in a[3] else 'base'
+    if key == 'base' and (root/'inspect-fails').exists(): sys.exit(1)
+elif a[0] == 'pull':
+    (pathlib.Path(sys.argv[4])/'.token_seed').write_text('seed')
+    (root/'pull-started').write_text('yes')
+    if (root/'slow-pull').exists(): time.sleep(60)
+    if (root/'change-selection').exists():
+        (root/'config'/'config.json').write_text('{"detachKeys":"ctrl-x"}')
+    if (root/'pull-fails').exists(): sys.exit(1)
+    if (root/'inspect-fails').exists(): (root/'inspect-fails').unlink()
+    if (root/'pulled-base').exists():
+        (root/'base').write_text((root/'pulled-base').read_text())
+    sys.exit(0)
+elif a[:2] == ['image','ls'] and 'reference=__BASE__' in a:
+    if (root/'base').exists(): print(json.dumps('sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'))
+    sys.exit(0)
 elif a[:2] == ['image','ls']:
     key = 'list'
     if (root/'before-build-base').exists():
@@ -134,6 +149,10 @@ sys.stdout.write((root/key).read_text())
             json!({"id":"daemon-one","os_type":"linux","security_options":[]}).to_string(),
         );
         f.set("base", json!({"id":id('a')}).to_string());
+        f.set(
+            "provenance",
+            json!({"local":true,"digests":null}).to_string(),
+        );
         f.set("list", "");
         f.set("built-id", id('b'));
         f.set(
@@ -658,4 +677,197 @@ fn built_image_not_layered_on_the_pinned_base_is_rejected() {
             "{layers}"
         );
     }
+}
+
+#[test]
+fn published_base_refresh_precedes_managed_cache_lookup() {
+    let f = Fixture::new();
+    f.set(
+        "provenance",
+        json!({"local":false,"digests":["registry@sha256:old"]}).to_string(),
+    );
+    f.set("list", format!("\"{}\"\n", id('b')));
+    let mut docker = f.docker();
+    assert_eq!(f.ensure(&mut docker).unwrap().as_str(), id('b'));
+    let calls = f.calls();
+    let pull = calls
+        .iter()
+        .position(|v| v["args"][0] == "pull")
+        .expect("refresh before cache hit");
+    let lookup = calls
+        .iter()
+        .position(|v| {
+            v["args"][1] == "ls"
+                && v["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|arg| arg.as_str().is_some_and(|arg| arg.starts_with("label=")))
+        })
+        .unwrap();
+    assert!(pull < lookup);
+    assert_eq!(calls[pull]["args"], json!(["pull", "--quiet", BASE]));
+    assert_eq!(
+        calls[pull]["global"][1],
+        format!("unix://{}", f.socket.display())
+    );
+    assert_ne!(calls[pull]["global"][3], f.config.to_str().unwrap());
+    assert!(!f.config.join(".token_seed").exists());
+    assert!(!docker.has_child());
+    assert_eq!(fs::read_dir(&f.stage).unwrap().count(), 0);
+}
+
+#[test]
+fn invalid_base_metadata_does_not_authorize_a_pull() {
+    let f = Fixture::new();
+    f.set("base", "not json");
+    f.set("pulled-base", json!({"id":id('a')}).to_string());
+    let result = f.ensure(&mut f.docker());
+    assert_eq!(result, Err(PreflightError::InvalidResponse));
+    assert!(!f.calls().iter().any(|v| v["args"][0] == "pull"));
+}
+
+#[test]
+fn unavailable_provenance_preserves_cached_base() {
+    let f = Fixture::new();
+    fs::remove_file(f.dir.path().join("provenance")).unwrap();
+    f.set("list", format!("\"{}\"\n", id('b')));
+    let mut docker = f.docker();
+    assert_eq!(f.ensure(&mut docker).unwrap().as_str(), id('b'));
+    assert!(!f.calls().iter().any(|v| v["args"][0] == "pull"));
+    assert!(!docker.has_child());
+}
+
+#[test]
+fn refresh_fallback_bootstrap_and_local_provenance() {
+    for case in [
+        "offline",
+        "missing",
+        "missing-offline",
+        "label",
+        "legacy",
+        "unknown",
+    ] {
+        let f = Fixture::new();
+        f.set("list", format!("\"{}\"\n", id('b')));
+        f.set(
+            "provenance",
+            json!({"local":false,"digests":["registry@sha256:old"]}).to_string(),
+        );
+        match case {
+            "offline" => f.set("pull-fails", ""),
+            "missing" | "missing-offline" => {
+                fs::remove_file(f.dir.path().join("base")).unwrap();
+                f.set("pulled-base", json!({"id":id('a')}).to_string());
+                if case == "missing-offline" {
+                    f.set("pull-fails", "");
+                }
+            }
+            "label" => f.set(
+                "provenance",
+                json!({"local":true,"digests":["registry@sha256:old"]}).to_string(),
+            ),
+            "legacy" => f.set(
+                "provenance",
+                json!({"local":false,"digests":[]}).to_string(),
+            ),
+            "unknown" => f.set("provenance", "invalid"),
+            _ => unreachable!(),
+        }
+        let mut docker = f.docker();
+        let result = f.ensure(&mut docker);
+        assert_eq!(
+            result.is_ok(),
+            case != "missing-offline",
+            "{case}: {result:?}"
+        );
+        assert_eq!(
+            f.calls().iter().any(|v| v["args"][0] == "pull"),
+            matches!(case, "offline" | "missing" | "missing-offline"),
+            "{case}"
+        );
+        assert!(!docker.has_child());
+        assert_eq!(fs::read_dir(&f.stage).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn refresh_cancellation_and_selection_change_never_authorize_cache() {
+    for cancel in [true, false] {
+        let f = Fixture::new();
+        f.set("list", format!("\"{}\"\n", id('b')));
+        f.set(
+            "provenance",
+            json!({"local":false,"digests":["registry@sha256:old"]}).to_string(),
+        );
+        let notifier = if cancel {
+            f.set("slow-pull", "");
+            let marker = f.dir.path().join("pull-started");
+            let shutdown = f.shutdown.clone();
+            Some(std::thread::spawn(move || {
+                for _ in 0..2000 {
+                    if marker.exists() {
+                        shutdown.request(ShutdownReason::Requested);
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                shutdown.request(ShutdownReason::Requested);
+                panic!("pull never started");
+            }))
+        } else {
+            f.set("change-selection", "");
+            None
+        };
+        let mut docker = f.docker();
+        assert!(f.ensure(&mut docker).is_err());
+        if let Some(notifier) = notifier {
+            notifier.join().unwrap();
+        }
+        for _ in 0..2000 {
+            if !docker.has_child() {
+                break;
+            }
+            let _ = docker.poll_child();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!docker.has_child());
+        assert_eq!(fs::read_dir(&f.stage).unwrap().count(), 0);
+        assert!(!f.calls().iter().any(|v| {
+            v["args"][1] == "ls"
+                && v["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|arg| arg.as_str().is_some_and(|arg| arg.starts_with("label=")))
+        }));
+    }
+}
+
+#[test]
+fn refresh_timeout_falls_back_and_reaps_child() {
+    let f = Fixture::new();
+    f.set("list", format!("\"{}\"\n", id('b')));
+    f.set(
+        "provenance",
+        json!({"local":false,"digests":["registry@sha256:old"]}).to_string(),
+    );
+    f.set("slow-pull", "");
+    let mut docker = f.docker();
+    let start = std::time::Instant::now();
+    assert_eq!(f.ensure(&mut docker).unwrap().as_str(), id('b'));
+    assert!(start.elapsed() >= std::time::Duration::from_secs(30));
+    assert!(start.elapsed() < std::time::Duration::from_secs(40));
+    assert!(!docker.has_child());
+    assert_eq!(fs::read_dir(&f.stage).unwrap().count(), 0);
+}
+
+#[test]
+fn refresh_inspection_failure_never_pulls() {
+    let f = Fixture::new();
+    f.set("inspect-fails", "");
+    f.set("pulled-base", json!({"id":id('a')}).to_string());
+    let result = f.ensure(&mut f.docker());
+    assert!(!f.calls().iter().any(|v| v["args"][0] == "pull"));
+    assert_eq!(result, Err(PreflightError::Unavailable));
 }

@@ -62,6 +62,21 @@ flag, `run` is implied — `pithos --tmux` and `pithos run --tmux` are the same
 command. Run `pithos help`
 for the full reference.
 
+### Base-image updates
+
+Normal launches and `pithos build` (including broker mode) refresh the published
+`ghcr.io/anton-kochev/pithos:base` before computing the project image fingerprint.
+The pull has a 30-second deadline; on registry/network failure Pithos warns and
+uses the cached base if available. Without a cached base, the pull must succeed
+(or run `pithos rebuild-base` locally). Project builds do not pull again after
+choosing the fingerprint.
+
+`pithos rebuild-base` marks the image as local, so automatic refresh will not
+replace it. Older local bases without registry digests are also preserved, as
+are bases whose provenance cannot be determined. To return to published updates,
+explicitly run `docker pull ghcr.io/anton-kochev/pithos:base`.
+`--no-build` and read-only cache/info queries never refresh or bootstrap the base.
+
 ### Project path inside the container
 
 **Breaking change:** the project is mounted inside the container at the same
