@@ -14,7 +14,7 @@ fn hash(client: BrowserClientLayer) -> String {
         &pithos::dockerfile::emit_with_browser(&pithos::config::load(RAW).unwrap(), client),
         RAW,
         &Default::default(),
-        pithos::embed::PI_BUN_COMPAT_MJS,
+        &pithos::embed::launch_assets(),
         pithos::embed::ENTRYPOINT_SH,
         &id('a'),
     )

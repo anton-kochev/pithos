@@ -50,7 +50,7 @@ fn build_refreshes_published_base_before_fingerprint_cache_lookup() {
         &pithos::dockerfile::emit(&yaml),
         raw,
         &BTreeMap::new(),
-        pithos::embed::PI_BUN_COMPAT_MJS,
+        &pithos::embed::launch_assets(),
         pithos::embed::ENTRYPOINT_SH,
         "sha256:new",
     );

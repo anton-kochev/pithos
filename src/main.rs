@@ -937,7 +937,7 @@ fn ensure_image(
         dockerfile_content,
         pithos_bytes,
         &installers,
-        pithos::embed::PI_BUN_COMPAT_MJS,
+        &pithos::embed::launch_assets(),
         pithos::embed::ENTRYPOINT_SH,
         &base_image_id,
     );
@@ -1531,7 +1531,7 @@ fn run_info(
         dockerfile_content,
         pithos_bytes,
         &installers,
-        pithos::embed::PI_BUN_COMPAT_MJS,
+        &pithos::embed::launch_assets(),
         pithos::embed::ENTRYPOINT_SH,
         &base_image_id,
     );

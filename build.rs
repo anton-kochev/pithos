@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     // Setting any rerun-if-changed disables Cargo's implicit watch on build.rs itself,
@@ -74,5 +74,45 @@ fn main() {
     }
     content.push_str("];\n");
 
+    content.push_str(&pi_guild_runtime_table(&manifest_dir));
+
     fs::write(&dest, content).expect("write embedded_installers.rs");
+}
+
+/// `PI_GUILD_RUNTIME`: every file the image build needs from
+/// `scripts/pi-guild-runtime/`, as (path relative to that directory, content).
+/// The developer-only builder and the source patches stay out of the binary.
+fn pi_guild_runtime_table(manifest_dir: &str) -> String {
+    let root = PathBuf::from(manifest_dir).join("scripts/pi-guild-runtime");
+    println!("cargo:rerun-if-changed={}", root.display());
+
+    let mut files = vec![root.join("apply.mjs")];
+    collect_files(&root.join("versions"), &mut files);
+    files.retain(|path| path.file_name().is_some_and(|name| name != "source.patch"));
+    files.sort();
+
+    let mut table = String::from("\npub const PI_GUILD_RUNTIME: &[(&str, &[u8])] = &[\n");
+    for path in &files {
+        println!("cargo:rerun-if-changed={}", path.display());
+        let relative = path.strip_prefix(&root).expect("file under runtime root");
+        table.push_str(&format!(
+            "    ({:?}, include_bytes!({:?})),\n",
+            relative.to_str().expect("utf-8 path"),
+            path.to_str().expect("utf-8 path")
+        ));
+    }
+    table.push_str("];\n");
+    table
+}
+
+fn collect_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    println!("cargo:rerun-if-changed={}", dir.display());
+    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_files(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
 }

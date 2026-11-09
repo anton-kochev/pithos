@@ -197,7 +197,7 @@ fn fingerprint_validated(
         frame(&mut hash, bytes);
     }
     for bytes in [
-        embed::PI_BUN_COMPAT_MJS,
+        &embed::launch_assets(),
         embed::ENTRYPOINT_SH,
         embed::IDENTITY_IMAGE_PY,
     ] {

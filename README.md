@@ -410,6 +410,9 @@ extension diagnostics, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
 ## What's in the container
 
+When `.pithos` pins a Pi version with a shipped Guild runtime, Pi itself runs on the
+base image's Node instead of Bun. See [scripts/pi-guild-runtime](scripts/pi-guild-runtime/README.md).
+
 The base image bundles Node 24 for Pithos infrastructure and the Pi coding agent,
 but no Pi packages. A project's `toolchains.node` declaration overrides the
 project-facing Node runtime without removing that infrastructure installation.

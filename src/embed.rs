@@ -18,6 +18,18 @@ pub const ENTRYPOINT_SH: &[u8] = include_bytes!("../entrypoint.sh");
 /// shim changes.
 pub const PI_BUN_COMPAT_MJS: &[u8] = include_bytes!("../scripts/pi-bun-compat.mjs");
 
+/// The container's Pi launcher, baked into every per-project image at
+/// [`crate::dockerfile::PI_LAUNCH_PATH`]. It picks the Guild runtime or stock Pi
+/// before any Pi module loads.
+pub const PI_LAUNCH_SH: &[u8] = include_bytes!("../scripts/pi-launch");
+
+/// Files the emitted Dockerfile bakes for the launch route, as one blob for
+/// [`crate::fingerprint::compute`]: a pithos binary carrying a changed preload
+/// or launcher must invalidate images built by the previous one.
+pub fn launch_assets() -> Vec<u8> {
+    [PI_BUN_COMPAT_MJS, PI_LAUNCH_SH].concat()
+}
+
 /// Pi patch scripts from `scripts/pi-patches/`, as (file name, content).
 /// The emitted Dockerfile re-copies them over the base image's copies before
 /// re-patching a pinned Pi, so a pithos newer than the local base ships its
@@ -30,9 +42,19 @@ pub const PI_PATCHES: &[(&str, &[u8])] = &[(
 
 /// SHA-256 over [`PI_PATCHES`], names and contents length-framed.
 pub fn pi_patches_fingerprint() -> String {
+    files_fingerprint(PI_PATCHES)
+}
+
+/// SHA-256 over [`PI_GUILD_RUNTIME`], framed like [`pi_patches_fingerprint`].
+/// Named in the Dockerfile text, so a changed overlay moves the cache keys.
+pub fn pi_guild_runtime_fingerprint() -> String {
+    files_fingerprint(PI_GUILD_RUNTIME)
+}
+
+fn files_fingerprint(files: &[(&str, &[u8])]) -> String {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
-    for (name, bytes) in PI_PATCHES {
+    for (name, bytes) in files {
         digest.update((name.len() as u64).to_le_bytes());
         digest.update(name.as_bytes());
         digest.update((bytes.len() as u64).to_le_bytes());
@@ -54,7 +76,9 @@ pub const IDENTITY_IMAGE_PY: &[u8] = include_bytes!("docker/identity_image.py");
 /// <dest>/toolchains/<name>-install.sh             (mode 0o755 on unix, one per script in toolchains/)
 /// <dest>/entrypoint.sh                            (mode 0o755 on unix)
 /// <dest>/pi-bun-compat.mjs                        (mode 0o755 on unix)
+/// <dest>/pi-launch                                (mode 0o755 on unix)
 /// <dest>/pi-patches/<name>.mjs                    (mode 0o755 on unix, one per PI_PATCHES entry)
+/// <dest>/pi-guild-runtime/<path>                  (mode 0o755 on unix, one per PI_GUILD_RUNTIME entry)
 /// <dest>/pi-config/{prompts,skills,themes}/       (empty dirs)
 /// ```
 ///
@@ -76,10 +100,17 @@ pub fn extract_to(dest: &Path) -> io::Result<()> {
     // 0o755 writer keeps the extraction path single-purpose; Dockerfile.base
     // resets the mode on the copy it bakes.
     write_executable(&dest.join("pi-bun-compat.mjs"), PI_BUN_COMPAT_MJS)?;
+    write_executable(&dest.join("pi-launch"), PI_LAUNCH_SH)?;
     let patches = dest.join("pi-patches");
     fs::create_dir_all(&patches)?;
     for (name, bytes) in PI_PATCHES {
         write_executable(&patches.join(name), bytes)?;
+    }
+    let guild_runtime = dest.join("pi-guild-runtime");
+    for (relative, bytes) in PI_GUILD_RUNTIME {
+        let path = guild_runtime.join(relative);
+        fs::create_dir_all(path.parent().expect("runtime file has a parent"))?;
+        write_executable(&path, bytes)?;
     }
     for sub in ["prompts", "skills", "themes"] {
         fs::create_dir_all(dest.join("pi-config").join(sub))?;
@@ -186,6 +217,25 @@ mod tests {
             assert_eq!(std::fs::read(&p).expect("read patch"), *bytes, "{name}");
             assert_executable(&p);
         }
+
+        let launch = dir.path().join("pi-launch");
+        assert_eq!(std::fs::read(&launch).expect("read launcher"), PI_LAUNCH_SH);
+        assert_executable(&launch);
+
+        for (relative, bytes) in PI_GUILD_RUNTIME {
+            let p = dir.path().join("pi-guild-runtime").join(relative);
+            assert_eq!(
+                std::fs::read(&p).expect("read runtime"),
+                *bytes,
+                "{relative}"
+            );
+        }
+        assert!(
+            !dir.path()
+                .join("pi-guild-runtime/versions/1.5.0/source.patch")
+                .exists(),
+            "provenance patches do not belong in the image"
+        );
 
         for sub in ["prompts", "skills", "themes"] {
             let p = dir.path().join("pi-config").join(sub);

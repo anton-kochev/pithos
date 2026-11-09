@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 /// per-project cache and forces a rebuild. Without this input, edits to
 /// `Dockerfile.base` are invisible to per-project cache hits.
 ///
-/// `bun_compat` is [`crate::embed::PI_BUN_COMPAT_MJS`], the Bun preload the
-/// emitted Dockerfile copies into the image. It is hashed separately from
+/// `bun_compat` is [`crate::embed::launch_assets`], the Bun preload and Pi
+/// launcher the emitted Dockerfile copies into the image. It is hashed separately from
 /// `base_image_id` because the launcher carries its own copy: a pithos binary
 /// with an updated shim must invalidate project images built by the previous
 /// one, even when the base image ID has not moved.

@@ -17,9 +17,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
 
 #[test]
@@ -420,9 +423,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
     assert_eq!(content, expected);
 }
@@ -508,9 +514,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
     assert_eq!(content, expected);
 }

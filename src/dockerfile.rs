@@ -17,17 +17,22 @@ USER root
 /// tied to this constant.
 pub const PI_BUN_COMPAT_PATH: &str = "/opt/pi-bun-compat.mjs";
 
+/// Absolute path of the Pi launcher inside the image, copied by the emitted
+/// per-project Dockerfile from [`crate::embed::PI_LAUNCH_SH`].
+pub const PI_LAUNCH_PATH: &str = "/usr/local/bin/pi-launch";
+
 /// The argv that launches the Pi agent inside the container. This is the
 /// single source of truth for the per-project Dockerfile `CMD` (emitted
 /// below) and for the tmux observability wrapper in [`crate::docker`], so
 /// the two can never drift apart.
 ///
-/// `--preload` is retained as a compatibility fallback: Pi's bundled CLI calls
+/// The launcher picks the runtime before any Pi module loads: the Guild
+/// runtime when the image build applied it, otherwise stock Pi on Bun with the
+/// compat preload (Pi's bundled CLI calls
 /// `node:worker_threads.markAsUncloneable` while loading extensions, and Bun
 /// runtimes without that function otherwise die before the first extension
-/// factory runs. The shim leaves native implementations untouched.
-pub const PI_LAUNCH_ARGV: [&str; 4] =
-    ["bun", "--preload", PI_BUN_COMPAT_PATH, "/opt/pi-npm/bin/pi"];
+/// factory runs).
+pub const PI_LAUNCH_ARGV: [&str; 1] = [PI_LAUNCH_PATH];
 
 /// Emit a Dockerfile for the given parsed `.pithos` config.
 ///
@@ -107,6 +112,15 @@ pub fn emit_with_browser(yaml: &YamlOwned, client: BrowserClientLayer) -> String
             "RUN set -e; for p in /opt/pi-patches/*.mjs; do [ -e \"$p\" ] || continue; node \"$p\"; done"
         )
         .unwrap();
+        writeln!(
+            out,
+            "# Guild runtime: {}. Applied last: it is guarded against the exact patched install, and leaves stock Pi in place for any version it does not cover.",
+            crate::embed::pi_guild_runtime_fingerprint()
+        )
+        .unwrap();
+        writeln!(out, "RUN rm -rf /opt/pi-guild-runtime").unwrap();
+        writeln!(out, "COPY pi-guild-runtime/ /opt/pi-guild-runtime/").unwrap();
+        writeln!(out, "RUN node /opt/pi-guild-runtime/apply.mjs").unwrap();
     }
     if client == BrowserClientLayer::Included {
         writeln!(
@@ -148,6 +162,13 @@ pub fn emit_with_browser(yaml: &YamlOwned, client: BrowserClientLayer) -> String
     )
     .unwrap();
     writeln!(out, "COPY pi-bun-compat.mjs {PI_BUN_COMPAT_PATH}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads."
+    )
+    .unwrap();
+    writeln!(out, "COPY pi-launch {PI_LAUNCH_PATH}").unwrap();
     writeln!(out, "USER pi").unwrap();
     writeln!(
         out,
@@ -294,7 +315,7 @@ fn pi_version(yaml: &YamlOwned) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PI_BUN_COMPAT_PATH, PI_LAUNCH_ARGV, emit};
+    use super::{PI_BUN_COMPAT_PATH, PI_LAUNCH_ARGV, PI_LAUNCH_PATH, emit};
     use crate::config;
 
     #[test]
@@ -558,20 +579,43 @@ mod tests {
     }
 
     #[test]
-    fn pi_launch_argv_preloads_the_bun_compat_shim_before_the_pi_entrypoint() {
-        // Order is the whole point: `--preload <path>` has to reach bun, so it
-        // must sit between the interpreter and the script. Move it after
-        // `/opt/pi-npm/bin/pi` and bun hands it to Pi as a prompt argument.
-        assert_eq!(
-            PI_LAUNCH_ARGV,
-            [
-                "bun",
-                "--preload",
-                "/opt/pi-bun-compat.mjs",
-                "/opt/pi-npm/bin/pi"
-            ]
+    fn pi_launcher_keeps_the_stock_route_and_execs_every_runtime() {
+        let script = std::str::from_utf8(crate::embed::PI_LAUNCH_SH).expect("launcher is utf-8");
+        assert_eq!(PI_LAUNCH_ARGV, [PI_LAUNCH_PATH]);
+        // `--preload <path>` has to reach bun before the script, or bun hands
+        // it to Pi as a prompt argument.
+        assert!(script.contains(&format!(
+            "exec bun --preload {PI_BUN_COMPAT_PATH} /opt/pi-npm/bin/pi \"$@\""
+        )));
+        assert!(script.contains("exec /usr/bin/node "));
+        assert!(script.contains("/opt/pi-guild-runtime"));
+    }
+
+    #[test]
+    fn pi_guild_runtime_applies_after_the_patches_only_for_a_pinned_pi() {
+        // Arrange
+        let pinned =
+            config::load("toolchains: {}\npi:\n  version: \"1.5.0\"\n".as_bytes()).unwrap();
+        let unpinned = config::load("toolchains: {}\n".as_bytes()).unwrap();
+
+        // Act
+        let pinned = emit(&pinned);
+        let unpinned = emit(&unpinned);
+
+        // Assert
+        let patches = pinned
+            .find("RUN set -e; for p in /opt/pi-patches")
+            .expect("patch loop");
+        let apply = pinned
+            .find("RUN node /opt/pi-guild-runtime/apply.mjs")
+            .expect("apply step");
+        assert!(
+            patches < apply,
+            "runtime is guarded against the patched install"
         );
-        assert_eq!(PI_LAUNCH_ARGV[2], PI_BUN_COMPAT_PATH);
+        assert!(pinned.contains(&crate::embed::pi_guild_runtime_fingerprint()));
+        assert!(!unpinned.contains("/opt/pi-guild-runtime"));
+        assert!(unpinned.contains(&format!("COPY pi-launch {PI_LAUNCH_PATH}\n")));
     }
 
     #[test]
@@ -617,9 +661,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -650,9 +697,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -683,9 +733,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -719,9 +772,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -770,9 +826,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -820,9 +879,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -849,9 +911,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -878,9 +943,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -910,9 +978,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -951,9 +1022,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -983,9 +1057,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ";
         assert_eq!(output, expected);
     }
@@ -1013,6 +1090,10 @@ RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@0.75.3 &
 RUN rm -rf /opt/pi-patches
 COPY pi-patches/ /opt/pi-patches/
 RUN set -e; for p in /opt/pi-patches/*.mjs; do [ -e \"$p\" ] || continue; node \"$p\"; done
+# Guild runtime: {guild}. Applied last: it is guarded against the exact patched install, and leaves stock Pi in place for any version it does not cover.
+RUN rm -rf /opt/pi-guild-runtime
+COPY pi-guild-runtime/ /opt/pi-guild-runtime/
+RUN node /opt/pi-guild-runtime/apply.mjs
 
 # Pi-config defaults baked into /opt/pi-defaults/; entrypoint seeds them into the user's volume on first run. Tini handles PID 1 signal forwarding.
 COPY pi-config/ /opt/pi-defaults/
@@ -1020,11 +1101,15 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ",
-            fp = crate::embed::pi_patches_fingerprint()
+            fp = crate::embed::pi_patches_fingerprint(),
+            guild = crate::embed::pi_guild_runtime_fingerprint()
         );
         assert_eq!(output, expected);
     }
@@ -1066,6 +1151,10 @@ RUN npm install --prefix=/opt/pi-npm -g @earendil-works/pi-coding-agent@0.75.3 &
 RUN rm -rf /opt/pi-patches
 COPY pi-patches/ /opt/pi-patches/
 RUN set -e; for p in /opt/pi-patches/*.mjs; do [ -e \"$p\" ] || continue; node \"$p\"; done
+# Guild runtime: {guild}. Applied last: it is guarded against the exact patched install, and leaves stock Pi in place for any version it does not cover.
+RUN rm -rf /opt/pi-guild-runtime
+COPY pi-guild-runtime/ /opt/pi-guild-runtime/
+RUN node /opt/pi-guild-runtime/apply.mjs
 
 # Pi-config defaults baked into /opt/pi-defaults/; entrypoint seeds them into the user's volume on first run. Tini handles PID 1 signal forwarding.
 COPY pi-config/ /opt/pi-defaults/
@@ -1073,11 +1162,15 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Bun compat preload: no-op `markAsUncloneable` for Bun runtimes without it, which Pi's bundled CLI needs before it can load any extension. Re-copied from the launcher so a pithos newer than the base image ships its own shim.
 COPY pi-bun-compat.mjs /opt/pi-bun-compat.mjs
+
+# Pi launcher: picks the Guild runtime or stock Pi before any Pi module loads.
+COPY pi-launch /usr/local/bin/pi-launch
 USER pi
 ENTRYPOINT [\"/usr/bin/tini\", \"--\", \"/usr/local/bin/entrypoint.sh\"]
-CMD [\"bun\", \"--preload\", \"/opt/pi-bun-compat.mjs\", \"/opt/pi-npm/bin/pi\"]
+CMD [\"/usr/local/bin/pi-launch\"]
 ",
-            fp = crate::embed::pi_patches_fingerprint()
+            fp = crate::embed::pi_patches_fingerprint(),
+            guild = crate::embed::pi_guild_runtime_fingerprint()
         );
         assert_eq!(output, expected);
     }

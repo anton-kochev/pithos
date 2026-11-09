@@ -1,0 +1,21 @@
+#!/bin/sh
+# Starts Pi inside a Pithos container. Picks the runtime before any Pi module
+# loads, and always execs so tini signals reach Pi directly.
+#
+# The Guild runtime is the only one that exposes the host capabilities behind
+# Guild's background tools. It exists only when the image build applied it, and
+# runs the unbundled CLI on Node, which is what it was qualified on. Guild
+# children inherit this Node and CLI path. Everything else takes the stock route.
+#
+# Rollback to stock without a rebuild: touch ~/.pi/agent/pithos-stock-runtime
+# See scripts/pi-guild-runtime/README.md.
+
+runtime=/opt/pi-guild-runtime
+if [ -f "$runtime/active" ] && [ ! -e "$HOME/.pi/agent/pithos-stock-runtime" ]; then
+  exec /usr/bin/node /opt/pi-npm/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js "$@"
+fi
+
+if [ -f "$runtime/refused" ]; then
+  echo "pithos: Guild background tools are off: $(cat "$runtime/refused")" >&2
+fi
+exec bun --preload /opt/pi-bun-compat.mjs /opt/pi-npm/bin/pi "$@"

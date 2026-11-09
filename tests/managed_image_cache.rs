@@ -502,7 +502,7 @@ fn fingerprint_binds_config_ids_base_installer_and_all_fixed_assets() {
         PROJECT,
         b"rust",
         pithos::embed::installer_bytes("rust").unwrap(),
-        pithos::embed::PI_BUN_COMPAT_MJS,
+        &pithos::embed::launch_assets(),
         pithos::embed::ENTRYPOINT_SH,
         pithos::embed::IDENTITY_IMAGE_PY,
         base.as_str().as_bytes(),
