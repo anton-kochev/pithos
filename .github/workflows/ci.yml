@@ -36,6 +36,9 @@ jobs:
       - name: Rust tests
         run: cargo test --locked --no-fail-fast -- --test-threads=1
 
+      - name: Node installer resolver tests
+        run: python3 tests/node_install_test.py
+
       - name: Skill mount tests
         run: python3 tests/browser_skill_mount_test.py
 

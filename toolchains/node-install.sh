@@ -55,6 +55,7 @@ resolved="$(
     | ($wanted | length) as $count
     | [
         .[]
+        | select(.version | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
         | (.version | ltrimstr("v") | split(".") | map(tonumber)) as $parts
         | select($parts[0:$count] == $wanted)
         | select(((.files // []) | index($platform)) != null)
