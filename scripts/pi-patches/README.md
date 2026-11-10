@@ -8,6 +8,8 @@ Run these after updating or reinstalling Pi.
 
 Shows the original slash-command invocation (for example `/plan ...`) in the chat while still sending the expanded prompt template to the model.
 
+The patch adds `displayText` when prompt-template expansion changes the text. This display text is used in interactive chat, HTML export, session first-message previews, and tree-selector rendering and search. Expanded text remains in the user message's `content`: this is presentation suppression, not removal of the expanded template from stored messages.
+
 ```bash
 scripts/pi-patches/suppress-prompt-template-display.mjs
 ```
