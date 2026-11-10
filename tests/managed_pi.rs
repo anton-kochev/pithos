@@ -117,11 +117,14 @@ elif a[:2]==['network','inspect'] and a[-1]=='e'*64:
 elif a[:2]==['network','rm']:
     assert a[-1]=='e'*64 and not (root/'container.json').exists() and not (root/'browser-container.json').exists(), 'network in use'
     (root/'network.json').unlink()
+elif a[:2]==['image','ls'] and mode('host-coordinator') and opt('--filter')=='reference='+__BASE_REF__:
+    emit(__BASE_IMAGE__)
 elif a[:2]==['image','ls'] and mode('host-coordinator'):
     assert '--no-trunc' in a and opt('--filter')=='label=io.pithos.broker.identity-fingerprint='+__FINGERPRINT__
     emit(__IMAGE__)
 elif a[:2]==['image','inspect']:
-    if mode('host-coordinator') and a[-1]==__BASE_REF__: emit({'id':__BASE_IMAGE__})
+    if mode('host-coordinator') and a[-1]==__BASE_REF__ and a[3].startswith('{\"local\"'): emit({'local':True,'digests':[]})
+    elif mode('host-coordinator') and a[-1]==__BASE_REF__: emit({'id':__BASE_IMAGE__})
     elif mode('host-coordinator') and '\"Labels\"' in a[3]:
         assert a[-1]==__IMAGE__
         emit({'id':__IMAGE__,'user':__USER__,'env':['HOME=/home/pi','USER=pi','LOGNAME=pi'],

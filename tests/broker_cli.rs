@@ -381,8 +381,12 @@ import json, pathlib, sys
 a = sys.argv[5:]
 if a[0] == 'info':
     print(json.dumps({{'id':'daemon-one','os_type':'linux','security_options':[]}}))
+elif a[:2] == ['image','inspect'] and a[3].startswith('{{"local"'):
+    print(json.dumps({{'local':True,'digests':[]}}))
 elif a[:2] == ['image','inspect']:
     print(json.dumps({{'id':'sha256:'+'a'*64}}))
+elif a[:2] == ['image','ls'] and a[a.index('--filter')+1].startswith('reference='):
+    print(json.dumps('sha256:'+'a'*64))
 elif a[:2] == ['image','ls']:
     pathlib.Path({log}).write_text(a[a.index('--filter')+1])
     sys.exit(42)
