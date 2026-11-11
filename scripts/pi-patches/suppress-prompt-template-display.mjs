@@ -42,12 +42,17 @@ const patches = [
 			},
 			{
 				label: "pass displayText through the run trigger",
-				oldText: [
-					"        await this._startRun({ messageType: \"user\", prompt: expandedText, images: currentImages }, () => preflightResult?.(\"started\"));",
-				].join("\n"),
-				newText: [
-					"        await this._startRun({ messageType: \"user\", prompt: expandedText, images: currentImages, displayText }, () => preflightResult?.(\"started\"));",
-				].join("\n"),
+				// Pi 1.5 moved trigger construction into _preparePrompt, which returns it.
+				variants: [
+					{
+						oldText: "        await this._startRun({ messageType: \"user\", prompt: expandedText, images: currentImages }, () => preflightResult?.(\"started\"));",
+						newText: "        await this._startRun({ messageType: \"user\", prompt: expandedText, images: currentImages, displayText }, () => preflightResult?.(\"started\"));",
+					},
+					{
+						oldText: "        return { messageType: \"user\", prompt: expandedText, images: currentImages };",
+						newText: "        return { messageType: \"user\", prompt: expandedText, images: currentImages, displayText };",
+					},
+				],
 			},
 			{
 				label: "persist displayText on user messages",
@@ -217,15 +222,17 @@ function findIndented(content, text) {
 }
 
 function applyEdit(content, edit, file) {
-	if (findIndented(content, edit.newText)) {
+	const variants = edit.variants ?? [{ oldText: edit.oldText, newText: edit.newText }];
+	if (variants.some((variant) => findIndented(content, variant.newText))) {
 		return { content, status: "already" };
 	}
-	const match = findIndented(content, edit.oldText);
-	if (!match) {
-		throw new Error(`${file}: could not find expected block for ${edit.label}`);
+	for (const variant of variants) {
+		const match = findIndented(content, variant.oldText);
+		if (!match) continue;
+		const replacement = reindent(dedent(variant.newText), match.width);
+		return { content: content.replace(match.candidate, replacement), status: "patched" };
 	}
-	const replacement = reindent(dedent(edit.newText), match.width);
-	return { content: content.replace(match.candidate, replacement), status: "patched" };
+	throw new Error(`${file}: could not find expected block for ${edit.label}`);
 }
 
 let changedFiles = 0;
