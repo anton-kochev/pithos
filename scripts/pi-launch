@@ -11,11 +11,18 @@
 # See scripts/pi-guild-runtime/README.md.
 
 runtime=/opt/pi-guild-runtime
-if [ -f "$runtime/active" ] && [ ! -e "$HOME/.pi/agent/pithos-stock-runtime" ]; then
+stock_marker="$HOME/.pi/agent/pithos-stock-runtime"
+if [ -f "$runtime/active" ] && [ ! -e "$stock_marker" ]; then
   exec /usr/bin/node /opt/pi-npm/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js "$@"
 fi
 
-if [ -f "$runtime/refused" ]; then
+# Say why on every stock start, so missing background tools are never a mystery.
+# No status file means the image never tried (no pi.version pinned): stay quiet.
+if [ -f "$runtime/active" ]; then
+  echo "pithos: Guild background tools are off: $stock_marker exists; delete it to use the Guild runtime" >&2
+elif [ -f "$runtime/refused" ]; then
   echo "pithos: Guild background tools are off: $(cat "$runtime/refused")" >&2
+elif [ -f "$runtime/status" ]; then
+  echo "pithos: Guild background tools are off: $(cat "$runtime/status")" >&2
 fi
 exec bun --preload /opt/pi-bun-compat.mjs /opt/pi-npm/bin/pi "$@"

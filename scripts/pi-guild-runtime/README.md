@@ -10,6 +10,8 @@ The overlay is the host proposal from `pithos-kit/proposals/pi-interrupt-hook`, 
 to each Pi release. `versions/<pi>/source.patch` is its TypeScript source against the
 upstream tag.
 
+Supported Pi versions: **1.5.0** and **1.5.2**. Any other version runs stock Pi.
+
 ## How it runs
 
 For a project that pins `pi.version` in `.pithos`, the generated Dockerfile does this
@@ -40,8 +42,11 @@ pithos run -- cat /opt/pi-guild-runtime/status
 | Status | Meaning |
 | --- | --- |
 | `active: Pi <version> ...` | The Guild runtime starts. |
-| `unsupported: ...` | No overlay for this Pi version. Stock Pi runs. |
+| `unsupported: ...` | No overlay for this Pi version. Stock Pi runs, and each launch prints why. |
 | `refused: ...` | An overlay exists but a check failed. Stock Pi runs, and each launch prints why. |
+
+The stock rollback marker below also prints a line on each launch, so a stock start
+always says why background tools are missing.
 
 Projects with no `pi.version` use the base image's Pi. They skip this step and run stock.
 
@@ -61,21 +66,33 @@ Changing `pi.version` to a release with no overlay is safe: the build reports
 `unsupported` and the project runs stock Pi, with no background tools. To support it:
 
 1. Merge the previous version's `source.patch` onto the new upstream tag and commit it.
-   `git merge` beats `git apply` here. It leaves only real conflicts.
-2. Run `build-overlay.mjs` on it, against a Pi package taken from an image built with
-   the new version (so it already has the `scripts/pi-patches` edits):
+   `git merge` beats `git apply` here. It leaves only real conflicts. Many patched
+   modules are core Pi files, so expect conflicts on most releases.
+2. Build the Pi package exactly as the image leaves it: unpack the npm tarball for the
+   new version and run every `scripts/pi-patches` script on it with
+   `PI_CODING_AGENT_DIR=<dir>`. Check it against a real image before trusting it: the
+   manifest's `expected` hashes must match `/opt/pi-npm/...` in a project image.
+3. Run `build-overlay.mjs` on the merged source:
 
    ```bash
    node scripts/pi-guild-runtime/build-overlay.mjs <patched-source> v<version> <installed-package> <typescript.js>
    ```
 
-   It fails if a prompt-template display edit no longer matches. That reconciliation
-   lives in `displayEdits` in the builder.
-3. Re-qualify before shipping: the portable, semantic and continuation suites from
-   `pithos-kit`, against the new source.
-4. Rebuild Pithos. New overlay files change the image fingerprint on their own.
+   Use TypeScript 5.x (5.9.3 reproduces the shipped overlays byte for byte). TypeScript 7
+   has no JavaScript API. The builder fails if a prompt-template display edit no longer
+   matches. That reconciliation lives in `displayEdits`; give an edit `variants` when the
+   anchor differs between releases, and check older versions still rebuild unchanged.
+4. Re-qualify before shipping:
+   - Pi's own `coding-agent` suite on the merged source. Compare failures with stock
+     Pi and with the previous version's patch. Test doubles that lack the runtime
+     continuation methods fail on every patched version.
+   - `pithos-kit`'s `tools/deployed-runtime-probe.ts` in a Linux project image, against
+     the applied package and the new manifest: 16 continuation cases, idle question,
+     and writer second request. The probe pins one reviewed manifest, so point its pins
+     at the new one.
+5. Rebuild Pithos. New overlay files change the image fingerprint on their own.
 
 Editing `scripts/pi-patches/` changes the hashes this overlay expects, so a patch edit
-can turn a working build into `refused`. Rerun step 2 after any such edit.
+can turn a working build into `refused`. Rerun steps 2 and 3 for every supported version after any such edit.
 
 `node --test scripts/pi-guild-runtime/apply.test.mjs` covers the guard logic.

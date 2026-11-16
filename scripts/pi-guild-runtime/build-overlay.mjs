@@ -53,9 +53,20 @@ const displayEdits = {
 		["this._queueSteer(expandedText, processedInput.images)", "this._queueSteer(expandedText, processedInput.images, displayText)"],
 		["this._queueFollowUp(expandedText, processedInput.images)", "this._queueFollowUp(expandedText, processedInput.images, displayText)"],
 		["async _queueSteer(text, images) {", "async _queueSteer(text, images, displayText) {"],
-		["this.agent.steer({\n            role: \"user\",\n            content,", "this.agent.steer({\n            role: \"user\",\n            content,\n            ...(typeof displayText === \"string\" ? { displayText } : {}),"],
+		{
+			// Pi 1.5.2 builds the queued message first so it can track image attachments.
+			variants: [
+				["this.agent.steer({\n            role: \"user\",\n            content,", "this.agent.steer({\n            role: \"user\",\n            content,\n            ...(typeof displayText === \"string\" ? { displayText } : {}),"],
+				["const message = { role: \"user\", content, timestamp: Date.now() };\n        if (images?.length)\n            this._queuedMessagesWithImages.add(message);\n        this.agent.steer(message);", "const message = { role: \"user\", content, ...(typeof displayText === \"string\" ? { displayText } : {}), timestamp: Date.now() };\n        if (images?.length)\n            this._queuedMessagesWithImages.add(message);\n        this.agent.steer(message);"],
+			],
+		},
 		["async _queueFollowUp(text, images) {", "async _queueFollowUp(text, images, displayText) {"],
-		["this.agent.followUp({ role: \"user\", content, timestamp: Date.now() });", "this.agent.followUp({ role: \"user\", content, ...(typeof displayText === \"string\" ? { displayText } : {}), timestamp: Date.now() });"],
+		{
+			variants: [
+				["this.agent.followUp({ role: \"user\", content, timestamp: Date.now() });", "this.agent.followUp({ role: \"user\", content, ...(typeof displayText === \"string\" ? { displayText } : {}), timestamp: Date.now() });"],
+				["const message = { role: \"user\", content, timestamp: Date.now() };\n        if (images?.length)\n            this._queuedMessagesWithImages.add(message);\n        this.agent.followUp(message);", "const message = { role: \"user\", content, ...(typeof displayText === \"string\" ? { displayText } : {}), timestamp: Date.now() };\n        if (images?.length)\n            this._queuedMessagesWithImages.add(message);\n        this.agent.followUp(message);"],
+			],
+		},
 	],
 	"modes/interactive/interactive-mode": [
 		["getUserMessageText(message) {\n        if (message.role !== \"user\")\n            return \"\";", "getUserMessageText(message) {\n        if (message.role !== \"user\")\n            return \"\";\n        if (typeof message.displayText === \"string\")\n            return message.displayText;"],
@@ -88,8 +99,12 @@ function compile(file) {
 	const errors = (result.diagnostics ?? []).filter((d) => d.category === ts.DiagnosticCategory.Error);
 	assert.equal(errors.length, 0, errors.map((e) => ts.flattenDiagnosticMessageText(e.messageText, "\n")).join("\n"));
 	let output = result.outputText;
-	for (const [from, to] of displayEdits[file] ?? []) {
-		assert.equal(output.split(from).length, 2, `${file}: display edit must match exactly once:\n${from}`);
+	for (const edit of displayEdits[file] ?? []) {
+		// An edit is one [from, to] pair, or { variants } for anchors that differ between Pi releases.
+		const variants = Array.isArray(edit) ? [edit] : edit.variants;
+		const matching = variants.filter(([from]) => output.split(from).length === 2);
+		assert.equal(matching.length, 1, `${file}: exactly one variant of a display edit must match exactly once:\n${variants.map(([from]) => from).join("\n--- or ---\n")}`);
+		const [[from, to]] = matching;
 		output = output.replace(from, to);
 	}
 	return output;
