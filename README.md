@@ -410,9 +410,6 @@ extension diagnostics, see [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md).
 
 ## What's in the container
 
-When `.pithos` pins a Pi version with a shipped Guild runtime, Pi itself runs on the
-base image's Node instead of Bun. See [scripts/pi-guild-runtime](scripts/pi-guild-runtime/README.md).
-
 The base image bundles Node 24 for Pithos infrastructure and the Pi coding agent,
 but no Pi packages. A project's `toolchains.node` declaration overrides the
 project-facing Node runtime without removing that infrastructure installation.
@@ -425,6 +422,13 @@ docker inspect \
   --format 'Pi {{index .Config.Labels "dev.pithos.pi-version"}}, Bun {{index .Config.Labels "dev.pithos.bun-version"}}' \
   ghcr.io/anton-kochev/pithos:base
 ```
+
+Guild background delegation needs a patched Pi. When `.pithos` pins Pi 1.5.0 or
+1.5.2, the image build applies the Guild runtime and Pi runs on the base image's
+Node instead of Bun. Any other version runs stock Pi, and each start prints why
+background tools are off. To fall back to stock Pi without a rebuild, create
+`~/.pi/agent/pithos-stock-runtime` inside the container. See
+[scripts/pi-guild-runtime](scripts/pi-guild-runtime/README.md).
 
 Project packages are installed from `pi.extensions` when the container starts.
 The mapping accepts exact `npm:<version>` pins or `git:<url>#<ref>` specs;
