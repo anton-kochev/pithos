@@ -216,12 +216,13 @@ requires trusted stable CLI/config parents and endpoints. All captured parent
 environment/cwd values must match; the query uses the captured environment/cwd.
 Config reading is nonblocking/no-follow, bounded to 64 KiB, parses an object, and
 fingerprints content, inode/device, change/modification times and canonical path.
-Mutable non-default `DOCKER_CONTEXT` or configured `currentContext`, malformed,
-oversized, unreadable or changed config conservatively disallow clearing, even
-when a particular override might have made it harmless. Missing/default config
-is supported. **Named-context users retain debt even on ordinary successful
-runs**; this does not serialize legacy callers, but blocks broker admission until
-independent host recovery. Transient config changes restored between observations,
+A non-default `DOCKER_CONTEXT` or configured `currentContext` (Docker Desktop's
+`desktop-linux` is one) is resolved from `contexts/meta/<sha256(name)>/meta.json`
+under the config root. That metadata must name the context and carry a docker
+endpoint, and is fingerprinted the same way, so an edit between observations
+retains debt. An unresolved or mismatched context, or a malformed, oversized,
+unreadable or changed config or context, conservatively disallows clearing.
+Missing/default config is supported. Transient config changes restored between observations,
 executable replacement and daemon replacement at the same endpoint are not frozen
 or proven safe by fingerprints. Full freezing remains the separately owned
 `ManagedDocker` runtime concern; no claim of same-engine identity is made here.

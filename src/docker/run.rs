@@ -93,8 +93,8 @@ pub fn run(
 ///
 /// Outstanding home-use evidence remains unless a bounded engine query proves
 /// the final container absent on an unchanged supported CLI selection. Detach,
-/// query/settlement failures and mutable named contexts retain evidence without
-/// changing the observed interactive exit status.
+/// query/settlement failures and unresolved or changed named contexts retain
+/// evidence without changing the observed interactive exit status.
 pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, RunError> {
     super::workspace::target(request.workspace)?;
     let mut args = assemble_run_args(
@@ -267,26 +267,23 @@ mod home_completion {
     };
 
     // This is a conservative legacy selection check, NOT ManagedDocker's frozen
-    // executable/socket/config capability. Named contexts are mutable indirection
-    // and never authorize settlement here. Trusted stable CLI/config parents are
-    // required; fingerprints cannot rule out transient changes restored between
-    // observations, executable replacement, or daemon replacement at an endpoint.
+    // executable/socket/config capability. A named context (Docker Desktop's
+    // default) authorizes settlement only when its metadata resolves and is
+    // fingerprinted like the config, so a context edit between observations
+    // retains debt. Trusted stable CLI/config parents are required; fingerprints
+    // cannot rule out transient changes restored between observations,
+    // executable replacement, or daemon replacement at an endpoint.
     #[derive(PartialEq, Eq)]
     pub(super) struct Selection {
         environment: BTreeMap<OsString, OsString>,
         cwd: PathBuf,
         config: Option<[u8; 32]>,
+        context: Option<[u8; 32]>,
     }
 
     impl Selection {
         pub(super) fn capture() -> io::Result<Self> {
             let environment: BTreeMap<_, _> = std::env::vars_os().collect();
-            if environment
-                .get(std::ffi::OsStr::new("DOCKER_CONTEXT"))
-                .is_some_and(|context| !context.is_empty() && context != "default")
-            {
-                return Err(io::Error::other("mutable Docker context"));
-            }
             let config_root = environment
                 .get(std::ffi::OsStr::new("DOCKER_CONFIG"))
                 .filter(|value| !value.is_empty())
@@ -297,10 +294,37 @@ mod home_completion {
                         .map(|home| Path::new(home).join(".docker"))
                 })
                 .ok_or_else(|| io::Error::other("unknown Docker config"))?;
+            let config = fingerprint(&config_root.join("config.json"))?;
+            let configured = match &config {
+                Some((_, value)) => match value.get("currentContext") {
+                    None => None,
+                    Some(context) => Some(
+                        context
+                            .as_str()
+                            .ok_or_else(|| io::Error::other("unsupported Docker context config"))?
+                            .to_owned(),
+                    ),
+                },
+                None => None,
+            };
+            // The CLI prefers DOCKER_CONTEXT over the configured context.
+            let name = match environment.get(std::ffi::OsStr::new("DOCKER_CONTEXT")) {
+                Some(context) if !context.is_empty() => context
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("unsupported Docker context"))?
+                    .to_owned(),
+                _ => configured.unwrap_or_default(),
+            };
+            let context = if name.is_empty() || name == "default" {
+                None
+            } else {
+                Some(context_fingerprint(&config_root, &name)?)
+            };
             Ok(Self {
                 environment,
                 cwd: std::env::current_dir()?,
-                config: config_fingerprint(&config_root.join("config.json"))?,
+                config: config.map(|(hash, _)| hash),
+                context,
             })
         }
 
@@ -342,7 +366,33 @@ mod home_completion {
         }
     }
 
-    fn config_fingerprint(path: &Path) -> io::Result<Option<[u8; 32]>> {
+    /// Resolve a named context the way the Docker CLI does, from its metadata
+    /// under the config root. Missing or mismatched metadata is unproven.
+    fn context_fingerprint(config_root: &Path, name: &str) -> io::Result<[u8; 32]> {
+        let hash: String = Sha256::digest(name.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let path = config_root
+            .join("contexts/meta")
+            .join(hash)
+            .join("meta.json");
+        let (fingerprint, meta) =
+            fingerprint(&path)?.ok_or_else(|| io::Error::other("unresolved Docker context"))?;
+        if meta.get("Name").and_then(|value| value.as_str()) != Some(name)
+            || meta
+                .pointer("/Endpoints/docker/Host")
+                .and_then(|value| value.as_str())
+                .is_none_or(str::is_empty)
+        {
+            return Err(io::Error::other("unsupported Docker context metadata"));
+        }
+        Ok(fingerprint)
+    }
+
+    /// Bounded, no-follow read of a JSON object, fingerprinted with its file
+    /// identity. `None` only when the file does not exist.
+    fn fingerprint(path: &Path) -> io::Result<Option<([u8; 32], serde_json::Value)>> {
         let file = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -358,20 +408,13 @@ mod home_completion {
         }
         let mut bytes = Vec::new();
         file.take(64 * 1024 + 1).read_to_end(&mut bytes)?;
-        let config: serde_json::Value = serde_json::from_slice(&bytes)?;
-        if bytes.len() > 64 * 1024
-            || !config.is_object()
-            || config.get("currentContext").is_some_and(|context| {
-                context
-                    .as_str()
-                    .is_none_or(|name| !name.is_empty() && name != "default")
-            })
-        {
-            return Err(io::Error::other("unsupported Docker context config"));
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if bytes.len() > 64 * 1024 || !value.is_object() {
+            return Err(io::Error::other("unsupported Docker config"));
         }
         let mut hash = Sha256::new();
         hash.update(&bytes);
-        // Include identity/change times: replacing an identical config is still
+        // Include identity/change times: replacing an identical file is still
         // unproven selection, not permission to clear a prior use's evidence.
         for value in [meta.dev(), meta.ino()] {
             hash.update(value.to_le_bytes());
@@ -385,7 +428,7 @@ mod home_completion {
             hash.update(value.to_le_bytes());
         }
         hash.update(fs::canonicalize(path)?.as_os_str().as_encoded_bytes());
-        Ok(Some(hash.finalize().into()))
+        Ok(Some((hash.finalize().into(), value)))
     }
 
     // `--all --no-trunc --format {{.ID}}` establishes presence, not running

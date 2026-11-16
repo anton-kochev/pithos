@@ -145,6 +145,9 @@ if args and args[0] == 'run' and any('pithos-home-project' in a for a in args):
             (home / 'docker').unlink()
         if os.environ.get('CHANGE_CONTEXT'):
             (home / '.docker/config.json').write_text('{"currentContext":"other"}')
+        if os.environ.get('CHANGE_CONTEXT_META'):
+            meta = pathlib.Path(os.environ['CHANGE_CONTEXT_META'])
+            meta.write_text(meta.read_text().replace('docker.sock', 'elsewhere.sock'))
         if os.environ.get('REPLACE_MARKER'):
             assert len(markers) == 1
             markers[0].rename(home / 'saved-marker')
@@ -183,6 +186,7 @@ fn child(home: &Path, scenario: &str) -> Command {
         .env("DOCKER_CONFIG", home.join(".docker"))
         .env_remove("QUERY_MODE")
         .env_remove("CHANGE_CONTEXT")
+        .env_remove("CHANGE_CONTEXT_META")
         .env_remove("REPLACE_MARKER");
     command
 }
@@ -414,6 +418,92 @@ fn assert_context_debt(mode: &str) {
         "cleared unproven {mode} selection"
     );
     assert!(broker(home.path()).is_err());
+}
+
+/// Docker Desktop stores its endpoint in a named context. Writes that context's
+/// metadata where the CLI resolves it and returns the file path.
+fn named_context(home: &Path, name: &str) -> std::path::PathBuf {
+    use sha2::Digest;
+    let hash: String = sha2::Sha256::digest(name.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let dir = home.join(".docker/contexts/meta").join(hash);
+    fs::create_dir_all(&dir).unwrap();
+    let meta = dir.join("meta.json");
+    fs::write(
+        &meta,
+        format!(r#"{{"Name":"{name}","Metadata":{{}},"Endpoints":{{"docker":{{"Host":"unix:///run/docker.sock","SkipTLSVerify":false}}}}}}"#),
+    )
+    .unwrap();
+    meta
+}
+
+#[test]
+fn review_resolved_named_context_clears_debt() {
+    for via_env in [false, true] {
+        let home = fixture();
+        named_context(home.path(), "desktop-linux");
+        let mut cmd = child(home.path(), "request");
+        if via_env {
+            cmd.env("DOCKER_CONTEXT", "desktop-linux");
+        } else {
+            fs::write(
+                home.path().join(".docker/config.json"),
+                br#"{"currentContext":"desktop-linux"}"#,
+            )
+            .unwrap();
+        }
+        let output = cmd.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            fs::read_to_string(home.path().join("result")).unwrap(),
+            "Ok(0)"
+        );
+        assert!(
+            outstanding(home.path()).is_empty(),
+            "kept debt for resolved context (env: {via_env}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        broker(home.path()).unwrap().finish().unwrap();
+    }
+}
+
+#[test]
+fn review_named_context_changed_during_run_retains_debt() {
+    let home = fixture();
+    let meta = named_context(home.path(), "desktop-linux");
+    fs::write(
+        home.path().join(".docker/config.json"),
+        br#"{"currentContext":"desktop-linux"}"#,
+    )
+    .unwrap();
+    let output = child(home.path(), "request")
+        .env("CHANGE_CONTEXT_META", &meta)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(outstanding(home.path()).len(), 1);
+    assert!(broker(home.path()).is_err());
+}
+
+#[test]
+fn review_named_context_metadata_for_another_name_retains_debt() {
+    let home = fixture();
+    let meta = named_context(home.path(), "desktop-linux");
+    fs::write(
+        &meta,
+        fs::read_to_string(&meta)
+            .unwrap()
+            .replace(r#""Name":"desktop-linux""#, r#""Name":"other""#),
+    )
+    .unwrap();
+    let output = child(home.path(), "request")
+        .env("DOCKER_CONTEXT", "desktop-linux")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(outstanding(home.path()).len(), 1);
 }
 
 #[test]
