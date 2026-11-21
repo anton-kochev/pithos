@@ -9,6 +9,16 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 NAME = "pithos-instructions.ts"
 
 
+def gnu_mv():
+    """entrypoint.sh runs in the Linux image and needs GNU `mv -T`; BSD mv lacks it."""
+    with tempfile.TemporaryDirectory() as temp:
+        source = pathlib.Path(temp) / "source"
+        source.touch()
+        return subprocess.run(["mv", "-fT", "--", str(source), str(source) + ".moved"],
+                              capture_output=True).returncode == 0
+
+
+@unittest.skipUnless(gnu_mv(), "entrypoint.sh needs GNU mv -T (Linux image); host mv is BSD")
 class InstructionsStartupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
