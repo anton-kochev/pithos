@@ -1200,7 +1200,7 @@ mod tests {
         let message = error.to_string();
         assert!(
             message.starts_with(
-                "home check failed: the Pi home was rejected: it holds a socket or FIFO"
+                "home check failed: the Pi home was rejected: it holds a FIFO or device file"
             ),
             "{message}"
         );

@@ -151,7 +151,7 @@ pub enum HomeRejection {
     #[error("an entry is not owned by your user")]
     Owner,
     #[error(
-        "it holds a socket or FIFO, often left by a crashed tool (list them: `docker run --rm -v <pithos-home volume>:/h alpine find /h -type s -o -type p`)"
+        "it holds a FIFO or device file (list them: `docker run --rm -v <pithos-home volume>:/h alpine find /h -type p -o -type b -o -type c`)"
     )]
     SpecialFile,
     #[error("it holds a hard-linked file")]

@@ -174,15 +174,11 @@ class HomeTests(unittest.TestCase):
         late.parent.mkdir()
         secret = self.root / 'auth.json'
         secret.write_text('canary-do-not-read')
-        for kind, reason in [('fifo', 'special-file'), ('socket', 'special-file'),
-                             ('hardlink', 'hardlink'), ('symlink-hardlink', 'hardlink')]:
+        for kind, reason in [('fifo', 'special-file'), ('hardlink', 'hardlink'),
+                             ('symlink-hardlink', 'hardlink')]:
             with self.subTest(kind=kind):
                 if kind == 'fifo':
                     os.mkfifo(late)
-                elif kind == 'socket':
-                    # A stale socket, as left by a crashed tool, stays on disk.
-                    with socket.socket(socket.AF_UNIX) as server:
-                        server.bind(str(late))
                 elif kind == 'hardlink':
                     os.link(secret, late)
                 else:
@@ -193,6 +189,21 @@ class HomeTests(unittest.TestCase):
                     self.assert_rejected_unchanged(reason)
                 finally:
                     late.unlink()
+
+    def test_stale_socket_is_accepted_but_hardlinked_socket_is_not(self):
+        # A crashed tool (Aspire, gpg-agent, tmux) leaves its socket on disk.
+        # Under the exclusive home lease nothing listens on it, so it is inert.
+        late = self.root / 'nested/late'
+        late.parent.mkdir()
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(late))
+        home.validate_home(self.root, self.uid, self.gid)
+        alias = self.root / 'alias'
+        os.link(late, alias)
+        try:
+            self.assert_rejected_unchanged('hardlink')
+        finally:
+            alias.unlink()
 
     def test_entry_budget_is_global_and_boundary_is_inclusive(self):
         (self.root / 'first').write_text('private')

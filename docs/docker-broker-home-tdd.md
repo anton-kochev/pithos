@@ -63,7 +63,9 @@ volume existence, admission, or authorization to run. No Docker was executed.
 - Ordinary symlinks are checked as inodes, never traversed (dangling, external,
   and loop links are acceptable when owned). No regular-file content is opened;
   no credential, account database, or symlink-target content is read.
-- Reject special files. Reject **all non-directory inodes with nlink != 1**,
+- Reject FIFOs and device files. Owned sockets are accepted: crashed tools
+  leave them behind, and under the exclusive home lease nothing listens on
+  them. Reject **all non-directory inodes with nlink != 1**,
   including hardlinked symlinks, because they may alias outside-home objects.
   Normal directory link counts are allowed; these are not evidence of unsafe
   regular-file aliases.

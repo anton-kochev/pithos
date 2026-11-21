@@ -85,8 +85,10 @@ def validate_home(root, uid, gid, *, browser=False, max_entries=100000, max_dept
     def check(info, path):
         if (info.st_uid, info.st_gid) != (uid, gid):
             raise Rejected('owner')
+        # Sockets are allowed: crashed tools leave them behind, and under the
+        # exclusive home lease nothing listens on them. FIFOs and devices are not.
         if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)
-                or stat.S_ISLNK(info.st_mode)):
+                or stat.S_ISLNK(info.st_mode) or stat.S_ISSOCK(info.st_mode)):
             raise Rejected('special-file')
         # Non-directory hardlinks may alias data outside this home, including
         # hardlinked symlinks. Directory link counts include child directories.
