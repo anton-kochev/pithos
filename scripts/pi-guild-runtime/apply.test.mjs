@@ -8,8 +8,22 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const applyScript = join(dirname(fileURLToPath(import.meta.url)), "apply.mjs");
+const runtimeDir = dirname(fileURLToPath(import.meta.url));
+const applyScript = join(runtimeDir, "apply.mjs");
 const sha = (text) => createHash("sha256").update(text).digest("hex");
+
+test("ships a complete, hash-pinned Guild overlay for Pi 1.6.0", () => {
+	const versionDir = join(runtimeDir, "versions", "1.6.0");
+	const manifest = JSON.parse(readFileSync(join(versionDir, "manifest.json"), "utf8"));
+	const sourcePatch = readFileSync(join(versionDir, "source.patch"));
+	assert.equal(manifest.piVersion, "1.6.0");
+	assert.equal(manifest.sourcePatchSha256, sha(sourcePatch));
+	assert.ok(Object.keys(manifest.overlay).length >= 16);
+	for (const [relative, digest] of Object.entries(manifest.overlay)) {
+		assert.equal(sha(readFileSync(join(versionDir, "overlay", relative))), digest, `${relative} overlay digest`);
+	}
+	assert.ok(manifest.expected["package.json"]);
+});
 
 function write(path, content) {
 	mkdirSync(dirname(path), { recursive: true });

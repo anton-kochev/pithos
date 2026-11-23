@@ -10,7 +10,7 @@ The overlay is the host proposal from `pithos-kit/proposals/pi-interrupt-hook`, 
 to each Pi release. `versions/<pi>/source.patch` is its TypeScript source against the
 upstream tag.
 
-Supported Pi versions: **1.5.0** and **1.5.2**. Any other version runs stock Pi.
+Supported Pi versions: **1.5.0**, **1.5.2**, and **1.6.0**. Any other version runs stock Pi.
 
 ## How it runs
 
@@ -95,4 +95,22 @@ Changing `pi.version` to a release with no overlay is safe: the build reports
 Editing `scripts/pi-patches/` changes the hashes this overlay expects, so a patch edit
 can turn a working build into `refused`. Rerun steps 2 and 3 for every supported version after any such edit.
 
-`node --test scripts/pi-guild-runtime/apply.test.mjs` covers the guard logic.
+`node --test scripts/pi-guild-runtime/apply.test.mjs` covers the guard logic. The Pi 1.6.0
+SDK regression tests check two compatibility cases:
+
+- **Legacy SDK factories:** A factory that forwards `sessionManager` and `sessionStartEvent`
+  but not the internal runtime gate is expected to run `/check` in the current session both
+  before and after `newSession()`, without opening a parent continuation. After
+  `requestContinuationShutdown()`, the test expects rejection without another handler call.
+- **Restored tool selection:** When `prepareLoadout` withdraws an owned-tool lease, the test
+  expects the owned tool to leave the active set and a different tool in the saved selection
+  to become active when it registers later with deferred exposure. Explicitly deselecting
+  the same restored tool instead leaves the late tool inactive. Deselecting a newly registered
+  tool outside the saved selection still allows the late tool to become active.
+
+Run these provider-free tests against the **applied** Pi 1.6.0 package:
+
+```sh
+PITHOS_TEST_PI_PACKAGE=/path/to/patched/pi-coding-agent \
+  node --test scripts/pi-guild-runtime/sdk-regressions-1.6.0.mjs
+```

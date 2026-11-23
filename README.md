@@ -423,10 +423,11 @@ docker inspect \
   ghcr.io/anton-kochev/pithos:base
 ```
 
-Guild background delegation needs a patched Pi. When `.pithos` pins Pi 1.5.0 or
-1.5.2, the image build applies the Guild runtime and Pi runs on the base image's
-Node instead of Bun. Any other version runs stock Pi, and each start prints why
-background tools are off. To fall back to stock Pi without a rebuild, create
+Guild background delegation needs a patched Pi. When `.pithos` pins Pi 1.5.0,
+1.5.2, or 1.6.0, the image build applies the Guild runtime and Pi runs on the
+base image's Node instead of Bun. Any other version runs stock Pi, and each start
+prints why background tools are off. To fall back to stock Pi without a rebuild,
+create
 `~/.pi/agent/pithos-stock-runtime` inside the container. See
 [scripts/pi-guild-runtime](scripts/pi-guild-runtime/README.md).
 
