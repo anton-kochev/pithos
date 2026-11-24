@@ -41,7 +41,9 @@ impl ClipboardBridge {
         let running = Arc::new(AtomicBool::new(true));
         let thread_running = Arc::clone(&running);
         let thread_token = token.clone();
-        let handle = thread::spawn(move || serve(listener, thread_token, thread_running));
+        let work_dir = shim_dir.to_owned();
+        let handle =
+            thread::spawn(move || serve(listener, thread_token, thread_running, &work_dir));
 
         Ok(Self {
             port,
@@ -101,10 +103,15 @@ fn bridge_bind_addr() -> &'static str {
     }
 }
 
-fn serve(listener: TcpListener, token: String, running: Arc<AtomicBool>) {
+fn serve(
+    listener: TcpListener,
+    token: String,
+    running: Arc<AtomicBool>,
+    work_dir: &std::path::Path,
+) {
     while running.load(Ordering::Relaxed) {
         match listener.accept() {
-            Ok((mut stream, _)) => handle_client(&mut stream, &token, host::read_png),
+            Ok((mut stream, _)) => handle_client(&mut stream, &token, || host::read_png(work_dir)),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
             }

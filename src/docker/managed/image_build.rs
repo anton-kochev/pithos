@@ -1,4 +1,6 @@
 //! Guarded host-owned build; never a launch token or daemon-side cancellation claim.
+mod app_snapshot;
+
 use super::{BuildStep, ImmutableImageId, ManagedDocker, PreflightError, image_cache};
 use crate::{
     docker::HostIdentity,
@@ -14,7 +16,11 @@ use std::{
     process::Command,
 };
 
-/// A project app build request. Paths are workspace-relative.
+/// A project app build request. Paths are workspace-relative. The broker
+/// stages the context before Docker applies ignore rules: at most 1 GiB of
+/// payloads, 100,000 entries, 64 levels below the context root, and 1 MiB per
+/// Dockerfile or active ignore file. Hardlinks and special files are refused.
+/// Context symlinks must have relative targets without parent components.
 pub struct AppBuild<'a> {
     pub workspace: &'a Path,
     pub run_id: &'a str,
@@ -49,7 +55,11 @@ fn trusted_directory(path: &Path, private: bool) -> Result<(), PreflightError> {
 fn private_root<'a>(root: &'a Path, workspace: &Path) -> Result<&'a Path, PreflightError> {
     trusted_directory(workspace, false)?;
     trusted_directory(root, true)?;
-    if root.starts_with(workspace) || workspace.starts_with(root) {
+    let overlaps = |parent, child| {
+        crate::docker::workspace::covers(parent, child)
+            .map_err(|_| PreflightError::InvalidSelection)
+    };
+    if overlaps(workspace, root)? || overlaps(root, workspace)? {
         return Err(PreflightError::InvalidSelection);
     }
     Ok(root)
@@ -135,12 +145,12 @@ pub(super) fn ensure(
     }
     let dockerfile = stage.context.join("Dockerfile");
     fs::write(&dockerfile, emitted).map_err(|_| PreflightError::Unavailable)?;
-    let context = stage.context.clone();
+    let iid = stage.context.join("image.iid");
     run_build(
         docker,
         stage,
-        &context,
         &dockerfile,
+        &iid,
         &[format!("{}={hash}", image_cache::LABEL_KEY)],
         &format!("pithos-broker-identity:{hash}"),
         // Recheck the exact tag after staging, immediately before the CLI.
@@ -187,12 +197,12 @@ pub(super) fn ensure_browser(
     crate::browser::assets::extract_with_identity_to(&stage.context, identity)
         .map_err(|_| PreflightError::Unavailable)?;
     let dockerfile = stage.context.join("browser/runtime/Dockerfile");
-    let context = stage.context.clone();
+    let iid = stage.context.join("image.iid");
     run_build(
         docker,
         stage,
-        &context,
         &dockerfile,
+        &iid,
         &[format!("{}={hash}", image_cache::BROWSER_LABEL_KEY)],
         &format!("pithos-broker-browser:{hash}"),
         |_| Ok(()),
@@ -361,37 +371,6 @@ pub(super) fn ensure_postgres(
     result
 }
 
-/// A workspace-relative path that is exactly its canonical self: no `..`,
-/// `.`, empty components, absolute paths or symlinks anywhere below the
-/// workspace. `"."` names the workspace itself (directories only).
-fn contained(workspace: &Path, relative: &str, directory: bool) -> Option<PathBuf> {
-    let joined = if relative == "." && directory {
-        workspace.to_owned()
-    } else {
-        if relative.is_empty()
-            || relative.len() > 1024
-            || relative.starts_with('/')
-            || relative.chars().any(char::is_control)
-            || relative
-                .split('/')
-                .any(|part| matches!(part, "" | "." | ".."))
-        {
-            return None;
-        }
-        workspace.join(relative)
-    };
-    if fs::canonicalize(&joined).ok()? != joined {
-        return None;
-    }
-    let meta = fs::symlink_metadata(&joined).ok()?;
-    (if directory {
-        meta.is_dir()
-    } else {
-        meta.is_file()
-    })
-    .then_some(joined)
-}
-
 const APP_RUN_LABEL: &str = "io.pithos.broker.app.run";
 const APP_LOGICAL_LABEL: &str = "io.pithos.broker.app.logical";
 
@@ -413,10 +392,6 @@ pub(super) fn build_app(
         return Err(PreflightError::InvalidInput);
     }
     let root = private_root(staging_root, inputs.workspace)?;
-    let dockerfile = contained(inputs.workspace, inputs.dockerfile, false)
-        .ok_or(PreflightError::InvalidInput)?;
-    let context =
-        contained(inputs.workspace, inputs.context, true).ok_or(PreflightError::InvalidInput)?;
     if docker.work_shutdown.is_requested() {
         return Err(PreflightError::Unavailable);
     }
@@ -438,11 +413,15 @@ pub(super) fn build_app(
         format!("{APP_LOGICAL_LABEL}={}", inputs.app),
     ];
     let stage = Stage::new(root)?;
+    let dockerfile = app_snapshot::stage(&inputs, &stage, &docker.work_shutdown)?;
+    // The iid is CLI output, not build input. In particular, a project may
+    // already have an image.iid file in its context.
+    let iid = stage.dir.path().join("image.iid");
     run_build(
         docker,
         stage,
-        &context,
         &dockerfile,
+        &iid,
         &labels,
         &format!("pithos-broker-app:{suffix}"),
         |_| Ok(()),
@@ -499,19 +478,18 @@ impl Stage {
 fn run_build(
     docker: &mut ManagedDocker,
     stage: Stage,
-    context: &Path,
     dockerfile: &Path,
+    iid: &Path,
     labels: &[String],
     tag: &str,
     before: impl FnOnce(&mut ManagedDocker) -> Result<(), PreflightError>,
     verify: impl FnOnce(&mut ManagedDocker, &ImmutableImageId) -> Result<(), PreflightError>,
 ) -> Result<ImmutableImageId, PreflightError> {
-    let iid = stage.context.join("image.iid");
     let file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(&iid)
+        .open(iid)
         .map_err(|_| PreflightError::Unavailable)?;
     drop(file);
     if docker.work_shutdown.is_requested() {
@@ -554,8 +532,8 @@ fn run_build(
         .arg("--tag")
         .arg(tag)
         .arg("--iidfile")
-        .arg(&iid)
-        .arg(context);
+        .arg(iid)
+        .arg(&stage.context);
     docker.build_stage = Some(stage.dir);
     let report = docker.build_supervisor.execute(&mut command);
     let result = (|| {
@@ -574,7 +552,7 @@ fn run_build(
             }
             _ => return Err(PreflightError::Unavailable),
         }
-        let built = read_iid(&iid)?;
+        let built = read_iid(iid)?;
         verify(docker, &built)?;
         Ok(built)
     })();

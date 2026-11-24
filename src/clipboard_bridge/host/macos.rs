@@ -1,17 +1,16 @@
 use super::{
     looks_like_png, read_file_limited, remaining_until, run_stdout, run_success, secure_temp_path,
 };
-use std::fs;
-use std::time::Instant;
+use std::{fs, path::Path, time::Instant};
 
-pub(super) fn read_png(deadline: Instant) -> Option<Vec<u8>> {
+pub(super) fn read_png(work_dir: &Path, deadline: Instant) -> Option<Vec<u8>> {
     if let Some(bytes) = run_stdout("pngpaste", &["-"], remaining_until(deadline)?) {
         if looks_like_png(&bytes) {
             return Some(bytes);
         }
     }
 
-    if let Some(bytes) = read_clipboard_class("PNGf", "png", deadline) {
+    if let Some(bytes) = read_clipboard_class(work_dir, "PNGf", "png", deadline) {
         if looks_like_png(&bytes) {
             return Some(bytes);
         }
@@ -20,8 +19,8 @@ pub(super) fn read_png(deadline: Instant) -> Option<Vec<u8>> {
     // macOS screenshots copied with Cmd+Ctrl+Shift+4 are often exposed as TIFF
     // rather than PNG. Convert with the built-in `sips` tool so Pi receives a
     // supported image/png payload.
-    let tiff_path = write_clipboard_class_to_file("TIFF", "tiff", deadline)?;
-    let Some(png_path) = secure_temp_path(".png") else {
+    let tiff_path = write_clipboard_class_to_file(work_dir, "TIFF", "tiff", deadline)?;
+    let Some(png_path) = secure_temp_path(work_dir, ".png") else {
         let _ = fs::remove_file(&tiff_path);
         return None;
     };
@@ -53,8 +52,13 @@ pub(super) fn read_png(deadline: Instant) -> Option<Vec<u8>> {
     bytes.filter(|bytes| looks_like_png(bytes))
 }
 
-fn read_clipboard_class(class_code: &str, ext: &str, deadline: Instant) -> Option<Vec<u8>> {
-    let path = write_clipboard_class_to_file(class_code, ext, deadline)?;
+fn read_clipboard_class(
+    work_dir: &Path,
+    class_code: &str,
+    ext: &str,
+    deadline: Instant,
+) -> Option<Vec<u8>> {
+    let path = write_clipboard_class_to_file(work_dir, class_code, ext, deadline)?;
     let bytes = read_file_limited(&path);
     let _ = fs::remove_file(&path);
     remaining_until(deadline)?;
@@ -62,11 +66,12 @@ fn read_clipboard_class(class_code: &str, ext: &str, deadline: Instant) -> Optio
 }
 
 fn write_clipboard_class_to_file(
+    work_dir: &Path,
     class_code: &str,
     ext: &str,
     deadline: Instant,
 ) -> Option<std::path::PathBuf> {
-    let path = secure_temp_path(&format!(".{ext}"))?;
+    let path = secure_temp_path(work_dir, &format!(".{ext}"))?;
     let path_str = escape_applescript_string(&path.to_string_lossy());
     let Some(timeout) = remaining_until(deadline) else {
         let _ = fs::remove_file(&path);

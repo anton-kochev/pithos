@@ -79,6 +79,8 @@ pub enum HostError {
     Image(ImageKind, PreflightError),
     #[error("host broker endpoint unavailable")]
     Endpoint,
+    #[error(transparent)]
+    WebSearch(#[from] crate::web_search::WebConfigError),
     #[error("host runtime failed: {0}")]
     Runtime(#[from] RuntimeError),
 }
@@ -368,6 +370,12 @@ impl ValidatedHostInputs {
         if !lease_root_matches_current_home(&self.input.lease_root) {
             return Err(HostFailure::empty(HostError::Directory));
         }
+        // Guard host control state even when no search credential is configured.
+        crate::web_search::guard_mounts([&self.input.workspace])
+            .map_err(|error| HostFailure::empty(error.into()))?;
+        let web_config =
+            crate::web_search::WebConfig::load([&self.input.workspace, &self.input.run_directory])
+                .map_err(|error| HostFailure::empty(error.into()))?;
         // Install before constructing/querying Docker; one shared cancellation
         // token is transferred into the adapter and then into the runtime.
         let shutdown = Shutdown::new();
@@ -491,6 +499,7 @@ impl ValidatedHostInputs {
             Ok(runtime) => runtime,
             Err(failure) => return Err(HostFailure::from_runtime(signals, failure)),
         };
+        runtime.configure_web_search(web_config);
         if runtime.home_debt_cleared() > 0 {
             progress(StartStep::ClearedHomeLock);
         }

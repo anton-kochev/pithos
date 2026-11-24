@@ -218,7 +218,9 @@ impl Subcommand {
                     break;
                 }
                 "--" => {
-                    target = RunTarget::Command(rest[i + 1..].to_vec());
+                    if i + 1 < rest.len() {
+                        target = RunTarget::Command(rest[i + 1..].to_vec());
+                    }
                     break;
                 }
                 // Status alone cannot launch Pi: approve one managed Pi run.
@@ -374,7 +376,7 @@ fn run_broker(grant: HostGrant, browser: BrowserSelection, style: Style) -> Exit
         }
     };
     // No prompt: a broker run never writes project files on the host's behalf.
-    let pithos_bytes = match fs::read(cwd.join(".pithos")) {
+    let pithos_bytes = match read_project_file(&cwd.join(".pithos")) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             narrate(
@@ -644,7 +646,7 @@ fn launch(subcommand: Subcommand) -> ExitCode {
 
 fn read_pithos(cwd: &Path, style: Style) -> Result<Vec<u8>, ExitCode> {
     let path = cwd.join(".pithos");
-    match fs::read(&path) {
+    match read_project_file(&path) {
         Ok(b) => Ok(b),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             narrate(style, "» ERROR:", ".pithos not found");
@@ -657,7 +659,7 @@ fn read_pithos(cwd: &Path, style: Style) -> Result<Vec<u8>, ExitCode> {
             narrate(style, "»", "  toolchains: {}");
             narrate(style, "»", "");
             if prompt_confirm_default_yes("Create .pithos? [Y/n]:", style) {
-                match fs::write(&path, MINIMAL_PITHOS) {
+                match create_minimal_pithos(&path) {
                     Ok(()) => {
                         narrate(style, "»", &format!("Created {}.", path.display()));
                         Ok(MINIMAL_PITHOS.as_bytes().to_vec())
@@ -683,6 +685,43 @@ fn read_pithos(cwd: &Path, style: Style) -> Result<Vec<u8>, ExitCode> {
     }
 }
 
+fn create_minimal_pithos(path: &Path) -> io::Result<()> {
+    use std::io::Write;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(MINIMAL_PITHOS.as_bytes())
+}
+
+fn read_project_file(path: &Path) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    let metadata = file.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(io::Error::other(
+                "expected a .pithos file with no hard links",
+            ));
+        }
+    }
+    if !metadata.is_file() {
+        return Err(io::Error::other("expected a regular .pithos file"));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn write_dockerfile(path: &Path, content: &str, style: Style) -> Result<(), ExitCode> {
     if let Some(parent) = path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
@@ -694,7 +733,7 @@ fn write_dockerfile(path: &Path, content: &str, style: Style) -> Result<(), Exit
             return Err(ExitCode::from(1));
         }
     }
-    if let Err(e) = fs::write(path, content) {
+    if let Err(e) = write_generated_file(path, content) {
         narrate(
             style,
             "» ERROR:",
@@ -703,6 +742,55 @@ fn write_dockerfile(path: &Path, content: &str, style: Style) -> Result<(), Exit
         return Err(ExitCode::from(1));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn write_generated_file(path: &Path, content: &str) -> io::Result<()> {
+    use std::{
+        ffi::CString,
+        io::Write,
+        os::fd::{AsRawFd, FromRawFd},
+        os::unix::fs::{MetadataExt, OpenOptionsExt},
+    };
+    // The project can edit .pithos.d. Pin the directory and refuse links so
+    // regenerating its artifacts cannot overwrite a file outside the mount.
+    let parent = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path.parent().expect("generated file has a parent"))?;
+    let name = CString::new(
+        path.file_name()
+            .expect("generated file has a name")
+            .as_encoded_bytes(),
+    )?;
+    // SAFETY: live directory descriptor and NUL-terminated name. A successful
+    // openat returns a new, exclusively owned descriptor.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            0o666 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful openat transferred ownership of this descriptor.
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(io::Error::other(
+            "expected a regular file with no hard links",
+        ));
+    }
+    file.set_len(0)?;
+    file.write_all(content.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_generated_file(path: &Path, content: &str) -> io::Result<()> {
+    fs::write(path, content)
 }
 
 /// Action to take after a fingerprint cache lookup, given the `--rebuild`
@@ -978,7 +1066,7 @@ fn ensure_image(
     // Ordinary returns drop this public build context. Signal exits can leave
     // temporary build files for the OS to reap; browser secrets/services have
     // separate explicit signal cleanup and ownership-checked lease recovery.
-    let context = match tempfile::tempdir() {
+    let context = match pithos::docker::stage_run_directory(cwd) {
         Ok(t) => t,
         Err(e) => {
             narrate(
@@ -1325,20 +1413,28 @@ fn run_run(
     let pithos_repo = env::var_os("PITHOS_REPO")
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from);
-    let extensions_manifest_path = cwd.join(".pithos.d").join("extensions.list");
-    let clipboard_shim_dir = cwd.join(".pithos.d");
-    let clipboard_bridge =
-        match pithos::clipboard_bridge::ClipboardBridge::start(&clipboard_shim_dir) {
-            Ok(bridge) => Some(bridge),
+    // Docker resolves bind sources after we start it. Never give it files that
+    // another Pi can replace through the workspace mount, even read-only binds.
+    let files =
+        match pithos::docker::stage_run_files(cwd, &pithos::extensions::manifest(inputs.yaml)) {
+            Ok(files) => files,
             Err(e) => {
-                narrate(
-                    style,
-                    "» clipboard:",
-                    &format!("host clipboard bridge unavailable: {e}"),
-                );
-                None
+                narrate(style, "» ERROR:", &format!("cannot stage run files: {e}"));
+                return ExitCode::from(1);
             }
         };
+    let extensions_manifest_path = files.path().join("extensions.list");
+    let clipboard_bridge = match pithos::clipboard_bridge::ClipboardBridge::start(files.path()) {
+        Ok(bridge) => Some(bridge),
+        Err(e) => {
+            narrate(
+                style,
+                "» clipboard:",
+                &format!("host clipboard bridge unavailable: {e}"),
+            );
+            None
+        }
+    };
     let clipboard_url = clipboard_bridge
         .as_ref()
         .map(pithos::clipboard_bridge::ClipboardBridge::container_url);
@@ -1372,7 +1468,7 @@ fn run_run(
         &command
     };
 
-    match pithos::docker::run_request(pithos::docker::RunRequest {
+    let request = pithos::docker::RunRequest {
         image_tag: &ensured.tag,
         project: &ensured.project,
         workspace: cwd,
@@ -1385,7 +1481,12 @@ fn run_run(
             browser: browser_run.as_ref(),
         },
         command: effective_cmd,
-    }) {
+    };
+    let result = match target {
+        RunTarget::Pi(tail) => pithos::docker::run_pi_request(request, tail),
+        RunTarget::Command(_) => pithos::docker::run_request(request),
+    };
+    match result {
         Ok(status) => ExitCode::from(exit_code_from_status(status)),
         Err(e) => {
             narrate(style, "» ERROR:", &e.to_string());
@@ -1830,6 +1931,21 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn creating_a_project_config_preserves_a_file_that_already_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let pithos = temp.path().join(".pithos");
+        fs::write(&pithos, "# written while the prompt is open\n").unwrap();
+        assert_eq!(
+            create_minimal_pithos(&pithos).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            fs::read_to_string(&pithos).unwrap(),
+            "# written while the prompt is open\n"
+        );
     }
 
     #[test]

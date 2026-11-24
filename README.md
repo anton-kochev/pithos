@@ -129,10 +129,67 @@ credentials remain accessible to code running in Pi's container; this change doe
 not isolate them. Exporting arbitrary variables on the host does not forward them
 into the container. For explicit **non-secret** command configuration, use
 `pithos run -- env NAME=value command`; see [diagnostics](TROUBLESHOOTING.md#9-enable-diagnostics).
-Pithos-owned runtime environment handling is unchanged.
 
 This reduces accidental exposure, not disclosure by application code you later
 execute with secrets. No files are automatically hidden or relocated.
+
+### Private web search
+
+With a broker-aware [`@pithos-kit/web`](https://github.com/anton-kochev/pithos-kit/tree/main/pithos.web)
+installed, Pi has one `web_search` and one `web_fetch`. An ordinary Pithos Pi
+launch sets up search automatically, as do `--broker=status` and
+`--broker=workspace`. **You do not need either Docker broker flag for search.**
+Use `pithos --pi` for explicit Pi arguments. Raw commands (`pithos run -- …`)
+don't start a search broker. The launcher uses a Unix socket on native Linux
+and a loopback listener reached through `host.docker.internal` on Docker
+Desktop for macOS.
+
+On the **host**, create the private directory and file. These commands preserve
+existing contents:
+
+```bash
+mkdir -p -m 700 "$HOME/.config/pithos/web"
+chmod 700 "$HOME/.config/pithos/web"
+(umask 077; touch "$HOME/.config/pithos/web/.env")
+chmod 600 "$HOME/.config/pithos/web/.env"
+```
+
+Open that `.env` in a **host editor**, not in Pi. Enter one provider and its key:
+
+```dotenv
+PITHOS_WEB_SEARCH_PROVIDER=keenable
+KEENABLE_API_KEY=replace-with-your-keenable-key
+```
+
+For Brave use `PITHOS_WEB_SEARCH_PROVIDER=brave` and `BRAVE_SEARCH_API_KEY`
+instead. Use literal `NAME=value` lines, without `export`, quotes, inline
+comments, or shell expansion. Blank lines and `#` comments on their own lines
+are allowed. Only the selected provider receives the query. A missing, rejected,
+or exhausted key cannot switch search to another provider or to keyless Keenable.
+
+Keep this directory and the installed Pithos binary outside **every** container
+bind mount. Use only a trusted host directory for `PITHOS_REPO` overrides; its
+`pi-config` bind sources must be outside the workspace. Don't make those source
+paths, or the workspace's parent directory, writable from another container.
+Pithos refuses workspace and custom binds that overlap its host control state
+(including `.pithos-run-files` and the key directory), even without a key set.
+Stop any older containers that can see those directories before adding a key.
+Remove old key copies from the workspace or Pi's environment, and rotate keys
+that were already exposed. Use a regular `.pithos` file in the project,
+not a link to another host file. Restart Pithos once to pick up the configuration.
+`/web-setup` checks whether the session can reach the host search broker without
+calling the provider. It does not validate the key, quota, or provider uptime.
+Changing providers or rotating the key takes effect on the next Pithos launch.
+
+Pi receives a per-run token that lets it spend search quota, not the provider
+key. The host closes that access when the run ends. `web_fetch` stays
+credential-free and works even if search is unconfigured. Start Pithos with
+`PI_OFFLINE=1` to disable both tools for the run. On ordinary launches, Pi's
+`pithos --pi --offline` also disables both tools without issuing a search token.
+
+The published `@pithos-kit/web@0.3.0` does not know about the host broker. Use a
+Web build with host-search support; don't export your key into Pi to work around
+the version mismatch.
 
 ### Per-project Node.js
 
@@ -224,7 +281,12 @@ Linux is not verified yet.
   - they build an image from a workspace Dockerfile and run it as a locked-down
     container: fixed non-root user, read-only root, no capabilities, no
     published ports;
-  - Pi and the browser reach it at `http://pithos-app-<hash>:<port>/`.
+  - Pi and the browser reach it at `http://pithos-app-<hash>:<port>/`;
+  - the launcher takes a private copy of the context before calling Docker.
+    Keep the context small: the copy is capped at 1 GiB, 100,000 entries, and
+    64 directory levels, before Docker applies `.dockerignore`. The selected
+    Dockerfile and its ignore files are capped at 1 MiB each. Hard links, special files, and links
+    with absolute targets or `..` are refused.
 - **Services Pi runs itself.** Anything Pi starts inside its own container
   (for example `dotnet run --urls http://0.0.0.0:5000`) is reachable from the
   browser at `http://pithos-app:<port>/`, and at `http://localhost:<port>/`:
@@ -295,15 +357,17 @@ container. From a second terminal you can then attach and co-debug live:
 docker exec -it pithos-<project>-<pid> tmux attach -t pithos
 ```
 
-pithos prints the exact command on launch. The primary terminal owns the session
-lifecycle (detaching it ends the run, since the container is `--rm`); additional
-observers may attach and detach freely. The flag also wraps an explicit command —
-`pithos --tmux -- bash` runs `bash` inside the session instead of pi.
+Pithos prints the exact command on launch. Detaching from the primary tmux
+session ends the run; additional observers may attach and detach freely.
+Docker's own detach shortcut is different. If it leaves a search-enabled
+container running, Pithos waits in the primary terminal to keep search alive.
+Stop Pi in the container to finish the run. The flag also wraps an
+explicit command: `pithos --tmux -- bash` runs `bash` instead of Pi.
 
 ### Passing arguments to Pi
 
-Pi sessions default to the host project's `.pi/sessions/`, mounted at
-`/home/pi/.pi/agent/sessions`. Pi retains its working-directory subdirectories;
+Pi sessions default to the host project's `.pi/sessions/` through the existing
+workspace mount. Pi retains its working-directory subdirectories;
 transcripts are not necessarily directly inside `.pi/sessions`. They survive
 container removal. Pi's full CLI is available through Pithos:
 
@@ -326,9 +390,10 @@ Place `--rebuild`, `--no-build`, and `--tmux` before the first Pi option.
 ### Session storage and migration
 
 Only the default session root is host-backed. Credentials, settings, installed
-extensions, and other home state remain in `pithos-home-<project>`. Explicit Pi
-session-directory settings, environment variables, and CLI arguments still take
-precedence over Pi's default path; those paths may not be host-backed.
+extensions, and other home state remain in `pithos-home-<project>`. In an
+ordinary launch, Pithos sets `PI_CODING_AGENT_SESSION_DIR` for project storage.
+`--session-dir` still overrides it. To let Pi use its `sessionDir` setting
+instead, select volume storage below.
 
 Sessions may contain sensitive source, prompts, command output, and secrets.
 Pithos creates `.pi/sessions/.gitignore` (`*` and `!.gitignore`) but never overwrites
@@ -344,8 +409,8 @@ sessions:
   storage: volume # project is the default when sessions is omitted
 ```
 
-Changing modes does not copy history. Existing volume sessions are hidden by the
-new mount, not deleted. After building the project image, stop all source and
+Changing modes does not copy history. Existing volume sessions stay in the
+volume, but aren't selected in project mode. After building the project image, stop all source and
 destination session writers and explicitly import history:
 
 ```sh

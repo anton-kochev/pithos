@@ -337,6 +337,7 @@ fn mounts_match(r: &Resource, actual: &Value, configured: &Value) -> bool {
             browser,
             extension_source,
             extensions_list_source,
+            web_search_source,
             ..
         } => {
             let mut expected = vec![
@@ -353,6 +354,9 @@ fn mounts_match(r: &Resource, actual: &Value, configured: &Value) -> bool {
             }
             if let Some(source) = extensions_list_source {
                 expected.push(bind(source, PI_EXTENSIONS_LIST, true));
+            }
+            if let Some(source) = web_search_source {
+                expected.push(bind(source, crate::web_search::SOCKET_TARGET, true));
             }
             expected
         }
@@ -530,6 +534,17 @@ impl ManagedDocker {
         request: &str,
         inputs: PiInputs<'_>,
     ) -> Result<(), ProbeError> {
+        self.start_pi_with_search_socket(resources, child, request, inputs, None)
+    }
+
+    pub(crate) fn start_pi_with_search_socket(
+        &mut self,
+        resources: &mut ResourceManifest,
+        child: &mut InteractiveChild,
+        request: &str,
+        inputs: PiInputs<'_>,
+        web_search_socket: Option<&Path>,
+    ) -> Result<(), ProbeError> {
         if self.has_child()
             || self.active_probe.is_some()
             || self.active_pi.is_some()
@@ -643,6 +658,21 @@ impl ManagedDocker {
         let extension_source = private_source(inputs.extension)?;
         let extensions_list_source = private_source(inputs.extensions_list)?;
         let env_source = private_source(inputs.env_file)?;
+        let web_search_source = web_search_socket
+            .map(|path| {
+                use std::os::unix::fs::FileTypeExt;
+                let source = path
+                    .to_str()
+                    .filter(|p| absolute_path(p))
+                    .ok_or(ProbeError::Failed)?;
+                if path.starts_with(&workspace.resolved)
+                    || !fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_socket())
+                {
+                    return Err(ProbeError::Workspace);
+                }
+                Ok(source.to_owned())
+            })
+            .transpose()?;
         self.probe_image(inputs.image, inputs.identity)?;
         let program = self.resolve_pi_command(inputs.image, inputs.command)?;
         let pi = PiSpec {
@@ -673,6 +703,7 @@ impl ManagedDocker {
                     extension_source: extension_source.clone(),
                     extensions_list_source: extensions_list_source.clone(),
                     env_source: env_source.clone(),
+                    web_search_source,
                 },
                 &program,
             )?,
@@ -782,6 +813,18 @@ impl ManagedDocker {
                     mount.into_string().map_err(|_| ProbeError::Failed)?,
                 ]);
             }
+        }
+        if let ProbeKind::Pi {
+            web_search_source: Some(source),
+            ..
+        } = &r.spec.operation
+        {
+            let mount = crate::web_search::socket_mount(Path::new(source))
+                .map_err(|_| ProbeError::Failed)?;
+            args.extend([
+                "--mount".into(),
+                mount.into_string().map_err(|_| ProbeError::Failed)?,
+            ]);
         }
         // Docker reads it on the host: no value lands in argv.
         if let Some(source) = &env_source {

@@ -16,6 +16,7 @@ const RESERVED: &[&str] = &[
     "/etc/pithos",
     "/run/pithos-broker",
     "/run/pithos-browser",
+    "/run/pithos-web-search.sock",
     "/proc",
     "/sys",
     "/dev",
@@ -47,6 +48,25 @@ pub fn target(workspace: &Path) -> Result<&str, WorkspacePathError> {
         Some(reserved) => Err(WorkspacePathError::Reserved(path.into(), reserved)),
         None => Ok(path),
     }
+}
+
+/// Whether a bind rooted here would contain the host path. Compare file
+/// identity too, since spelling is not unique on case-insensitive hosts.
+pub fn covers(root: &Path, path: &Path) -> std::io::Result<bool> {
+    if path.starts_with(root) {
+        return Ok(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::fs::symlink_metadata(root)?;
+        Ok(path.ancestors().any(|part| {
+            std::fs::symlink_metadata(part)
+                .is_ok_and(|m| m.dev() == root.dev() && m.ino() == root.ino())
+        }))
+    }
+    #[cfg(not(unix))]
+    Ok(false)
 }
 
 /// `--mount` value binding a [`target`]-checked path onto itself. Docker's CSV

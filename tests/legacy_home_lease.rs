@@ -42,10 +42,11 @@ fn legacy_child() {
         );
         return;
     }
+    let workspace = Path::new(&std::env::var_os("HOME").unwrap()).join("project");
     let result = pithos::docker::run_request(pithos::docker::RunRequest {
         image_tag: "pithos:project",
         project: "project",
-        workspace: Path::new("/workspace/project"),
+        workspace: &workspace,
         session_root: None,
         pithos_repo: None,
         extensions_manifest: None,
@@ -709,6 +710,7 @@ fn direct_browser_skill_helper_persists_own_marker() {
 #[test]
 fn run_persists_marker_before_initialization() {
     let home = tempfile::tempdir().unwrap();
+    fs::create_dir(home.path().join("project")).unwrap();
     let docker = home.path().join("docker");
     fs::write(
         &docker,

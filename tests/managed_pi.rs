@@ -83,14 +83,14 @@ impl Fixture {
         #[cfg(not(target_os = "linux"))]
         fs::write(root.path().join("gateway"), "10.1.2.3").unwrap();
         let script = r#"#!__PYTHON__
-import csv, hashlib, json, os, pathlib, signal, sys, time
+import csv, hashlib, json, os, pathlib, signal, socket, sys, time
 root=pathlib.Path(__ROOT__)
 a=sys.argv[5:]
 def emit(v): print(json.dumps(v))
 def opt(k): return a[a.index(k)+1]
 def mode(k): return (root/k).exists()
 # A workspace-grant coordinator always puts Pi on the owned run network.
-def on_network(): return mode('network') or mode('host-coordinator')
+def on_network(): return mode('network') or (mode('host-coordinator') and not mode('host-status'))
 def home_volume(): return __HOST_VOLUME__ if mode('host-coordinator') else 'pi-home'
 with (root/'calls').open('a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
 if a[0]=='info':
@@ -186,13 +186,16 @@ elif a[0]=='run':
             assert '--network=bridge' in a and '--network' not in a
         assert opt('--workdir')==str(root/'work,\"space')
         # A workspace-grant coordinator also mounts the broker's Pi extension.
-        extension=mode('host-coordinator') or mode('viewer-workspace')
+        extension=(mode('host-coordinator') and not mode('host-status')) or mode('viewer-workspace')
         # Its config declares pi.extensions: the entrypoint's manifest is a private read-only copy.
-        assert len(mounts)==3+(2 if mode('browser') or mode('viewer-runtime') else 0)+(2 if extension else 0)
+        extensions_list=mode('host-coordinator') or mode('viewer-workspace')
+        socket_mount=mode('host-search') and sys.platform.startswith('linux')
+        assert len(mounts)==3+(2 if mode('browser') or mode('viewer-runtime') else 0)+extension+extensions_list+socket_mount
         by={m['Destination']:m for m in mounts}
         if extension:
             assert by['/run/pithos-broker/extension.mjs']['Source']==str(root/'credential/pithos-broker.mjs')
             assert not by['/run/pithos-broker/extension.mjs']['RW']
+        if extensions_list:
             assert by['/etc/pithos/extensions.list']['Source']==str(root/'credential/extensions.list')
             assert not by['/etc/pithos/extensions.list']['RW']
             assert (root/'credential/extensions.list').read_text()=='x\tnpm:1.0\n'
@@ -232,7 +235,35 @@ elif a[0]=='run':
             assert a[:a.index(__IMAGE__)].count('--env-file')==1
             source=opt('--env-file')
             assert r['spec']['operation']['env_source']==source
-            assert ('GIT_CONFIG_COUNT=1\nGIT_CONFIG_KEY_0=safe.directory\nGIT_CONFIG_VALUE_0='+ws+'\n') in pathlib.Path(source).read_text()
+            env_file=pathlib.Path(source).read_text()
+            assert ('GIT_CONFIG_COUNT=1\nGIT_CONFIG_KEY_0=safe.directory\nGIT_CONFIG_VALUE_0='+ws+'\n') in env_file
+            if mode('host-search'):
+                env=dict(line.split('=',1) for line in env_file.splitlines())
+                assert env.get('PITHOS_WEB_SEARCH_STATUS')=='ready', 'no session search broker'
+                assert 'fixture-host-search-secret' not in env_file+json.dumps(manifest)+json.dumps(journal)+'\n'.join(a)
+                assert 'BRAVE_SEARCH_API_KEY' not in env and 'KEENABLE_API_KEY' not in env
+                bearer=env['PITHOS_WEB_SEARCH_TOKEN']
+                assert len(bearer)==64 and bearer not in json.dumps(manifest)+json.dumps(journal)+'\n'.join(a)
+                if socket_mount:
+                    target=env['PITHOS_WEB_SEARCH_SOCKET']
+                    assert target=='/run/pithos-web-search.sock' and not by[target]['RW']
+                    address=by[target]['Source']
+                    assert r['spec']['operation']['web_search_source']==address
+                    observed={'socket':address}
+                else:
+                    address=('127.0.0.1',int(env['PITHOS_WEB_SEARCH_PORT']))
+                    observed={'port':address[1]}
+                for label,request in [
+                    ('unauthorized', {'operation':'status','token':'0'*64}),
+                    ('status', {'operation':'status','token':bearer}),
+                    ('invalid', {'operation':'status','token':bearer,'url':'https://example.com/'}),
+                ]:
+                    with socket.socket(socket.AF_UNIX if socket_mount else socket.AF_INET) as peer:
+                        peer.settimeout(2)
+                        peer.connect(address)
+                        peer.sendall(json.dumps(dict(request,version=1)).encode()+b'\n')
+                        observed[label]=json.loads(peer.makefile('rb').readline())
+                (root/'search-observed').write_text(json.dumps(observed))
         if mode('pg-env'):
             source=str(root/'pg/pi-postgres.env')
             assert a[:a.index(__IMAGE__)].count('--env-file')==1 and opt('--env-file')==source
@@ -246,7 +277,7 @@ elif a[0]=='run':
         assert all(i<a.index(__IMAGE__) for i in extra_host_indices)
         assert not any(k.startswith('DOCKER_') or k.startswith('PITHOS_') for k in os.environ)
         if mode('host-coordinator'): assert (set(os.environ) - set(('__CF_USER_TEXT_ENCODING','SDKROOT','CPATH','LIBRARY_PATH','MANPATH'))).issubset({'LC_CTYPE'})
-        expected_cmd=(__PI_LAUNCH_ARGV__+['--extension','/run/pithos-broker/extension.mjs'] if mode('host-coordinator') else ['pi','private-host-prompt'] if mode('explicit') else ['pi','--skill','/run/pithos-browser/skills/browser-automation'] if mode('browser') else ['pi','--session-dir','/home/pi/.pi/agent/sessions'])
+        expected_cmd=(__PI_LAUNCH_ARGV__+(['--extension','/run/pithos-broker/extension.mjs'] if extension else []) if mode('host-coordinator') else ['pi','private-host-prompt'] if mode('explicit') else ['pi','--skill','/run/pithos-browser/skills/browser-automation'] if mode('browser') else ['pi','--session-dir','/home/pi/.pi/agent/sessions'])
         if mode('viewer-runtime') and not mode('viewer-empty-command'): expected_cmd=__PI_LAUNCH_ARGV__
         if mode('viewer-workspace'): expected_cmd+=['--extension','/run/pithos-broker/extension.mjs']
         if mode('viewer-runtime'): expected_cmd+=['--extension','/run/pithos-browser/skills/viewer.mjs']
@@ -417,6 +448,13 @@ fn pi_fixture() {
     }
     if mode.starts_with("host-coordinator") {
         f.mode("host-coordinator");
+        let search = mode.contains("-search");
+        if search {
+            f.mode("host-search");
+        }
+        if mode.ends_with("-status") {
+            f.mode("host-status");
+        }
         let browser = if mode.contains("interactive") {
             pithos::browser::BrowserSelection::Enabled(pithos::browser::BrowserMode::Interactive)
         } else if mode.contains("headless") {
@@ -481,6 +519,14 @@ elif a[0]=='run' and 'sha256:'+'c'*64 in a:
         }
         // This fixture runs in its own PTY subprocess, never in the concurrent test process.
         unsafe { std::env::set_var("HOME", f.root.path()) };
+        if search {
+            let config = f.root.path().join(".config/pithos/web");
+            fs::create_dir_all(&config).unwrap();
+            fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+            let config = config.join(".env");
+            fs::write(&config, "PITHOS_WEB_SEARCH_PROVIDER=brave\nBRAVE_SEARCH_API_KEY=fixture-host-search-secret\n").unwrap();
+            fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let yaml = HOST_CONFIG;
@@ -619,7 +665,11 @@ elif a[0]=='run' and 'sha256:'+'c'*64 in a:
         if debt {
             expected.push(StartStep::ClearedHomeLock);
         }
-        expected.extend([StartStep::Home, StartStep::Network, StartStep::Pi]);
+        expected.push(StartStep::Home);
+        if !mode.ends_with("-status") {
+            expected.push(StartStep::Network);
+        }
+        expected.push(StartStep::Pi);
         assert_eq!(*steps.borrow(), expected);
         let credential: Value = serde_json::from_slice(
             &fs::read(f.root.path().join("credential/broker-client.json")).unwrap(),
@@ -656,6 +706,30 @@ elif a[0]=='run' and 'sha256:'+'c'*64 in a:
         assert!(response.contains("\"phase\":\"ready\""), "{response:?}");
         assert_eq!(coordinator.terminal_exit_code(), Some(0));
         assert!(f.root.path().join("pi-ran").exists());
+        if search {
+            let observed: Value =
+                serde_json::from_slice(&fs::read(f.root.path().join("search-observed")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                observed["status"],
+                serde_json::json!({"ok": true, "provider": "brave"})
+            );
+            assert_eq!(
+                observed["unauthorized"],
+                serde_json::json!({"ok": false, "error": "unauthorized"})
+            );
+            assert_eq!(
+                observed["invalid"],
+                serde_json::json!({"ok": false, "error": "invalid_request"})
+            );
+            if cfg!(target_os = "linux") {
+                let socket = PathBuf::from(observed["socket"].as_str().unwrap());
+                assert!(!socket.exists(), "socket must be removed on cleanup");
+            } else {
+                let port = observed["port"].as_u64().unwrap() as u16;
+                assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+            }
+        }
         let calls = fs::read_to_string(f.root.path().join("calls")).unwrap();
         let calls: Vec<Vec<String>> = calls
             .lines()
@@ -691,15 +765,13 @@ elif a[0]=='run' and 'sha256:'+'c'*64 in a:
             })
             .unwrap();
         let pos = pi.iter().position(|arg| arg == image().as_str()).unwrap();
-        // The workspace grant loads the broker's app tools into Pi.
-        assert_eq!(
-            &pi[pos + 1..],
-            [
-                PI_LAUNCH_ARGV.as_slice(),
-                &["--extension", "/run/pithos-broker/extension.mjs"]
-            ]
-            .concat()
-        );
+        // Search never changes the workspace-only app tool policy.
+        let suffix = if mode.ends_with("-status") {
+            [].as_slice()
+        } else {
+            ["--extension", "/run/pithos-broker/extension.mjs"].as_slice()
+        };
+        assert_eq!(&pi[pos + 1..], [PI_LAUNCH_ARGV.as_slice(), suffix].concat());
         assert!(
             !f.root.path().join("credential/pithos-broker.mjs").exists(),
             "extension file removed at cleanup"
@@ -724,8 +796,11 @@ elif a[0]=='run' and 'sha256:'+'c'*64 in a:
         drop(coordinator);
         let manifest = ResourceManifest::open(&f.root.path().join("run"), "host-run").unwrap();
         assert!(manifest.is_settled());
-        // Account, home, credential, the workspace run network, and Pi.
-        assert_eq!(manifest.records().len(), 5);
+        // Account, home, credential and Pi; only workspace runs own a network.
+        assert_eq!(
+            manifest.records().len(),
+            4 + usize::from(!mode.ends_with("-status"))
+        );
         let lease = HomeLease::broker(&lease_root, &volume).unwrap();
         lease.finish().unwrap();
         return;
@@ -1366,6 +1441,7 @@ fn run_fixture(mode: &str) {
     let mut cmd = Command::new(std::env::current_exe().unwrap());
     cmd.args(["--exact", "pi_fixture", "--nocapture"])
         .env("PITHOS_PI_FIXTURE", mode)
+        .env_remove("PI_OFFLINE")
         .stdin(slave_file.try_clone().unwrap())
         .stdout(slave_file.try_clone().unwrap())
         .stderr(slave_file);
@@ -1424,6 +1500,12 @@ fn run_fixture(mode: &str) {
 #[test]
 fn offline_host_coordinator_admits_serves_status_runs_fixed_pi_and_settles() {
     run_fixture("host-coordinator");
+}
+
+#[test]
+fn managed_pi_gets_only_a_search_capability_until_cleanup() {
+    run_fixture("host-coordinator-search");
+    run_fixture("host-coordinator-search-status");
 }
 
 #[test]

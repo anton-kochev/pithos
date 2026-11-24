@@ -260,6 +260,22 @@ fn builds_use_private_selected_dockerfile_despite_public_emission_race() {
         }
         command.assert().success();
         let state = f.state();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let private = f
+                .root
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join(".pithos-run-files");
+            for build in state["builds"].as_array().unwrap() {
+                let context = std::path::Path::new(build["context"].as_str().unwrap());
+                assert!(
+                    context.starts_with(&private),
+                    "build context not in protected host state"
+                );
+            }
+        }
         let first = &state["builds"][0];
         let client = if flag.is_some() {
             BrowserClientLayer::Included

@@ -59,7 +59,10 @@ fn launch_modes_and_info_use_policy_without_rewriting_pi_options() {
         assert!(initialization < interactive);
         assert!(log.contains("--user\n501:20"));
         assert_eq!(
-            log.contains("target=/home/pi/.pi/agent/sessions"),
+            log.contains(&format!(
+                "PI_CODING_AGENT_SESSION_DIR={}/.pi/sessions",
+                project.canonicalize().unwrap().display()
+            )),
             storage == "project"
         );
         assert_eq!(project.join(".pi/sessions").exists(), storage == "project");

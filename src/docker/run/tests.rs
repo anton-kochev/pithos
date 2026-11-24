@@ -108,7 +108,7 @@ fn docker_home_initialization_repairs_and_preserves_nested_sessions() {
 }
 
 #[test]
-fn session_overlay_follows_home_and_preserves_command() {
+fn container_session_dir_preserves_explicit_pi_option() {
     let mut args = assemble_run_args(
         "pithos:demo",
         "demo",
@@ -118,19 +118,17 @@ fn session_overlay_follows_home_and_preserves_command() {
         RunEnvironment::default(),
         &["pi".into(), "--session-dir".into(), "/custom".into()],
     );
-    insert_session_mount(
+    insert_session_dir(
         &mut args,
         Path::new("/tmp/a space,comma:colon/.pi/sessions"),
-    )
-    .unwrap();
-    let home = args
-        .iter()
-        .position(|a| a == "pithos-home-demo:/home/pi")
-        .unwrap();
-    assert_eq!(args[home + 1], "--mount");
+        "/tmp/demo",
+    );
     assert_eq!(
-        args[home + 2],
-        "type=bind,\"source=/tmp/a space,comma:colon/.pi/sessions\",target=/home/pi/.pi/agent/sessions"
+        args[1..3],
+        [
+            "-e",
+            "PI_CODING_AGENT_SESSION_DIR=/tmp/a space,comma:colon/.pi/sessions/--tmp-demo--"
+        ]
     );
     assert_eq!(&args[args.len() - 3..], ["pi", "--session-dir", "/custom"]);
 }
@@ -372,23 +370,22 @@ fn assemble_run_args_binds_only_existing_layer3_items() {
         &[],
     );
 
-    let skills_bind = {
-        let mut s = OsString::from(td.path().join("pi-config/skills"));
-        s.push(":/home/pi/.pi/agent/skills:cached");
-        s
-    };
-    let prompts_bind = {
-        let mut s = OsString::from(td.path().join("pi-config/prompts"));
-        s.push(":/home/pi/.pi/agent/prompts:cached");
-        s
-    };
+    let skills_bind = format!(
+        "type=bind,\"source={}/pi-config/skills\",target=/home/pi/.pi/agent/skills,consistency=cached",
+        td.path().display()
+    );
+    let prompts_bind = format!(
+        "type=bind,\"source={}/pi-config/prompts\",target=/home/pi/.pi/agent/prompts,consistency=cached",
+        td.path().display()
+    );
     assert!(
-        args.windows(2).any(|w| w[0] == "-v" && w[1] == skills_bind),
+        args.windows(2)
+            .any(|w| w[0] == "--mount" && w[1] == skills_bind.as_str()),
         "missing skills bind in {args:?}"
     );
     assert!(
         args.windows(2)
-            .any(|w| w[0] == "-v" && w[1] == prompts_bind),
+            .any(|w| w[0] == "--mount" && w[1] == prompts_bind.as_str()),
         "missing prompts bind in {args:?}"
     );
     assert!(
@@ -497,8 +494,11 @@ fn assemble_run_args_inherits_clipboard_bridge_url_without_exposing_value() {
         "clipboard bearer token leaked into docker argv: {args:?}"
     );
     assert!(
-        args.windows(2)
-            .any(|w| { w[0] == "-v" && w[1] == "/tmp/pithos-xclip:/usr/local/bin/xclip:ro" }),
+        args.windows(2).any(|w| w
+            == [
+                "--mount",
+                "type=bind,\"source=/tmp/pithos-xclip\",target=/usr/local/bin/xclip,readonly"
+            ]),
         "missing clipboard shim bind in {args:?}"
     );
     if cfg!(target_os = "linux") {
@@ -601,14 +601,13 @@ fn assemble_run_args_mounts_extensions_manifest_when_file_exists() {
     );
 
     // Assert
-    let expected_bind = {
-        let mut s = OsString::from(&manifest);
-        s.push(":/etc/pithos/extensions.list:ro");
-        s
-    };
+    let expected_bind = format!(
+        "type=bind,\"source={}\",target=/etc/pithos/extensions.list,readonly",
+        manifest.display()
+    );
     assert!(
         args.windows(2)
-            .any(|w| w[0] == "-v" && w[1] == expected_bind),
+            .any(|w| w[0] == "--mount" && w[1] == expected_bind.as_str()),
         "missing extensions-manifest bind in {args:?}"
     );
 }

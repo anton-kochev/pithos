@@ -35,7 +35,10 @@ pub use managed::{
     ReadOnlyPreflight, VolumeName,
 };
 pub mod workspace;
-pub use run::{RunEnvironment, RunError, RunRequest, run, run_request, tmux_wrap};
+pub use run::{
+    RunEnvironment, RunError, RunRequest, run, run_pi_request, run_request, stage_run_directory,
+    stage_run_files, tmux_wrap,
+};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use selection::{DockerSelection, HostDockerSnapshot};
 pub use versions::{ExtractError, extract_versions};

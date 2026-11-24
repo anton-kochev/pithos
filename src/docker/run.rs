@@ -10,6 +10,9 @@ pub enum RunError {
     Spawn(#[from] std::io::Error),
     #[error(transparent)]
     Workspace(#[from] super::workspace::WorkspacePathError),
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[error(transparent)]
+    WebConfig(#[from] crate::web_search::WebConfigError),
     #[error("cannot initialize home volume {volume}: {detail}")]
     InitializeHome { volume: String, detail: String },
 }
@@ -27,7 +30,7 @@ pub struct RunRequest<'a> {
     pub image_tag: &'a str,
     pub project: &'a str,
     pub workspace: &'a Path,
-    /// Prepared host session directory. None retains volume-backed storage.
+    /// Prepared session directory inside the workspace. None retains volume-backed storage.
     pub session_root: Option<&'a Path>,
     pub pithos_repo: Option<&'a Path>,
     pub extensions_manifest: Option<&'a Path>,
@@ -41,11 +44,11 @@ pub struct RunRequest<'a> {
 /// caller's TTY. Blocks until the Docker client exits; returns its exit status
 /// for the caller to translate into the launcher's exit code.
 ///
-/// `pithos_repo` is the host path whose `pi-config/` subtree gets
+/// `pithos_repo` is the trusted host path whose `pi-config/` subtree gets
 /// bind-mounted as Layer 3 (per-item if the path exists). `None` skips
-/// Layer 3 entirely. `extensions_manifest` is the host path to the
-/// generated `.pithos.d/extensions.list`; when present, it is bind-mounted
-/// read-only at `/etc/pithos/extensions.list` so the container entrypoint
+/// Layer 3 entirely. `extensions_manifest` is a host-staged file outside
+/// any workspace mount; when present, it is bind-mounted read-only at
+/// `/etc/pithos/extensions.list` so the container entrypoint
 /// can reconcile declared Pi extensions on startup. Missing file is a
 /// silent skip. `environment` supplies Pithos-owned runtime integrations.
 /// Workspace `.env` files are not imported
@@ -58,11 +61,11 @@ pub struct RunRequest<'a> {
 /// docker run --rm -it --name ... --hostname ... --user 501:20
 ///            --mount type=bind,source=<PWD>,target=<PWD>
 ///            -v pithos-home-<project>:/home/pi
-///            [--mount type=bind,source=<session_root>,target=/home/pi/.pi/agent/sessions]
-///            [-v <PITHOS_REPO>/pi-config/... per Layer 3 item, if exists]
-///            [-v <extensions_manifest>:/etc/pithos/extensions.list:ro, if file exists]
+///            [-e PI_CODING_AGENT_SESSION_DIR=<session_root>/<encoded-cwd>]
+///            [--mount ... per Layer 3 item, if exists]
+///            [--mount ...target=/etc/pithos/extensions.list,readonly, if file exists]
 ///            -e COLORTERM=truecolor
-///            [-v <clipboard-shim>:/usr/local/bin/xclip:ro]
+///            [--mount ...target=/usr/local/bin/xclip,readonly]
 ///            [-e PITHOS_CLIPBOARD_URL]
 ///            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory
 ///            -e GIT_CONFIG_VALUE_0=<PWD>
@@ -96,18 +99,115 @@ pub fn run(
 /// query/settlement failures and unresolved or changed named contexts retain
 /// evidence without changing the observed interactive exit status.
 pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, RunError> {
-    super::workspace::target(request.workspace)?;
-    let mut args = assemble_run_args(
-        request.image_tag,
-        request.project,
-        request.workspace,
+    let pi_args = request.command.is_empty().then_some(&[][..]);
+    run_inner(request, pi_args)
+}
+
+/// Allocate scratch space that other Pi runs cannot bind as a workspace.
+pub fn stage_run_directory(workspace: &Path) -> std::io::Result<tempfile::TempDir> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        crate::web_search::new_run_dir(workspace)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = workspace;
+        tempfile::tempdir()
+    }
+}
+
+/// Stage the generated extension manifest outside all supported Pi binds.
+pub fn stage_run_files(workspace: &Path, manifest: &str) -> std::io::Result<tempfile::TempDir> {
+    let dir = stage_run_directory(workspace)?;
+    let path = dir.path().join("extensions.list");
+    std::fs::write(&path, manifest)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Only the file is bound; the parent stays private on the host.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(dir)
+}
+
+/// Launch Pi with its original argument tail, even when the command wraps it in tmux.
+pub fn run_pi_request(
+    request: RunRequest<'_>,
+    pi_args: &[String],
+) -> Result<std::process::ExitStatus, RunError> {
+    run_inner(request, Some(pi_args))
+}
+
+fn run_inner(
+    request: RunRequest<'_>,
+    pi_args: Option<&[String]>,
+) -> Result<std::process::ExitStatus, RunError> {
+    let target = super::workspace::target(request.workspace)?;
+    let workspace = request.workspace.canonicalize()?;
+    if workspace != request.workspace {
+        return Err(std::io::Error::other("expected a canonical workspace path").into());
+    }
+    // Discover once, then use these same canonical sources for every check
+    // and for Docker. No source name below the Pi-writable workspace can be
+    // reinterpreted by Docker as a host path after this check.
+    let mut mounts = optional_mounts(
         request.pithos_repo,
         request.extensions_manifest,
+        request.environment.clipboard_shim,
+    );
+    for bind in &mut mounts {
+        let source = bind.source.canonicalize()?;
+        if super::workspace::covers(&workspace, &source)?
+            || super::workspace::covers(&source, &workspace)?
+        {
+            return Err(
+                std::io::Error::other("auxiliary bind must be outside the Pi workspace").into(),
+            );
+        }
+        bind.source = source;
+    }
+    for file in mounts.iter().filter(|bind| bind.read_only) {
+        for directory in mounts.iter().filter(|bind| !bind.read_only) {
+            if super::workspace::covers(&directory.source, &file.source)? {
+                return Err(
+                    std::io::Error::other("auxiliary bind overlaps private run files").into(),
+                );
+            }
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let web_config = {
+        crate::web_search::guard_mounts(
+            std::iter::once(workspace.as_path()).chain(
+                mounts
+                    .iter()
+                    .filter(|bind| !bind.read_only)
+                    .map(|bind| bind.source.as_path()),
+            ),
+        )?;
+        crate::web_search::WebConfig::load(
+            std::iter::once(workspace.as_path())
+                .chain(mounts.iter().map(|bind| bind.source.as_path())),
+        )?
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = pi_args;
+    let mut args = render_run_args(
+        request.image_tag,
+        request.project,
+        &workspace,
+        std::process::id(),
+        &render_mounts(&mounts)?,
         request.environment,
         request.command,
     );
     if let Some(root) = request.session_root {
-        insert_session_mount(&mut args, root)?;
+        if !root.starts_with(&workspace) {
+            return Err(
+                std::io::Error::other("session directory must be inside the workspace").into(),
+            );
+        }
+        insert_session_dir(&mut args, root, target);
     }
     let home_use =
         super::LegacyHomeUse::acquire_current(&format!("pithos-home-{}", request.project))?;
@@ -121,10 +221,34 @@ pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, 
         browser.prepare_skill_mount(request.image_tag, request.project)?;
         browser.configure_dev(&mut args)?;
     }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let web_session = pi_args.map(|tail| {
+        // Pi checks the whole argv, including arguments after `--`.
+        let offline =
+            tail.iter().any(|arg| arg == "--offline") || crate::web_search::host_offline();
+        web_config.start(offline)
+    });
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let web_env = if let Some(session) = &web_session {
+        let mut options = Vec::new();
+        if let Some(source) = session.socket_source() {
+            options.extend(["--mount".into(), crate::web_search::socket_mount(source)?]);
+        }
+        let vars = session.environment();
+        for (key, _) in &vars {
+            options.extend(["-e".into(), (*key).into()]);
+        }
+        args.splice(1..1, options);
+        vars
+    } else {
+        Vec::new()
+    };
     // Stdio::inherit is the default; be explicit so a future refactor
     // pulling in stream_lines for "consistency with build" doesn't
     // accidentally swallow the user's TTY.
     let mut command = docker_run_command(&args, request.environment.clipboard_url);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    command.envs(web_env);
     command
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -134,7 +258,9 @@ pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, 
         let mut next_check = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if let Some(status) = child.try_wait()? {
-                finish_home_use(home_use, status, &args, completion);
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                drop(web_session);
+                finish_home_use(home_use, status, &args, completion, false);
                 return Ok(status);
             }
             if std::time::Instant::now() >= next_check {
@@ -154,7 +280,13 @@ pub fn run_request(request: RunRequest<'_>) -> Result<std::process::ExitStatus, 
         }
     }
     let status = command.status()?;
-    finish_home_use(home_use, status, &args, completion);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let wait_for_pi = matches!(&web_session, Some(crate::web_search::WebSession::Ready(_)));
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let wait_for_pi = false;
+    finish_home_use(home_use, status, &args, completion, wait_for_pi);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    drop(web_session);
     Ok(status)
 }
 
@@ -163,13 +295,26 @@ fn finish_home_use(
     status: std::process::ExitStatus,
     args: &[OsString],
     completion: HomeCompletion,
+    wait_for_pi: bool,
 ) {
     // A normal client exit (including detach) alone never proves absence.
     // Docker errors and signals still retain debt without querying the engine.
     let outcome = if !status.code().is_some_and(|code| (0..125).contains(&code)) {
         HomeSettlement::AbnormalExit
     } else {
-        match completion.verify(args) {
+        let mut evidence = completion.verify(args);
+        // The Docker client can detach without stopping Pi. Keep the host
+        // capability open while an unchanged selection still shows the run.
+        if wait_for_pi && status.success() && evidence == ContainerEvidence::Present {
+            eprintln!(
+                "Docker detached; Pithos will keep search available until the container exits."
+            );
+            while evidence == ContainerEvidence::Present {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                evidence = completion.verify(args);
+            }
+        }
+        match evidence {
             ContainerEvidence::Present => HomeSettlement::Present,
             ContainerEvidence::Unverified => HomeSettlement::Unverified,
             ContainerEvidence::Absent => match home_use.finish() {
@@ -235,10 +380,11 @@ impl HomeCompletion {
         }
     }
 
-    fn verify(self, args: &[OsString]) -> ContainerEvidence {
+    fn verify(&self, args: &[OsString]) -> ContainerEvidence {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.selection
+                .as_ref()
                 .map_or(ContainerEvidence::Unverified, |selection| {
                     selection.verify(args)
                 })
@@ -328,8 +474,8 @@ mod home_completion {
             })
         }
 
-        pub(super) fn verify(self, args: &[OsString]) -> ContainerEvidence {
-            if Self::capture().as_ref().ok() != Some(&self) {
+        pub(super) fn verify(&self, args: &[OsString]) -> ContainerEvidence {
+            if Self::capture().as_ref().ok() != Some(self) {
                 return ContainerEvidence::Unverified;
             }
             // Read the FINAL argv, after BrowserRun has replaced the generated
@@ -358,7 +504,7 @@ mod home_completion {
                 .arg(format!("name=^/{}$", name.replace('.', r"\.")))
                 .args(["--format", "{{.ID}}"]);
             let evidence = bounded_query(query);
-            if Self::capture().as_ref().ok() == Some(&self) {
+            if Self::capture().as_ref().ok() == Some(self) {
                 evidence
             } else {
                 ContainerEvidence::Unverified
@@ -603,6 +749,7 @@ pub fn tmux_wrap(cmd: &[String]) -> Vec<String> {
 /// Discover optional host mounts, then assemble the argv for `docker run`
 /// per FR-501/502/503. Split from [`run`] so the arg shape is unit-testable
 /// without a daemon. Stdio inheritance is enforced in [`run`], not here.
+#[cfg(test)]
 fn assemble_run_args(
     image_tag: &str,
     project: &str,
@@ -612,25 +759,32 @@ fn assemble_run_args(
     environment: RunEnvironment<'_>,
     cmd: &[String],
 ) -> Vec<OsString> {
-    let optional_mounts = discover_optional_mounts(pithos_repo, extensions_manifest);
+    let mounts = optional_mounts(pithos_repo, extensions_manifest, environment.clipboard_shim);
     render_run_args(
         image_tag,
         project,
         workspace,
         std::process::id(),
-        &optional_mounts,
+        &render_mounts(&mounts).unwrap(),
         environment,
         cmd,
     )
 }
 
-fn discover_optional_mounts(
-    pithos_repo: Option<&Path>,
+struct Bind {
+    source: std::path::PathBuf,
+    target: &'static str,
+    read_only: bool,
+}
+
+fn optional_mounts(
+    repo: Option<&Path>,
     extensions_manifest: Option<&Path>,
-) -> Vec<OsString> {
+    clipboard_shim: Option<&Path>,
+) -> Vec<Bind> {
     let mut mounts = Vec::new();
-    if let Some(repo) = pithos_repo {
-        for (src_rel, dst) in [
+    if let Some(repo) = repo {
+        [
             (
                 "pi-config/settings.json",
                 "/home/pi/.pi/agent/settings.json",
@@ -638,25 +792,49 @@ fn discover_optional_mounts(
             ("pi-config/skills", "/home/pi/.pi/agent/skills"),
             ("pi-config/prompts", "/home/pi/.pi/agent/prompts"),
             ("pi-config/themes", "/home/pi/.pi/agent/themes"),
-        ] {
-            let src = repo.join(src_rel);
-            if src.exists() {
-                let mut bind = OsString::from(src);
-                bind.push(":");
-                bind.push(dst);
-                bind.push(":cached");
-                mounts.push(bind);
+        ]
+        .into_iter()
+        .for_each(|(source, target)| {
+            let source = repo.join(source);
+            if source.exists() {
+                mounts.push(Bind {
+                    source,
+                    target,
+                    read_only: false,
+                });
             }
-        }
+        });
     }
-    if let Some(manifest) = extensions_manifest {
-        if manifest.exists() {
-            let mut bind = OsString::from(manifest);
-            bind.push(":/etc/pithos/extensions.list:ro");
-            mounts.push(bind);
+    for (source, target) in [
+        (
+            extensions_manifest.filter(|p| p.exists()),
+            "/etc/pithos/extensions.list",
+        ),
+        (clipboard_shim, "/usr/local/bin/xclip"),
+    ] {
+        if let Some(source) = source {
+            mounts.push(Bind {
+                source: source.to_owned(),
+                target,
+                read_only: true,
+            });
         }
     }
     mounts
+}
+
+fn render_mounts(mounts: &[Bind]) -> std::io::Result<Vec<OsString>> {
+    let mut args = Vec::new();
+    for bind in mounts {
+        let mut option = crate::sessions::bind_mount(&bind.source, bind.target)?;
+        option.push(if bind.read_only {
+            ",readonly"
+        } else {
+            ",consistency=cached"
+        });
+        args.extend(["--mount".into(), option]);
+    }
+    Ok(args)
 }
 
 /// Render a deterministic Docker argv from already-discovered host state.
@@ -692,18 +870,9 @@ fn render_run_args(
         home_bind.into(),
     ];
 
-    for bind in optional_mounts {
-        args.push("-v".into());
-        args.push(bind.clone());
-    }
+    args.extend_from_slice(optional_mounts);
     args.push("-e".into());
     args.push("COLORTERM=truecolor".into());
-    if let Some(shim) = environment.clipboard_shim {
-        let mut bind = OsString::from(shim);
-        bind.push(":/usr/local/bin/xclip:ro");
-        args.push("-v".into());
-        args.push(bind);
-    }
     if environment.clipboard_url.is_some() {
         if cfg!(target_os = "linux") {
             args.push("--add-host".into());
@@ -725,15 +894,14 @@ fn render_run_args(
     args
 }
 
-/// Overlay only the default session root; explicit Pi overrides remain untouched.
-fn insert_session_mount(args: &mut Vec<OsString>, root: &Path) -> Result<(), std::io::Error> {
-    let mount = crate::sessions::bind_mount(root, "/home/pi/.pi/agent/sessions")?;
-    let home = args
-        .iter()
-        .position(|a| a.to_string_lossy().ends_with(":/home/pi"))
-        .expect("home volume is always rendered");
-    args.splice(home + 1..home + 1, [OsString::from("--mount"), mount]);
-    Ok(())
+/// Pi opens its session directory through the existing workspace mount. Match
+/// Pi's default cwd encoding so --continue can still find pre-upgrade sessions.
+fn insert_session_dir(args: &mut Vec<OsString>, root: &Path, workspace: &str) {
+    let cwd = workspace.strip_prefix(['/', '\\']).unwrap_or(workspace);
+    let encoded = cwd.replace(['/', '\\', ':'], "-");
+    let mut value = OsString::from("PI_CODING_AGENT_SESSION_DIR=");
+    value.push(root.join(format!("--{encoded}--")));
+    args.splice(1..1, [OsString::from("-e"), value]);
 }
 
 #[cfg(test)]

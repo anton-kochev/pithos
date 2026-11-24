@@ -4,6 +4,7 @@ mod windows;
 
 use std::fs;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,14 +15,14 @@ const MAX_CLIPBOARD_BYTES: usize = 50 * 1024 * 1024;
 // fallback commands rather than granting it to each command independently.
 const CLIPBOARD_READ_BUDGET: Duration = Duration::from_secs(2);
 
-pub(super) fn read_png() -> Option<Vec<u8>> {
+pub(super) fn read_png(work_dir: &Path) -> Option<Vec<u8>> {
     let deadline = Instant::now() + CLIPBOARD_READ_BUDGET;
     if cfg!(target_os = "macos") {
-        macos::read_png(deadline)
+        macos::read_png(work_dir, deadline)
     } else if cfg!(target_os = "linux") {
         linux::read_png(deadline)
     } else if cfg!(target_os = "windows") {
-        windows::read_png(deadline)
+        windows::read_png(work_dir, deadline)
     } else {
         None
     }
@@ -37,11 +38,13 @@ pub(super) fn remaining_at(deadline: Instant, now: Instant) -> Option<Duration> 
         .filter(|remaining| !remaining.is_zero())
 }
 
-fn secure_temp_path(suffix: &str) -> Option<std::path::PathBuf> {
+// Conversion commands reopen the path by name. Use the run's protected
+// directory, not a system temp path that another workspace might mount.
+fn secure_temp_path(work_dir: &Path, suffix: &str) -> Option<PathBuf> {
     let named = tempfile::Builder::new()
         .prefix("pithos-clipboard-")
         .suffix(suffix)
-        .tempfile()
+        .tempfile_in(work_dir)
         .ok()?;
     let (file, path) = named.keep().ok()?;
     drop(file);
@@ -132,3 +135,16 @@ pub(super) fn looks_like_png(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 pub(super) use macos::escape_applescript_string;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conversion_files_use_the_supplied_private_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = secure_temp_path(dir.path(), ".png").unwrap();
+        assert_eq!(path.parent(), Some(dir.path()));
+        assert!(path.is_file());
+    }
+}

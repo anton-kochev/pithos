@@ -11,3 +11,5 @@ pub mod lifecycle;
 pub mod output;
 pub mod project;
 pub mod sessions;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod web_search;

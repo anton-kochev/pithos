@@ -149,7 +149,7 @@ pub fn ensure_image(cache_only: bool, rebuild: bool, style: Style) -> Result<Str
         "» browser:",
         "preparing pinned client/Chromium image (first build downloads browser and display dependencies)",
     );
-    let context = tempfile::tempdir()?;
+    let context = crate::docker::stage_run_directory(&std::env::current_dir()?)?;
     assets::extract_to(context.path())?;
     let status = Command::new("docker")
         .args(["build", "--pull=false", "-t", &tag, "-f"])

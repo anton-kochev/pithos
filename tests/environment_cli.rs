@@ -67,10 +67,16 @@ fn launches_do_not_automatically_import_workspace_env() {
             assert!(environment.contains(&"COLORTERM=truecolor"));
             // Pithos runs from the canonical cwd (macOS /var is /private/var).
             let workspace = project.canonicalize().unwrap();
-            let trust = pithos::docker::workspace::git_safe_directory(workspace.to_str().unwrap());
+            let workspace = workspace.to_str().unwrap();
+            let trust = pithos::docker::workspace::git_safe_directory(workspace);
+            let encoded = workspace[1..].replace(['/', '\\', ':'], "-");
+            let sessions =
+                format!("PI_CODING_AGENT_SESSION_DIR={workspace}/.pi/sessions/--{encoded}--");
             assert!(
                 environment.iter().all(|value| {
                     matches!(*value, "COLORTERM=truecolor" | "PITHOS_CLIPBOARD_URL")
+                        || (!arguments.contains(&"app") && *value == "PITHOS_WEB_SEARCH_STATUS")
+                        || *value == sessions
                         || trust.contains(&value.to_string())
                 }),
                 "{environment:?}"

@@ -1,9 +1,8 @@
 use super::{looks_like_png, read_file_limited, remaining_until, run_success, secure_temp_path};
-use std::fs;
-use std::time::Instant;
+use std::{fs, path::Path, time::Instant};
 
-pub(super) fn read_png(deadline: Instant) -> Option<Vec<u8>> {
-    let path = secure_temp_path(".png")?;
+pub(super) fn read_png(work_dir: &Path, deadline: Instant) -> Option<Vec<u8>> {
+    let path = secure_temp_path(work_dir, ".png")?;
     // System.Drawing refuses to save over an open/existing image file. The
     // name was created securely above; remove the placeholder before saving.
     let _ = fs::remove_file(&path);

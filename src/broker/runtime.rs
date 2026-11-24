@@ -2,8 +2,8 @@
 //!
 //! This module composes the existing lease, durable resource manifest, managed
 //! Docker adapter, credential, status sockets, and interactive Pi child. It does
-//! not bind a socket, install signal handlers, exit the process, or enable the
-//! production broker gate. Callers own any [`crate::lifecycle::SignalGuard`] and
+//! not choose the workspace broker endpoint, install signal handlers, exit the
+//! process, or enable the production broker gate. Callers own any [`crate::lifecycle::SignalGuard`] and
 //! must keep it installed until this owner reaches a terminal state.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
@@ -31,6 +31,7 @@ use crate::{
         InteractiveChild, InteractiveLimits, InteractivePoll, InteractiveReport, Outcome, Shutdown,
         ShutdownReason, StopReason,
     },
+    web_search::{self, WebConfig, WebSession},
 };
 use std::{io, net::SocketAddr, os::unix::process::ExitStatusExt, path::PathBuf, time::Duration};
 
@@ -276,6 +277,8 @@ pub struct BrokerRuntime {
     postgres_files_cleaned: bool,
     pi_env: Option<PiEnvFile>,
     pi_env_cleaned: bool,
+    web_config: Option<WebConfig>,
+    web_search: Option<WebSession>,
     viewer: Option<String>,
     lease: Option<HomeLease>,
     home_debt_cleared: usize,
@@ -448,6 +451,8 @@ impl BrokerRuntime {
             postgres_files_cleaned: true,
             pi_env: None,
             pi_env_cleaned: true,
+            web_config: None,
+            web_search: None,
             viewer: None,
             home_debt_cleared,
             lease: Some(lease),
@@ -497,6 +502,10 @@ impl BrokerRuntime {
             recovery: Some(Box::new(self)),
             prelease_docker: None,
         }
+    }
+
+    pub(super) fn configure_web_search(&mut self, config: WebConfig) {
+        self.web_config = Some(config);
     }
 
     /// Run the synchronous typed preflight, fixed account/home/credential probes,
@@ -625,9 +634,20 @@ impl BrokerRuntime {
                 ),
                 None => None,
             };
+            let web_section = self.web_config.take().map(|config| {
+                let offline = web_search::host_offline()
+                    || project_section.as_deref().is_some_and(|section| {
+                        section.lines().any(|line| {
+                            line.strip_prefix("PI_OFFLINE=")
+                                .is_some_and(web_search::offline_value)
+                        })
+                    });
+                self.web_search.insert(config.start(offline)).env_section()
+            });
             let sections: Vec<&str> = std::iter::once(&git_section)
                 .chain(&postgres_section)
                 .chain(&project_section)
+                .chain(&web_section)
                 .map(String::as_str)
                 .collect();
             self.pi_env_cleaned = false;
@@ -705,7 +725,7 @@ impl BrokerRuntime {
                 .map(|files| (files.client(), files.skills()));
             progress(StartStep::Pi);
             docker
-                .start_pi(
+                .start_pi_with_search_socket(
                     manifest,
                     child,
                     PI_REQUEST,
@@ -725,6 +745,7 @@ impl BrokerRuntime {
                         extensions_list: self.extensions_list.as_ref().map(ExtensionsList::path),
                         env_file: self.pi_env.as_ref().map(PiEnvFile::path),
                     },
+                    self.web_search.as_ref().and_then(WebSession::socket_source),
                 )
                 .map_err(failed(AdmissionStep::Pi))?;
             // Kept for app requests while Pi runs.
@@ -738,6 +759,7 @@ impl BrokerRuntime {
                 Ok(())
             }
             Err(error) => {
+                drop(self.web_search.take());
                 self.phase = RuntimePhase::RecoveryRequired;
                 Err(error)
             }
@@ -945,6 +967,7 @@ impl BrokerRuntime {
 
     fn poll_cleanup_inner(&mut self, explicit_retry: bool) -> RuntimePoll {
         drop(self.endpoint.take());
+        drop(self.web_search.take());
         self.connections.clear();
         if self.phase != RuntimePhase::RecoveryRequired {
             self.phase = RuntimePhase::Stopping;

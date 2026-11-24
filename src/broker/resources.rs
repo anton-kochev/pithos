@@ -103,9 +103,12 @@ pub(crate) enum ProbeKind {
         /// The `pi.extensions` manifest for the image entrypoint, bound read-only.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extensions_list_source: Option<String>,
-        /// Private env file for Pi (the run's database connection).
+        /// Private env file for Pi (the run's database and search connection).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         env_source: Option<String>,
+        /// Linux only: the bound search socket, not its bearer or provider key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        web_search_source: Option<String>,
     },
 }
 
@@ -166,6 +169,7 @@ impl ProbeKind {
                 extension_source,
                 extensions_list_source,
                 env_source,
+                web_search_source,
             } => {
                 let mapping_valid = match (host_access, gateway.as_deref()) {
                     (PiHostAccess::LinuxHostGateway, Some(value)) => value
@@ -180,13 +184,18 @@ impl ProbeKind {
                     && absolute_path(credential_source)
                     && !Path::new(credential_source).starts_with(workspace)
                     && network.as_deref().is_none_or(probe_name)
-                    && [extension_source, extensions_list_source, env_source]
-                        .iter()
-                        .all(|source| {
-                            source.as_deref().is_none_or(|p| {
-                                absolute_path(p) && !Path::new(p).starts_with(workspace)
-                            })
+                    && [
+                        extension_source,
+                        extensions_list_source,
+                        env_source,
+                        web_search_source,
+                    ]
+                    .iter()
+                    .all(|source| {
+                        source.as_deref().is_none_or(|p| {
+                            absolute_path(p) && !Path::new(p).starts_with(workspace)
                         })
+                    })
                     && (browser.is_none() || network.is_some())
                     && browser.as_ref().is_none_or(|b| {
                         [&b.client_source, &b.skills_source]
@@ -721,6 +730,7 @@ mod tests {
             extension_source: None,
             extensions_list_source: None,
             env_source: None,
+            web_search_source: None,
         };
         resource.digest = resource.spec.digest().unwrap();
         // Reproduce a durable legacy Pi intent with a matching old digest.
